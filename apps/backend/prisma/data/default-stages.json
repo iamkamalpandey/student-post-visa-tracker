@@ -1,0 +1,90 @@
+[
+  {
+    "key": "visa_approved",
+    "label": "Visa Approved",
+    "sequence": 1,
+    "category": "PRE_DEPARTURE",
+    "is_initial": true,
+    "is_terminal": false,
+    "color_hex": "#1976d2",
+    "icon": "VerifiedUser",
+    "sla_hours": null
+  },
+  {
+    "key": "pre_departure_briefing",
+    "label": "Pre-departure Briefing",
+    "sequence": 2,
+    "category": "PRE_DEPARTURE",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#0288d1",
+    "icon": "Campaign",
+    "sla_hours": 168
+  },
+  {
+    "key": "ticket_booked",
+    "label": "Ticket Booked",
+    "sequence": 3,
+    "category": "PRE_DEPARTURE",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#00897b",
+    "icon": "FlightTakeoff",
+    "sla_hours": 240
+  },
+  {
+    "key": "departed",
+    "label": "Departed",
+    "sequence": 4,
+    "category": "IN_TRANSIT",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#fbc02d",
+    "icon": "Flight",
+    "sla_hours": null
+  },
+  {
+    "key": "arrived",
+    "label": "Arrived",
+    "sequence": 5,
+    "category": "POST_ARRIVAL",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#f57c00",
+    "icon": "FlightLand",
+    "sla_hours": 24
+  },
+  {
+    "key": "accommodation_confirmed",
+    "label": "Accommodation Confirmed",
+    "sequence": 6,
+    "category": "POST_ARRIVAL",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#7b1fa2",
+    "icon": "Home",
+    "sla_hours": 72
+  },
+  {
+    "key": "university_registered",
+    "label": "University Registered",
+    "sequence": 7,
+    "category": "ENROLLED",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#5d4037",
+    "icon": "School",
+    "sla_hours": 168
+  },
+  {
+    "key": "enrolled",
+    "label": "Enrolled",
+    "sequence": 8,
+    "category": "ENROLLED",
+    "is_initial": false,
+    "is_terminal": true,
+    "color_hex": "#388e3c",
+    "icon": "CheckCircle",
+    "sla_hours": null
+  }
+]

@@ -1,0 +1,29 @@
+import type { Request, Response, NextFunction } from 'express';
+import { runIdempotent } from '../../shared/idempotencyHandler.js';
+import { readIfMatch } from '../../shared/ifMatch.js';
+import { noteService as svc } from './service.js';
+
+export const noteController = {
+  async create(req: Request, res: Response, next: NextFunction) {
+    try {
+      await runIdempotent(req, res, { scope: 'notes.create' }, () =>
+        svc.create(req as never, req.body),
+      );
+    } catch (e) { next(e); }
+  },
+  async list(req: Request, res: Response, next: NextFunction) {
+    try { res.json(await svc.list(req, req.query as never)); } catch (e) { next(e); }
+  },
+  async get(req: Request, res: Response, next: NextFunction) {
+    try { res.json(await svc.get(req, req.params['id']!)); } catch (e) { next(e); }
+  },
+  async update(req: Request, res: Response, next: NextFunction) {
+    try {
+      const expected = readIfMatch(req);
+      res.json(await svc.update(req as never, req.params['id']!, req.body, { expected }));
+    } catch (e) { next(e); }
+  },
+  async remove(req: Request, res: Response, next: NextFunction) {
+    try { await svc.remove(req as never, req.params['id']!); res.status(204).end(); } catch (e) { next(e); }
+  },
+};

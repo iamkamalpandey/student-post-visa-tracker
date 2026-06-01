@@ -1,0 +1,10 @@
+[
+  { "key": "father", "label": "Father", "is_guardian": true, "is_emergency": true, "is_sponsor": true },
+  { "key": "mother", "label": "Mother", "is_guardian": true, "is_emergency": true, "is_sponsor": true },
+  { "key": "spouse", "label": "Spouse", "is_guardian": false, "is_emergency": true, "is_sponsor": true },
+  { "key": "sibling", "label": "Sibling", "is_guardian": false, "is_emergency": true, "is_sponsor": false },
+  { "key": "guardian", "label": "Legal Guardian", "is_guardian": true, "is_emergency": true, "is_sponsor": true },
+  { "key": "sponsor", "label": "Sponsor", "is_guardian": false, "is_emergency": false, "is_sponsor": true },
+  { "key": "emergency_contact", "label": "Emergency Contact", "is_guardian": false, "is_emergency": true, "is_sponsor": false },
+  { "key": "employer", "label": "Employer", "is_guardian": false, "is_emergency": false, "is_sponsor": true }
+]

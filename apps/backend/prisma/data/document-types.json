@@ -1,0 +1,15 @@
+[
+  { "key": "passport", "label": "Passport", "is_required": true, "has_expiry": true, "retention_days": null },
+  { "key": "visa", "label": "Visa", "is_required": true, "has_expiry": true, "retention_days": null },
+  { "key": "ticket", "label": "Travel Ticket", "is_required": false, "has_expiry": false, "retention_days": 1825 },
+  { "key": "offer_letter", "label": "Offer Letter", "is_required": true, "has_expiry": false, "retention_days": 2555 },
+  { "key": "cas_or_i20", "label": "CAS / I-20", "is_required": true, "has_expiry": false, "retention_days": 2555 },
+  { "key": "medical_test", "label": "Medical Test Report", "is_required": false, "has_expiry": false, "retention_days": 1825 },
+  { "key": "insurance_policy", "label": "Insurance Policy", "is_required": true, "has_expiry": true, "retention_days": null },
+  { "key": "financial_proof", "label": "Financial Proof", "is_required": true, "has_expiry": false, "retention_days": 2555 },
+  { "key": "academic_transcript", "label": "Academic Transcript", "is_required": true, "has_expiry": false, "retention_days": 2555 },
+  { "key": "language_certificate", "label": "Language Test Certificate", "is_required": false, "has_expiry": false, "retention_days": 2555 },
+  { "key": "biometric_appointment", "label": "Biometric Appointment Letter", "is_required": false, "has_expiry": false, "retention_days": 1095 },
+  { "key": "police_clearance", "label": "Police Clearance Certificate", "is_required": false, "has_expiry": false, "retention_days": 2555 },
+  { "key": "accommodation_proof", "label": "Accommodation Proof", "is_required": false, "has_expiry": false, "retention_days": 1825 }
+]

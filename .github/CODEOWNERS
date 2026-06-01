@@ -1,0 +1,31 @@
+# SVT-AUDIT-OPS-2026-05 — codeowners for required-review gating.
+#
+# Replace placeholder team handles with real GitHub teams before enabling
+# branch protection. Until then this file documents intent; CODEOWNERS only
+# enforces when paired with "Require review from Code Owners" on main.
+
+# Catch-all — every PR needs at least one maintainer review.
+*                                       @kamal
+
+# Schema / migrations / RLS / encryption / auth — Sev1 surfaces.
+/apps/backend/prisma/                   @kamal
+/apps/backend/src/modules/auth/         @kamal
+/apps/backend/src/modules/audit/        @kamal
+/apps/backend/src/shared/encryption.ts  @kamal
+/apps/backend/src/shared/jwt.ts         @kamal
+/apps/backend/src/middlewares/auth.ts   @kamal
+/apps/backend/src/middlewares/security.ts @kamal
+
+# Privacy + regulatory surfaces.
+/apps/backend/src/modules/dsar/         @kamal
+/apps/backend/src/modules/breach/       @kamal
+/apps/backend/src/modules/consent/      @kamal
+/apps/backend/src/modules/sub-processors/ @kamal
+
+# Billing (money-touching). Always 2-eyes.
+/apps/backend/src/modules/billing/      @kamal
+/apps/backend/src/modules/commissions/  @kamal
+
+# CI / security workflows.
+/.github/                               @kamal
+/infra/                                 @kamal

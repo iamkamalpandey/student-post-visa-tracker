@@ -1,0 +1,96 @@
+name: db-backup
+
+# SVT-AUDIT-OPS-2026-05 — Daily encrypted Postgres snapshot to object storage.
+#
+# Runbook: infra/docs/runbooks/db-backup-restore.md
+# Script:  infra/scripts/backup-snapshot.sh
+#
+# NOT-YET-ENABLED. The `schedule:` trigger is intentionally commented out
+# until a human operator has:
+#   1. Created the `production` GitHub Environment with required reviewers.
+#   2. Added the secrets listed in `env:` below to that environment.
+#   3. Configured cloud-side IAM so the workflow can `aws s3 cp` into
+#      $BACKUP_BUCKET (e.g. via OIDC + an IAM role with PutObject on db/*).
+#   4. Generated an `age` keypair, sealed the identity in the break-glass
+#      KMS, and set the recipient public key as $BACKUP_PUBKEY.
+#   5. Run this workflow once via workflow_dispatch and confirmed an object
+#      lands in s3://$BACKUP_BUCKET/db/YYYY/MM/DD/ and is restorable with
+#      `infra/scripts/restore-from-snapshot.sh`.
+#
+# Once those are done, uncomment the `schedule:` block below.
+
+on:
+  # schedule:
+  #   - cron: '0 2 * * *'   # daily 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      label:
+        description: 'Object name label (default: svt-prod)'
+        required: false
+        default: 'svt-prod'
+
+permissions:
+  contents: read
+  id-token: write   # for AWS OIDC role assumption — keep even if you swap cloud
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: pg_dump -> age -> s3
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Postgres client + age
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client age
+          pg_dump --version
+          age --version
+
+      # Choose ONE of the two auth blocks below and delete the other.
+      # Default assumes AWS OIDC; swap for static credentials only if your
+      # bucket lives elsewhere (R2, Backblaze).
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BACKUP_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_BACKUP_REGION }}
+
+      # - name: Configure AWS credentials (static — fallback)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region:            ${{ secrets.AWS_BACKUP_REGION }}
+
+      - name: Make backup script executable
+        run: chmod +x infra/scripts/backup-snapshot.sh
+
+      - name: Take encrypted snapshot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_BUCKET: ${{ secrets.BACKUP_BUCKET }}
+          BACKUP_PUBKEY: ${{ secrets.BACKUP_PUBKEY }}
+          BACKUP_LABEL: ${{ inputs.label || 'svt-prod' }}
+          BACKUP_S3_TOOL: aws
+        run: ./infra/scripts/backup-snapshot.sh
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## DB backup"
+            echo ""
+            echo "- bucket: \`${{ secrets.BACKUP_BUCKET }}\`"
+            echo "- label: \`${{ inputs.label || 'svt-prod' }}\`"
+            echo "- runbook: infra/docs/runbooks/db-backup-restore.md"
+          } >> "$GITHUB_STEP_SUMMARY"

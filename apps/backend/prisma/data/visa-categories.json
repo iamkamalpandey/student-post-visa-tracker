@@ -1,0 +1,23 @@
+[
+  { "country_code": "US", "code": "F-1", "name": "F-1 Academic Student", "description": "Non-immigrant visa for full-time academic study at an SEVP-certified institution.", "is_student": true },
+  { "country_code": "US", "code": "F-2", "name": "F-2 Dependent of F-1", "description": "Dependent (spouse or unmarried child under 21) of an F-1 visa holder.", "is_student": false },
+  { "country_code": "US", "code": "J-1", "name": "J-1 Exchange Visitor", "description": "Exchange visitor visa for approved cultural and educational exchange programs.", "is_student": true },
+  { "country_code": "US", "code": "M-1", "name": "M-1 Vocational Student", "description": "Non-immigrant visa for vocational or non-academic study.", "is_student": true },
+  { "country_code": "GB", "code": "Student", "name": "Student Visa", "description": "UK Student route visa for those aged 16 or over (formerly Tier 4 General).", "is_student": true },
+  { "country_code": "GB", "code": "ChildStudent", "name": "Child Student Visa", "description": "UK Child Student route visa for ages 4-17 attending an independent school.", "is_student": true },
+  { "country_code": "GB", "code": "StudentDependant", "name": "Student Dependant Visa", "description": "Visa for partners and children of UK Student route holders.", "is_student": false },
+  { "country_code": "AU", "code": "sub-500", "name": "Subclass 500 Student Visa", "description": "Australian Student Visa for full-time study in a registered course.", "is_student": true },
+  { "country_code": "AU", "code": "sub-590", "name": "Subclass 590 Student Guardian", "description": "Visa to accompany a student under 18 or those needing care while studying in Australia.", "is_student": false },
+  { "country_code": "AU", "code": "sub-485", "name": "Subclass 485 Temporary Graduate (PSW)", "description": "Post-Study Work visa for international students after completing eligible studies.", "is_student": true },
+  { "country_code": "CA", "code": "StudyPermit", "name": "Study Permit", "description": "Permit to study at a Designated Learning Institution in Canada.", "is_student": true },
+  { "country_code": "CA", "code": "PGWP", "name": "Post-Graduation Work Permit", "description": "Open work permit for graduates of eligible Canadian post-secondary programs.", "is_student": true },
+  { "country_code": "CA", "code": "IEC", "name": "International Experience Canada", "description": "Working holiday / young professional / international co-op visa under IEC.", "is_student": false },
+  { "country_code": "NZ", "code": "StudentVisa", "name": "Student Visa", "description": "New Zealand visa to study full-time at an approved institution.", "is_student": true },
+  { "country_code": "DE", "code": "16a", "name": "Student Visa § 16a", "description": "German residence permit for studies at a state-recognised higher education institution.", "is_student": true },
+  { "country_code": "DE", "code": "16b", "name": "Language Course / School Visa § 16b", "description": "German residence permit for language courses or school attendance.", "is_student": true },
+  { "country_code": "IE", "code": "Stamp2", "name": "Stamp 2 (Student)", "description": "Irish immigration permission for full-time study on the ILEP list.", "is_student": true },
+  { "country_code": "IE", "code": "Stamp2A", "name": "Stamp 2A (Limited Study)", "description": "Irish immigration permission for non-ILEP / semester-abroad students; no work allowed.", "is_student": true },
+  { "country_code": "FR", "code": "VLS-TS", "name": "Long-stay Student Visa (VLS-TS)", "description": "French long-stay visa equivalent to a residence permit for students.", "is_student": true },
+  { "country_code": "NL", "code": "MVV-Student", "name": "MVV Student Residence Permit", "description": "Netherlands MVV / residence permit for full-time study at a recognised institution.", "is_student": true },
+  { "country_code": "JP", "code": "Student", "name": "Student Visa (Ryugaku)", "description": "Japanese student status of residence for higher education and language schools.", "is_student": true }
+]

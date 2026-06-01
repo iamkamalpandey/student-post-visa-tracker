@@ -1,0 +1,115 @@
+# Production-shaped compose for self-hosted (Hetzner, VPS, single-host) deploys.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from the base dev compose:
+#   - adminer dropped (no DB browser in prod).
+#   - postgres + redis bind only to localhost (no external port exposure).
+#   - clamav: same image but pinned tag + bind only to backend network.
+#   - backend + frontend services added, built locally from app Dockerfiles.
+#   - secrets loaded from .env files mounted read-only.
+#   - healthchecks gate orchestration order.
+#
+# What this DOES NOT replace:
+#   - Managed Postgres (Neon/Supabase/RDS) — preferred for PITR + WAL backups.
+#   - KMS — the KMS_KEK_BASE64 env here is a STOP-GAP; switch to AWS/GCP KMS
+#     before handling real customer PII.
+#   - TLS termination — front this with Caddy/Traefik/nginx for HTTPS + HSTS.
+
+services:
+  postgres:
+    # Inherit base image + volume; just lock the port to localhost.
+    ports: !override
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: ${PG_OWNER:?PG_OWNER required}
+      POSTGRES_PASSWORD: ${PG_OWNER_PASSWORD:?PG_OWNER_PASSWORD required}
+      POSTGRES_DB: ${PG_DB:?PG_DB required}
+
+  adminer: !reset {}
+
+  redis:
+    ports: !override
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+
+  clamav:
+    ports: !override
+      - "127.0.0.1:3310:3310"
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: spv-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      clamav:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      HOST: 0.0.0.0
+      LOG_LEVEL: info
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL required}
+      DATABASE_MIGRATE_URL: ${DATABASE_MIGRATE_URL:?DATABASE_MIGRATE_URL required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL required}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?JWT_PRIVATE_KEY required}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?JWT_PUBLIC_KEY required}
+      JWT_KID: ${JWT_KID:?JWT_KID required}
+      JWT_ISSUER: ${JWT_ISSUER:-spv-api}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-spv-app}
+      KMS_KEK_BASE64: ${KMS_KEK_BASE64:?KMS_KEK_BASE64 required (32+ chars)}
+      SEED_TENANT_NAME: ${SEED_TENANT_NAME:-Default Tenant}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?SEED_ADMIN_EMAIL required}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD required}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
+      STORAGE_LOCAL_ROOT: /app/storage
+      RATE_LIMIT_GLOBAL_PER_MINUTE: ${RATE_LIMIT_GLOBAL_PER_MINUTE:-600}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-5}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-log}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:?EMAIL_FROM required}
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - spv_backend_storage:/app/storage
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/api/v1/health/readyz',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL required}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Student Post-Visa Tracker}
+    container_name: spv-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  spv_backend_storage:

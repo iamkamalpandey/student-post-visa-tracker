@@ -1,0 +1,17 @@
+{
+  "$comment": "baseline 2026-05-21 - review before next release. Acknowledged dev-only advisories that the CI gate (--prod --audit-level=high) already filters out. Add IDs here if a HIGH/CRITICAL prod advisory ever needs a temporary exception (with justification + expiry).",
+  "low": false,
+  "moderate": false,
+  "high": true,
+  "critical": true,
+  "report-type": "important",
+  "package-manager": "pnpm",
+  "allowlist": [
+    "GHSA-67mh-4wv8-2f99",
+    "GHSA-4w7w-66w2-5vf9"
+  ],
+  "$allowlistRationale": {
+    "GHSA-67mh-4wv8-2f99": "esbuild <=0.24.2 dev-server CORS - vitest>vite transitive, dev-only, no runtime exposure. Tracking vitest v3 bump for permanent fix.",
+    "GHSA-4w7w-66w2-5vf9": "vite <=6.4.1 .map path traversal - vitest>vite transitive, dev-only, dev server never run with --host in CI. Tracking vitest v3 bump for permanent fix."
+  }
+}

@@ -1,0 +1,81 @@
+name: frontend-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/frontend/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    paths:
+      - 'apps/frontend/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/frontend-ci.yml'
+
+# SVT-SEC-2026-05 — least-privilege workflow token (see backend-ci.yml).
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: lint + typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000/api/v1
+      NEXT_TELEMETRY_DISABLED: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read .nvmrc
+        id: nvm
+        run: echo "version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nvm.outputs.version }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # SVT-SEC-2026-05 (P1-D3) — PR-time supply-chain gate. Mirrors the
+      # nightly job in security.yml so HIGH/CRITICAL prod advisories block
+      # merges, not just nightly main. --prod scopes out dev-only chains
+      # (vitest>vite, etc.) that the runtime image never ships.
+      - name: pnpm audit (prod, fail on HIGH/CRITICAL)
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Build shared packages
+        run: |
+          pnpm --filter @spv/zod-schemas \
+               --filter @spv/api-types \
+               --filter @spv/utils \
+               --filter @spv/tsconfig \
+               --filter @spv/eslint-config \
+               build
+
+      - name: Lint
+        run: pnpm --filter frontend lint
+
+      - name: Typecheck
+        run: pnpm --filter frontend typecheck
+
+      - name: Build
+        run: pnpm --filter frontend build

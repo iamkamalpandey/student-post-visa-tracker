@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: spv
+      POSTGRES_PASSWORD: spv_dev_password
+      POSTGRES_DB: spv_dev
+    ports:
+      - "7654:5432"
+    volumes:
+      - spv_pg_data:/var/lib/postgresql/data
+      - ./infra/docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spv -d spv_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  adminer:
+    image: adminer:latest
+    container_name: spv-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: spv-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - spv_redis_data:/data
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: spv-clamav
+    restart: unless-stopped
+    ports:
+      - "3310:3310"
+    volumes:
+      - spv_clamav_data:/var/lib/clamav
+
+volumes:
+  spv_pg_data:
+  spv_redis_data:
+  spv_clamav_data:

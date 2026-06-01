@@ -1,0 +1,2811 @@
+// Student Post-Visa Tracker — full v3 schema.
+// Conventions: snake_case columns, PascalCase models, UUID v7 PKs (uuid_generate_v7() preferred,
+// app-side fallback via @spv/utils.uuidv7), @db.Timestamptz UTC timestamps, money as BigInt minor
+// units + ISO 4217 FK, phones E.164, addresses normalised via shared Address. Every business
+// table carries: tenant_id, version, created_at, created_by_id, updated_at, updated_by_id,
+// deleted_at, deleted_by_id. RLS policies enforce tenant isolation in DB; Prisma client runs as
+// non-superuser app role.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native"]
+  engineType    = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// 1. Tenant, Users, Auth
+// ============================================================================
+
+model Tenant {
+  id                    String   @id @default(uuid()) @db.Uuid
+  name                  String
+  legal_name            String?
+  default_locale        String   @default("en")
+  default_timezone      String   @default("UTC")
+  default_currency      String   @default("USD") @db.Char(3)
+  data_residency_region String   @default("eu-west-1")
+  // SVT-WAVE15-FROM-2026-05 — per-tenant FROM address for outbound EMAIL.
+  // Null falls back to env.EMAIL_FROM. Must be a verified sender domain on
+  // the Resend account (set at tenant onboarding).
+  email_from            String?
+  // SVT-WAVE51-DEFAULT-CHANNEL-2026-05 — default outbound channel for new
+  // message templates; FE seeds the channel select on dialog mount.
+  // Column exists in DB (migration 235974 applied) but Prisma model field
+  // is reintroduced once we can regen the client (`pnpm prisma generate`
+  // requires backend dev server stopped on Windows due to query-engine
+  // binary lock).
+  // default_message_channel String @default("EMAIL")
+  // SVT-WAVE-BILLING-2026-05 — opt-in flag for school/college-style billing.
+  // Default false keeps every existing consultancy tenant on the flat-tuition
+  // flow. When true, ACCEPTED→ENROLLED auto-generates a FeePlan and the FE
+  // exposes the Billing tab + admin overview.
+  billing_enabled       Boolean  @default(false)
+  // SVT-SEC-MFA-ADMIN-POLICY-2026-05 (P1-A6) — opt-in tenant policy. When
+  // true, requireMfa-gated routes reject ADMIN role requests with 403
+  // `mfa_required_for_admin` until the acting admin has enrolled MFA. Default
+  // false preserves the legacy pass-through for non-enrolled users so tenants
+  // that haven't rolled MFA out yet keep working; flipping the toggle in
+  // /settings → Security forces every admin to enrol before they can act.
+  // Non-admin roles are untouched by this flag.
+  require_mfa_for_admins Boolean  @default(false)
+  is_active             Boolean  @default(true)
+  created_at            DateTime @default(now()) @db.Timestamptz
+  updated_at            DateTime @updatedAt @db.Timestamptz
+
+  users           User[]
+  students        Student[]
+  stages          LifecycleStage[]
+  institutions    Institution[]
+  programs        Program[]
+  documents       Document[]
+  addresses       Address[]
+  sub_processors  SubProcessor[]
+  consents        ConsentRecord[]
+  dsar_requests   DSARRequest[]
+  audit_logs        AuditLog[]
+  super_agents      SuperAgent[]
+  super_agent_types SuperAgentType[]
+  // SVT-WAVE-BILLING-2026-05 — billing aggregate roots.
+  fee_plans          FeePlan[]
+  fee_installments   FeeInstallment[]
+  payments           Payment[]
+  payment_allocations PaymentAllocation[]
+  fee_adjustments    FeeAdjustment[]
+  refunds            Refund[]
+  student_credits    StudentCredit[]
+  password_reset_tokens PasswordResetToken[]
+  audit_anchors         AuditAnchor[]
+
+  @@map("tenants")
+}
+
+model SubProcessor {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenant_id    String    @db.Uuid
+  name         String
+  purpose      String
+  region       String
+  contract_url String?
+  added_at     DateTime  @default(now()) @db.Timestamptz
+  removed_at   DateTime? @db.Timestamptz
+
+  tenant       Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  // Reverse relation for SuperAgent.sub_processor_id — set when a super-agent
+  // handling student PII is registered as a sub-processor for GDPR/DPDP compliance.
+  super_agents SuperAgent[]
+
+  @@index([tenant_id])
+  @@map("sub_processors")
+}
+
+enum UserRole {
+  ADMIN
+  COUNSELLOR
+  VIEWER
+}
+
+// SVT-WAVE14-DIGEST-2026-05 — email delivery cadence per user.
+enum NotificationDigest {
+  PER_EVENT
+  DAILY
+  OFF
+}
+
+model User {
+  id                  String    @id @default(uuid()) @db.Uuid
+  tenant_id           String    @db.Uuid
+  email               String
+  email_verified_at   DateTime? @db.Timestamptz
+  password_hash       String
+  given_name          String
+  family_name         String
+  display_name        String?
+  role                UserRole  @default(COUNSELLOR)
+  locale              String    @default("en")
+  timezone            String    @default("UTC")
+  is_active           Boolean   @default(true)
+  last_login_at       DateTime? @db.Timestamptz
+  failed_login_count  Int       @default(0)
+  locked_until        DateTime? @db.Timestamptz
+  password_changed_at DateTime? @db.Timestamptz
+  mfa_enabled         Boolean   @default(false)
+  mfa_secret_enc      Bytes?
+  // SVT-SEC-MFA-RECOVERY-2026-05 — comma-joined sha256 hex hashes (64 chars each)
+  // of the 10 single-use recovery codes minted at enrolment. Each successful
+  // consumption removes one hash from the list. Cleared on disableMfa. Plain
+  // text (not envelope-encrypted) because the values are already 256-bit hashes
+  // of high-entropy codes; rainbow-table attacks aren't viable.
+  mfa_recovery_hashes String?
+  // SVT-WAVE8-EMAIL-2026-05 — opt-out per user. Reminder dispatcher checks
+  // this before fanning out an EMAIL alongside the IN_APP notification.
+  // Defaults to true so existing users keep getting alerted.
+  notifications_email_enabled Boolean @default(true)
+  // SVT-WAVE14-DIGEST-2026-05 — delivery cadence for EMAIL.
+  //   PER_EVENT — send immediately as each event fires (existing behavior)
+  //   DAILY     — collapse a day's events into one summary email at 08:00 UTC
+  //   OFF       — same as notifications_email_enabled=false (compat shorthand)
+  notifications_digest        NotificationDigest @default(PER_EVENT)
+  created_at          DateTime  @default(now()) @db.Timestamptz
+  updated_at          DateTime  @updatedAt @db.Timestamptz
+  deleted_at          DateTime? @db.Timestamptz
+
+  tenant            Tenant         @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  refresh_tokens    RefreshToken[]
+  password_reset_tokens PasswordResetToken[]
+  assigned_students Student[]      @relation("AssignedCounsellor")
+  assigned_reminders Reminder[]    @relation("ReminderAssignee")
+  inbox_messages    CommsMessage[] @relation("CommsRecipient")
+
+  // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
+  //   * users_tenant_created_at_active_idx — partial (deleted_at IS NULL) on
+  //     (tenant_id, created_at DESC, id DESC) for list pagination.
+  //   * users_search_trgm_idx — GIN trgm on lower(email||given_name||family_name)
+  //     for ILIKE search. Partial WHERE deleted_at IS NULL.
+  // Both are SQL-only because Prisma @@index can't express partial indexes or
+  // expression-based GIN indexes.
+  @@unique([tenant_id, email])
+  @@index([tenant_id, role])
+  @@index([deleted_at])
+  @@index([email])
+  @@map("users")
+}
+
+model RefreshToken {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenant_id      String    @db.Uuid
+  user_id        String    @db.Uuid
+  token_hash     String    @unique
+  device_id      String?
+  ua_hash        String?
+  ip_subnet      String?
+  issued_at      DateTime  @default(now()) @db.Timestamptz
+  expires_at     DateTime  @db.Timestamptz
+  revoked_at     DateTime? @db.Timestamptz
+  // SVT-SEC-IDLE-2026-05 — bumped on every authenticated request (throttled 60s)
+  // and on every successful refresh. Older than IDLE_TIMEOUT_MIN → refresh rejected.
+  last_used_at   DateTime? @db.Timestamptz
+  replaced_by_id String?   @db.Uuid
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([tenant_id])
+  @@index([user_id, last_used_at])
+  @@map("refresh_tokens")
+}
+
+model AccessTokenDenylist {
+  jti        String   @id
+  user_id    String   @db.Uuid
+  tenant_id  String   @db.Uuid
+  expires_at DateTime @db.Timestamptz
+
+  @@map("access_token_denylist")
+}
+
+// SVT-SEC-2026-05 — Self-service password reset (NIST 800-63B + OWASP ASVS).
+// Token is sha256-hashed at rest; raw token only delivered via email + URL.
+// Single-use (consumed_at), 30-min TTL.
+// SVT-AUDIT-WORM-2026-05 — Append-only Merkle roots of the audit chain.
+// One row per (tenant_id, anchored_at). DB trigger blocks UPDATE/DELETE.
+// Daily cron (hashAnchor.ts) inserts; external WORM replication reads.
+model AuditAnchor {
+  id                    String    @id @default(uuid()) @db.Uuid
+  tenant_id             String?   @db.Uuid
+  root_hash             String    @db.Char(64)
+  entries_count         Int
+  // Delta watermark — points at the last audit_logs row folded into this
+  // anchor's root_hash. The next nightly run scans only rows past this point
+  // and folds them onto root_hash, instead of re-hashing the entire chain.
+  // Null on legacy rows written before SVT-PERF-AUDIT-ANCHOR-DELTA-2026-05;
+  // computeTenantRoots() falls back to a from-scratch hash when null.
+  last_entry_id         String?   @db.Uuid
+  last_entry_created_at DateTime? @db.Timestamptz
+  anchored_at           DateTime  @default(now()) @db.Timestamptz
+
+  tenant Tenant? @relation(fields: [tenant_id], references: [id], onDelete: SetNull)
+
+  @@unique([tenant_id, anchored_at])
+  @@index([anchored_at])
+  @@map("audit_anchors")
+}
+
+model PasswordResetToken {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenant_id       String    @db.Uuid
+  user_id         String    @db.Uuid
+  token_hash      String    @unique @db.Char(64)
+  requested_at    DateTime  @default(now()) @db.Timestamptz
+  expires_at      DateTime  @db.Timestamptz
+  consumed_at     DateTime? @db.Timestamptz
+  invalidated_at  DateTime? @db.Timestamptz
+  ip_hash         String?
+  ua_hash         String?
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [user_id],   references: [id], onDelete: Cascade)
+
+  @@index([user_id, expires_at])
+  @@index([tenant_id])
+  @@map("password_reset_tokens")
+}
+
+enum LawfulBasis {
+  CONSENT
+  CONTRACT
+  LEGAL_OBLIGATION
+  VITAL_INTEREST
+  PUBLIC_TASK
+  LEGITIMATE_INTEREST
+}
+
+model ConsentRecord {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenant_id    String    @db.Uuid
+  subject_type String
+  subject_id   String    @db.Uuid
+  purpose      String
+  lawful_basis LawfulBasis
+  granted      Boolean
+  evidence     Json?
+  granted_at   DateTime  @default(now()) @db.Timestamptz
+  revoked_at   DateTime? @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@index([subject_type, subject_id])
+  @@index([tenant_id])
+  @@map("consent_records")
+}
+
+enum DSARType {
+  ACCESS
+  PORTABILITY
+  ERASURE
+  RECTIFICATION
+  RESTRICTION
+  OBJECTION
+}
+
+enum DSARStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+  EXPIRED
+}
+
+model DSARRequest {
+  id                 String     @id @default(uuid()) @db.Uuid
+  tenant_id          String     @db.Uuid
+  subject_type       String
+  subject_id         String     @db.Uuid
+  type               DSARType
+  status             DSARStatus @default(PENDING)
+  requested_at       DateTime   @default(now()) @db.Timestamptz
+  due_by             DateTime   @db.Timestamptz
+  completed_at       DateTime?  @db.Timestamptz
+  export_storage_key String?
+  notes              String?
+
+  tenant Tenant @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+
+  @@index([tenant_id, status])
+  @@index([subject_type, subject_id])
+  @@map("dsar_requests")
+}
+
+model BreachIncident {
+  id                      String    @id @default(uuid()) @db.Uuid
+  tenant_id               String?   @db.Uuid
+  detected_at             DateTime  @db.Timestamptz
+  due_by                  DateTime  @db.Timestamptz                              // GDPR Art. 33 — 72h from detected_at
+  reported_at             DateTime? @db.Timestamptz
+  severity                String
+  affected_subjects_count Int?
+  description             String
+  remediation             String?
+  notification_sent       Boolean   @default(false)
+  closed_at               DateTime? @db.Timestamptz
+
+  @@index([tenant_id])
+  @@index([due_by])                                                              // SLA dashboard / overdue list
+  @@map("breach_incidents")
+}
+
+// ============================================================================
+// 2. Reference / Lookup
+// ============================================================================
+
+model Country {
+  code_alpha2  String  @id @db.Char(2)
+  code_alpha3  String  @unique @db.Char(3)
+  numeric_code String  @unique @db.Char(3)
+  name         String
+  dial_code    String
+  is_active    Boolean @default(true)
+
+  addresses               Address[]
+  students                Student[]
+  visas                   StudentVisa[]
+  institutions            Institution[]
+  visa_categories         VisaCategory[]
+  airports                AirportIATA[]
+
+  @@map("countries")
+}
+
+model Currency {
+  code       String  @id @db.Char(3)
+  name       String
+  minor_unit Int     @default(2)
+  symbol     String?
+  // SVT-LOOKUP-FILTERS-2026-05: deprecated ISO codes (ZRZ, ROL, TRL, XEU,
+  // EEK, LVL, LTL, MTL, SIT, SKK, CYP, XAG, XAU, XPD, XPT) are seeded with
+  // is_active = false so the picker stops emitting them. Currency is a
+  // global table (not tenant-scoped) so no RLS migration is required.
+  is_active  Boolean @default(true)
+
+  finance_items     FinanceItem[]
+  program_fees      ProgramFee[]
+  commission_claims CommissionClaim[]
+
+  @@map("currencies")
+}
+
+model IscedField {
+  code  String @id @db.Char(4)
+  label String
+
+  @@map("isced_fields")
+}
+
+model AirlineIATA {
+  iata String @id @db.Char(2)
+  name String
+
+  @@map("airlines_iata")
+}
+
+model AirportIATA {
+  iata         String  @id @db.Char(3)
+  name         String
+  city         String
+  country_code String  @db.Char(2)
+
+  country Country @relation(fields: [country_code], references: [code_alpha2])
+
+  @@index([country_code])
+  @@map("airports_iata")
+}
+
+model VisaCategory {
+  id           String  @id @default(uuid()) @db.Uuid
+  country_code String  @db.Char(2)
+  code         String
+  name         String
+  description  String?
+  is_student   Boolean @default(true)
+  is_active    Boolean @default(true)
+
+  country Country       @relation(fields: [country_code], references: [code_alpha2])
+  visas   StudentVisa[]
+
+  @@unique([country_code, code])
+  @@map("visa_categories")
+}
+
+model RelationshipType {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenant_id    String  @db.Uuid
+  key          String
+  label        String
+  is_guardian  Boolean @default(true)
+  is_emergency Boolean @default(false)
+  is_sponsor   Boolean @default(false)
+  is_active    Boolean @default(true)
+
+  contacts   StudentContact[]
+  dependents StudentDependent[]
+
+  @@unique([tenant_id, key])
+  @@map("relationship_types")
+}
+
+model DocumentType {
+  id             String  @id @default(uuid()) @db.Uuid
+  tenant_id      String  @db.Uuid
+  key            String
+  label          String
+  is_required    Boolean @default(false)
+  has_expiry     Boolean @default(false)
+  retention_days Int?
+  is_active      Boolean @default(true)
+
+  documents Document[]
+
+  @@unique([tenant_id, key])
+  @@map("document_types")
+}
+
+// ============================================================================
+// 3. Dynamic Lifecycle
+// ============================================================================
+
+enum StageCategory {
+  PRE_DEPARTURE
+  IN_TRANSIT
+  POST_ARRIVAL
+  ENROLLED
+  COMPLETED
+  EXCEPTION
+  IN_PROGRESS
+}
+
+model LifecycleStage {
+  id                  String        @id @default(uuid()) @db.Uuid
+  tenant_id           String        @db.Uuid
+  key                 String
+  label               String
+  label_translations  Json?
+  description         String?
+  sequence            Int
+  category            StageCategory @default(IN_PROGRESS)
+  color_hex           String?       @db.Char(7)
+  icon                String?
+  is_initial          Boolean       @default(false)
+  is_terminal         Boolean       @default(false)
+  is_active           Boolean       @default(true)
+  sla_hours           Int?
+  destination_country String?       @db.Char(2)
+  config_version      Int           @default(1)
+  // v6: per-(country × visa-type) stages — null means "applies to any visa type".
+  visa_type_id        String?       @db.Uuid
+  // v6: outcome flags. Entering a stage with one of these flips downstream side
+  // effects (commission recalc on success, reminder for failure). Mutually
+  // exclusive — service guards 422 if both are true.
+  is_outcome_success  Boolean       @default(false)
+  is_outcome_failure  Boolean       @default(false)
+  // v6: dashboard widget filter — opt-OUT (default true) so existing seeded stages
+  // remain visible without backfill.
+  show_on_dashboard   Boolean       @default(true)
+  // v6: when set, AdvanceStageDialog renders an extra date input with this label
+  // (e.g. "Departed on", "Arrived on"). The captured value lands in the lifecycle
+  // event's metadata as `prompt_date`.
+  prompt_date_label   String?
+  created_at          DateTime      @default(now()) @db.Timestamptz
+  updated_at          DateTime      @updatedAt @db.Timestamptz
+
+  tenant   Tenant                     @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  visa_type VisaType?                 @relation(fields: [visa_type_id], references: [id], onDelete: SetNull)
+  students Student[]                  @relation("CurrentStage")
+  events   StudentLifecycleEvent[]    @relation("ToStage")
+  events_from StudentLifecycleEvent[] @relation("FromStage")
+  trans_from LifecycleStageTransition[] @relation("TransitionFrom")
+  trans_to   LifecycleStageTransition[] @relation("TransitionTo")
+  templates  MessageTemplate[]
+  checklist_items LifecycleStageChecklistItem[]
+
+  @@unique([tenant_id, key])
+  @@index([tenant_id, sequence])
+  @@index([visa_type_id])
+  @@map("lifecycle_stages")
+}
+
+// v6: VisaType — per-tenant catalogue of visa workflows scoped by country.
+// Stages may optionally pin themselves to a single VisaType via
+// LifecycleStage.visa_type_id, or stay generic (visa_type_id = null) and apply
+// across every visa type for the country.
+//
+// `is_generic` marks the tenant default per country and is guarded from rename /
+// soft-delete by the service layer (so admins can't accidentally orphan default
+// rows that downstream code relies on).
+model VisaType {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenant_id       String    @db.Uuid
+  country_code    String    @db.Char(2)
+  name            String
+  short_name      String?
+  description     String?
+  is_active       Boolean   @default(true)
+  is_generic      Boolean   @default(false)
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+  deleted_at      DateTime? @db.Timestamptz
+
+  stages          LifecycleStage[]
+
+  @@unique([tenant_id, country_code, name])
+  @@index([tenant_id, country_code])
+  @@index([is_active])
+  @@map("visa_types")
+}
+
+model LifecycleStageTransition {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenant_id     String    @db.Uuid
+  from_stage_id String    @db.Uuid
+  to_stage_id   String    @db.Uuid
+  requires_role UserRole?
+
+  from_stage LifecycleStage @relation("TransitionFrom", fields: [from_stage_id], references: [id], onDelete: Cascade)
+  to_stage   LifecycleStage @relation("TransitionTo", fields: [to_stage_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, from_stage_id, to_stage_id])
+  @@index([tenant_id])
+  @@map("lifecycle_stage_transitions")
+}
+
+// Per-stage checklist tasks. Counsellors track what must happen during each stage
+// (e.g. "Pre-departure briefing" stage → 6 items). Soft-deletable via deleted_at.
+model LifecycleStageChecklistItem {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenant_id   String    @db.Uuid
+  stage_id    String    @db.Uuid
+  label       String
+  description String?
+  sequence    Int       @default(0)
+  is_required Boolean   @default(true)
+  sla_hours   Int?
+  is_active   Boolean   @default(true)
+  created_at  DateTime  @default(now()) @db.Timestamptz
+  updated_at  DateTime  @updatedAt @db.Timestamptz
+  deleted_at  DateTime? @db.Timestamptz
+
+  stage    LifecycleStage                  @relation(fields: [stage_id], references: [id], onDelete: Cascade)
+  progress StudentStageChecklistProgress[]
+
+  @@index([stage_id, sequence])
+  @@index([tenant_id])
+  @@map("lifecycle_stage_checklist_items")
+}
+
+// Per-student progress against a single checklist item. Toggling completed
+// flips completed_at + completed_by_id; uniqueness on (student_id, checklist_item_id).
+model StudentStageChecklistProgress {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenant_id         String    @db.Uuid
+  student_id        String    @db.Uuid
+  stage_id          String    @db.Uuid
+  checklist_item_id String    @db.Uuid
+  completed_at      DateTime? @db.Timestamptz
+  completed_by_id   String?   @db.Uuid
+  notes             String?
+  created_at        DateTime  @default(now()) @db.Timestamptz
+  updated_at        DateTime  @updatedAt @db.Timestamptz
+
+  student        Student                     @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  checklist_item LifecycleStageChecklistItem @relation(fields: [checklist_item_id], references: [id], onDelete: Cascade)
+
+  @@unique([student_id, checklist_item_id])
+  @@index([tenant_id, stage_id])
+  @@map("student_stage_checklist_progress")
+}
+
+// ============================================================================
+// 4. Student core
+// ============================================================================
+
+enum Gender {
+  NOT_KNOWN
+  MALE
+  FEMALE
+  NOT_APPLICABLE
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  CIVIL_PARTNERSHIP
+  SEPARATED
+  DIVORCED
+  WIDOWED
+  OTHER
+}
+
+enum StudentStatus {
+  ACTIVE
+  ON_HOLD
+  // SVT-WAVE-BILLING-2026-05 — ON_LEAVE is distinct from DEFERRED:
+  // DEFERRED = pre-start postponement; ON_LEAVE = mid-enrolment pause.
+  // Pauses fee installments + suppresses payment-due reminders.
+  ON_LEAVE
+  WITHDRAWN
+  COMPLETED
+  DEFERRED
+}
+
+model Student {
+  id                    String        @id @default(uuid()) @db.Uuid
+  tenant_id             String        @db.Uuid
+  student_code          String
+  given_name            String
+  middle_name           String?
+  family_name           String
+  preferred_name        String?
+  name_in_passport_enc  Bytes
+  date_of_birth         DateTime      @db.Date
+  gender                Gender        @default(NOT_KNOWN)
+  gender_self_described String?
+  nationality_code      String        @db.Char(2)
+  marital_status        MaritalStatus?
+  primary_language      String        @default("en")
+  // Optional self-declared identity fields (kept free-text deliberately — closed
+  // enums are culturally fraught for these). Storage only; not used for filtering.
+  religion              String?
+  ethnicity             String?
+  email_primary         String?
+  email_secondary       String?
+  phone_primary_e164    String?
+  phone_secondary_e164  String?
+  current_stage_id      String        @db.Uuid
+  stage_entered_at      DateTime      @default(now()) @db.Timestamptz
+  status                StudentStatus @default(ACTIVE)
+  assigned_to_id        String?       @db.Uuid
+  notes                 String?
+  completeness_pct      Int           @default(0)
+  version               Int           @default(1)
+  created_at            DateTime      @default(now()) @db.Timestamptz
+  created_by_id         String?       @db.Uuid
+  updated_at            DateTime      @updatedAt @db.Timestamptz
+  updated_by_id         String?       @db.Uuid
+  deleted_at            DateTime?     @db.Timestamptz
+  deleted_by_id         String?       @db.Uuid
+
+  tenant         Tenant         @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  current_stage  LifecycleStage @relation("CurrentStage", fields: [current_stage_id], references: [id])
+  assigned_to    User?          @relation("AssignedCounsellor", fields: [assigned_to_id], references: [id], onDelete: SetNull)
+  nationality    Country        @relation(fields: [nationality_code], references: [code_alpha2])
+
+  addresses        StudentAddress[]
+  identifications  StudentIdentification[]
+  visas            StudentVisa[]
+  regulator_ids    StudentRegulatorIdentifier[]
+  qualifications   AcademicQualification[]
+  language_tests   LanguageTestResult[]
+  contacts         StudentContact[]
+  dependents       StudentDependent[]
+  employments      StudentEmployment[]
+  compliance       ComplianceCheck[]
+  engagements      EngagementCheck[]
+  enrollments      Enrollment[]
+  travel           TravelRecord[]
+  accommodations   Accommodation[]
+  insurances       InsuranceRecord[]
+  finance_items    FinanceItem[]
+  sponsorships     StudentSponsorship[]
+  documents        Document[]
+  lifecycle_events StudentLifecycleEvent[]
+  comms_threads    CommsThread[]
+  reminders        Reminder[]
+  commission_claims CommissionClaim[]
+  stage_checklist_progress StudentStageChecklistProgress[]
+  // SVT-WAVE-BILLING-2026-05 — receipts + carry-forward credits live at
+  // student scope (a student may have multiple enrolments over time).
+  payments         Payment[]
+  student_credits  StudentCredit[]
+
+  // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
+  //   * students_tenant_stage_active_idx       — partial(deleted_at IS NULL) on (tenant_id, current_stage_id) for dashboard groupBy.
+  //   * students_tenant_status_active_idx      — partial(deleted_at IS NULL) on (tenant_id, status) for dashboard groupBy.
+  //   * students_tenant_assigned_active_idx    — partial(deleted_at IS NULL) on (tenant_id, assigned_to_id) for "my students".
+  //   * students_tenant_created_at_active_idx  — partial(deleted_at IS NULL) on (tenant_id, created_at DESC, id DESC) for list pagination.
+  //   * students_search_trgm_idx               — partial(deleted_at IS NULL) GIN trgm on lower(family_name||given_name||student_code) for ILIKE search.
+  // All are SQL-only — Prisma @@index can't express partial indexes or expression-based GIN indexes.
+  @@unique([tenant_id, student_code])
+  @@unique([tenant_id, email_primary])
+  @@index([tenant_id, current_stage_id, assigned_to_id])
+  @@index([tenant_id, status])
+  @@index([tenant_id, family_name, given_name])
+  @@index([deleted_at])
+  @@map("students")
+}
+
+// ============================================================================
+// 5. Shared Address
+// ============================================================================
+
+enum AddressType {
+  PERMANENT
+  CURRENT
+  DESTINATION
+  CORRESPONDENCE
+}
+
+model Address {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenant_id    String    @db.Uuid
+  line1        String
+  line2        String?
+  line3        String?
+  locality     String
+  region       String?
+  postal_code  String?
+  country_code String    @db.Char(2)
+  latitude     Decimal?  @db.Decimal(9, 6)
+  longitude    Decimal?  @db.Decimal(9, 6)
+  formatted    String?
+  created_at   DateTime  @default(now()) @db.Timestamptz
+  updated_at   DateTime  @updatedAt @db.Timestamptz
+
+  tenant  Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  country Country @relation(fields: [country_code], references: [code_alpha2])
+
+  student_addresses    StudentAddress[]
+  campuses             Campus[]
+  institution_primary  Institution[]    @relation("InstitutionPrimaryAddress")
+  accommodations       Accommodation[]
+  contacts             StudentContact[]
+  sponsors             Sponsor[]
+  employer_addresses   StudentEmployment[] @relation("EmployerAddress")
+
+  @@index([tenant_id, country_code])
+  @@map("addresses")
+}
+
+model StudentAddress {
+  id         String      @id @default(uuid()) @db.Uuid
+  tenant_id  String      @db.Uuid
+  student_id String      @db.Uuid
+  address_id String      @db.Uuid
+  type       AddressType
+  is_current Boolean     @default(false)
+  valid_from DateTime?   @db.Date
+  valid_to   DateTime?   @db.Date
+  created_at DateTime    @default(now()) @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  address Address @relation(fields: [address_id], references: [id])
+
+  @@index([student_id, type])
+  @@map("student_addresses")
+}
+
+// ============================================================================
+// 6. Identification, Visa, Regulator IDs, Compliance, Dependents, Employment
+// ============================================================================
+
+enum IdType {
+  PASSPORT
+  NATIONAL_ID
+  BIRTH_CERTIFICATE
+  DRIVING_LICENCE
+  OTHER
+}
+
+model StudentIdentification {
+  id                  String    @id @default(uuid()) @db.Uuid
+  tenant_id           String    @db.Uuid
+  student_id          String    @db.Uuid
+  type                IdType
+  document_number_enc Bytes
+  issuing_country     String    @db.Char(2)
+  issued_on           DateTime  @db.Date
+  expires_on          DateTime? @db.Date
+  is_primary          Boolean   @default(false)
+  created_at          DateTime  @default(now()) @db.Timestamptz
+  updated_at          DateTime  @updatedAt @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  // Perf: student_identifications_tenant_passport_expiry_idx — partial(type='PASSPORT')
+  // on (tenant_id, expires_on) for the expiry-alerts passport scan. SQL-only (partial).
+  @@index([student_id])
+  @@index([type, expires_on])
+  @@map("student_identifications")
+}
+
+enum VisaEntries {
+  SINGLE
+  DOUBLE
+  MULTIPLE
+}
+
+model StudentVisa {
+  id                  String      @id @default(uuid()) @db.Uuid
+  tenant_id           String      @db.Uuid
+  student_id          String      @db.Uuid
+  visa_category_id    String      @db.Uuid
+  visa_number_enc     Bytes
+  destination_country String      @db.Char(2)
+  issuing_post        String?
+  issued_on           DateTime    @db.Date
+  expires_on          DateTime    @db.Date
+  entries             VisaEntries @default(MULTIPLE)
+  conditions          String?
+  is_active           Boolean     @default(true)
+  // SVT-OCC-2026-05: optimistic-concurrency token. Bumped by every PATCH so an
+  // If-Match: "<n>" header from the client can detect concurrent writers and
+  // surface 412 Precondition Failed instead of silently overwriting.
+  version             Int         @default(1)
+  created_at          DateTime    @default(now()) @db.Timestamptz
+  updated_at          DateTime    @updatedAt @db.Timestamptz
+
+  student       Student      @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  visa_category VisaCategory @relation(fields: [visa_category_id], references: [id])
+  destination   Country      @relation(fields: [destination_country], references: [code_alpha2])
+
+  // Perf: student_visas_tenant_expiry_active_idx — partial(is_active = true)
+  // on (tenant_id, expires_on) for the expiry-alerts scan. SQL-only (partial).
+  @@index([student_id, is_active])
+  @@index([expires_on])
+  @@map("student_visas")
+}
+
+model StudentRegulatorIdentifier {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenant_id  String    @db.Uuid
+  student_id String    @db.Uuid
+  scheme     String
+  value_enc  Bytes
+  issued_on  DateTime? @db.Date
+  expires_on DateTime? @db.Date
+  status     String?
+  notes      String?
+  created_at DateTime  @default(now()) @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, scheme])
+  @@map("student_regulator_identifiers")
+}
+
+enum ComplianceType {
+  MEDICAL_EXAM
+  BIOMETRICS
+  POLICE_CLEARANCE
+  TB_TEST
+  IHS_PAID
+  GTE_INTERVIEW
+  OTHER
+}
+
+model ComplianceCheck {
+  id            String         @id @default(uuid()) @db.Uuid
+  tenant_id     String         @db.Uuid
+  student_id    String         @db.Uuid
+  check_type    ComplianceType
+  scheduled_at  DateTime?      @db.Timestamptz
+  completed_at  DateTime?      @db.Timestamptz
+  result        String?
+  expires_on    DateTime?      @db.Date
+  document_id   String?        @db.Uuid
+  notes         String?
+  created_at    DateTime       @default(now()) @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, check_type])
+  @@map("compliance_checks")
+}
+
+model EngagementCheck {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenant_id      String   @db.Uuid
+  student_id     String   @db.Uuid
+  check_date     DateTime @db.Date
+  method         String
+  present        Boolean
+  notes          String?
+  recorded_by_id String   @db.Uuid
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, check_date])
+  @@map("engagement_checks")
+}
+
+model StudentEmployment {
+  id                   String    @id @default(uuid()) @db.Uuid
+  tenant_id            String    @db.Uuid
+  student_id           String    @db.Uuid
+  employer_name        String
+  employer_address_id  String?   @db.Uuid
+  work_type            String
+  hours_per_week       Int?
+  started_on           DateTime  @db.Date
+  ended_on             DateTime? @db.Date
+  authorisation_doc_id String?   @db.Uuid
+  notes                String?
+
+  student          Student  @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  employer_address Address? @relation("EmployerAddress", fields: [employer_address_id], references: [id])
+
+  @@index([student_id])
+  @@map("student_employment")
+}
+
+model StudentDependent {
+  id                    String   @id @default(uuid()) @db.Uuid
+  tenant_id             String   @db.Uuid
+  student_id            String   @db.Uuid
+  relationship_id       String   @db.Uuid
+  given_name            String
+  family_name           String
+  date_of_birth         DateTime @db.Date
+  nationality_code      String   @db.Char(2)
+  passport_number_enc   Bytes?
+  visa_status           String?
+  accompanies_principal Boolean  @default(true)
+  notes                 String?
+
+  student      Student          @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  relationship RelationshipType @relation(fields: [relationship_id], references: [id])
+
+  @@index([student_id])
+  @@map("student_dependents")
+}
+
+// ============================================================================
+// 7. Academic history, language tests
+// ============================================================================
+
+// AcademicLevel — international study-abroad standard, ISCED-2011 aligned.
+// Maps to: UK A-level/Foundation/PGDip/Masters/PhD, US HS/Associate/Bachelor/Master/Doctorate,
+// AU Cert IV/Diploma/Adv Diploma/Bachelor/Grad Cert/Grad Dip/Master/PhD,
+// CA College Diploma/Bachelor/Grad Cert/Master/PhD, EU/ISCED native.
+enum AcademicLevel {
+  PRIMARY                       // ISCED 1
+  LOWER_SECONDARY               // ISCED 2 (middle school)
+  UPPER_SECONDARY               // ISCED 3 (high school / A-level / IB / +2)
+  POST_SECONDARY_NON_TERTIARY   // ISCED 4
+  FOUNDATION                    // pathway / year-zero programs
+  ASSOCIATE                     // ISCED 5 short-cycle
+  DIPLOMA                       // vocational
+  ADVANCED_DIPLOMA
+  BACHELORS                     // ISCED 6
+  GRADUATE_CERTIFICATE
+  GRADUATE_DIPLOMA
+  POSTGRADUATE_CERTIFICATE
+  POSTGRADUATE_DIPLOMA
+  MASTERS                       // ISCED 7
+  MPHIL
+  DOCTORATE                     // ISCED 8 (PhD)
+  PROFESSIONAL                  // MBBS / JD / etc.
+  CERTIFICATE
+  OTHER
+}
+
+model AcademicQualification {
+  id                  String        @id @default(uuid()) @db.Uuid
+  tenant_id           String        @db.Uuid
+  student_id          String        @db.Uuid
+  level               AcademicLevel
+  institution         String
+  board_or_university String?
+  country_code        String?       @db.Char(2)
+  field_of_study      String?
+  isced_code          String?       @db.Char(4)
+  started_on          DateTime?     @db.Date
+  completed_on        DateTime?     @db.Date
+  grade_value         String?
+  grade_scale         String?
+  is_highest          Boolean       @default(false)
+  created_at          DateTime      @default(now()) @db.Timestamptz
+  updated_at          DateTime      @updatedAt @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, level])
+  @@map("academic_qualifications")
+}
+
+enum LanguageTest {
+  IELTS
+  PTE
+  TOEFL
+  DUOLINGO
+  OET
+  CAMBRIDGE
+  SAT
+  GRE
+  GMAT
+  OTHER
+}
+
+model LanguageTestResult {
+  id              String       @id @default(uuid()) @db.Uuid
+  tenant_id       String       @db.Uuid
+  student_id      String       @db.Uuid
+  test_type       LanguageTest
+  overall_score   Decimal      @db.Decimal(5, 2)
+  listening       Decimal?     @db.Decimal(5, 2)
+  reading         Decimal?     @db.Decimal(5, 2)
+  writing         Decimal?     @db.Decimal(5, 2)
+  speaking        Decimal?     @db.Decimal(5, 2)
+  test_date       DateTime     @db.Date
+  expires_on      DateTime?    @db.Date
+  certificate_no  String?
+  created_at      DateTime     @default(now()) @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@unique([student_id, test_type, test_date])
+  @@index([student_id, test_type])
+  @@map("language_test_results")
+}
+
+// ============================================================================
+// 8. Contacts and Sponsors
+// ============================================================================
+
+model StudentContact {
+  id                      String    @id @default(uuid()) @db.Uuid
+  tenant_id               String    @db.Uuid
+  student_id              String    @db.Uuid
+  relationship_id         String    @db.Uuid
+  given_name              String
+  family_name             String
+  phone_e164              String?
+  email                   String?
+  occupation              String?
+  employer                String?
+  annual_income_minor_enc Bytes?
+  income_currency         String?   @db.Char(3)
+  is_primary_guardian     Boolean   @default(false)
+  is_emergency_contact    Boolean   @default(false)
+  is_financial_sponsor    Boolean   @default(false)
+  address_id              String?   @db.Uuid
+  created_at              DateTime  @default(now()) @db.Timestamptz
+  updated_at              DateTime  @updatedAt @db.Timestamptz
+
+  student      Student          @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  relationship RelationshipType @relation(fields: [relationship_id], references: [id])
+  address      Address?         @relation(fields: [address_id], references: [id])
+
+  @@index([student_id, is_primary_guardian])
+  @@index([student_id, is_emergency_contact])
+  @@map("student_contacts")
+}
+
+enum SponsorType {
+  INDIVIDUAL
+  FAMILY
+  EMPLOYER
+  GOVERNMENT
+  INSTITUTION
+  CHARITY
+  OTHER
+}
+
+model Sponsor {
+  id              String      @id @default(uuid()) @db.Uuid
+  tenant_id       String      @db.Uuid
+  type            SponsorType
+  legal_name      String
+  registration_no String?
+  country_code    String?     @db.Char(2)
+  email           String?
+  phone_e164      String?
+  address_id      String?     @db.Uuid
+  is_active       Boolean     @default(true)
+  created_at      DateTime    @default(now()) @db.Timestamptz
+
+  address      Address?             @relation(fields: [address_id], references: [id])
+  sponsorships StudentSponsorship[]
+
+  @@index([tenant_id])
+  @@map("sponsors")
+}
+
+model StudentSponsorship {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenant_id     String    @db.Uuid
+  student_id    String    @db.Uuid
+  sponsor_id    String    @db.Uuid
+  coverage_pct  Decimal   @db.Decimal(5, 2)
+  amount_minor  BigInt?
+  currency      String?   @db.Char(3)
+  starts_on     DateTime? @db.Date
+  ends_on       DateTime? @db.Date
+  letter_doc_id String?   @db.Uuid
+  notes         String?
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  sponsor Sponsor @relation(fields: [sponsor_id], references: [id])
+
+  @@index([student_id])
+  @@index([sponsor_id])
+  @@map("student_sponsorships")
+}
+
+// ============================================================================
+// 9. Institution domain
+// ============================================================================
+
+enum InstitutionType {
+  UNIVERSITY
+  COLLEGE
+  COMMUNITY_COLLEGE
+  POLYTECHNIC
+  LANGUAGE_SCHOOL
+  PATHWAY_PROVIDER
+  VOCATIONAL
+  HIGH_SCHOOL
+  OTHER
+}
+
+model Institution {
+  id                 String          @id @default(uuid()) @db.Uuid
+  tenant_id          String          @db.Uuid
+  legal_name         String
+  display_name       String
+  short_name         String?
+  type               InstitutionType
+  country_code       String          @db.Char(2)
+  primary_address_id String?         @db.Uuid
+  website            String?
+  email              String?
+  phone_e164         String?
+  established_year   Int?
+  ranking_global     Int?
+  ranking_national   Int?
+  description        String?
+  logo_url           String?
+  banner_url         String?
+  is_partner         Boolean         @default(false)
+  partner_since      DateTime?       @db.Date
+  commission_pct     Decimal?        @db.Decimal(5, 2)
+  is_active          Boolean         @default(true)
+  version            Int             @default(1)
+  created_at         DateTime        @default(now()) @db.Timestamptz
+  created_by_id      String?         @db.Uuid
+  updated_at         DateTime        @updatedAt @db.Timestamptz
+  updated_by_id      String?         @db.Uuid
+  deleted_at         DateTime?       @db.Timestamptz
+
+  tenant          Tenant                     @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  country         Country                    @relation(fields: [country_code], references: [code_alpha2])
+  primary_address Address?                   @relation("InstitutionPrimaryAddress", fields: [primary_address_id], references: [id])
+  identifiers     InstitutionIdentifier[]
+  accreditations  InstitutionAccreditation[]
+  contacts        InstitutionContact[]
+  campuses        Campus[]
+  schools         School[]
+  programs        Program[]
+  enrollments     Enrollment[]
+  commission_claims CommissionClaim[]
+  super_agent_links InstitutionSuperAgent[]
+  super_agent_commission_rules SuperAgentCommissionRule[]
+
+  // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
+  //   * institutions_tenant_created_at_active_idx — partial(deleted_at IS NULL) on (tenant_id, created_at DESC, id DESC).
+  //   * institutions_tenant_country_active_idx    — partial(deleted_at IS NULL) on (tenant_id, country_code).
+  //   * institutions_tenant_partner_active_idx    — partial(deleted_at IS NULL) on (tenant_id, is_partner).
+  //   * institutions_search_trgm_idx              — partial(deleted_at IS NULL) GIN trgm on lower(display_name||legal_name||short_name).
+  // All SQL-only (partial / expression GIN).
+  @@unique([tenant_id, legal_name, country_code])
+  @@index([tenant_id, country_code])
+  @@index([tenant_id, is_partner])
+  @@index([deleted_at])
+  @@map("institutions")
+}
+
+model InstitutionIdentifier {
+  id             String    @id @default(uuid()) @db.Uuid
+  institution_id String    @db.Uuid
+  scheme         String
+  value          String
+  issued_by      String?
+  valid_from     DateTime? @db.Date
+  valid_to       DateTime? @db.Date
+
+  institution Institution @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+
+  @@unique([institution_id, scheme])
+  @@index([scheme, value])
+  @@map("institution_identifiers")
+}
+
+model InstitutionAccreditation {
+  id               String    @id @default(uuid()) @db.Uuid
+  institution_id   String    @db.Uuid
+  body             String
+  accreditation_no String?
+  awarded_on       DateTime? @db.Date
+  expires_on       DateTime? @db.Date
+  scope            String?
+
+  institution Institution @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+
+  @@index([institution_id])
+  @@map("institution_accreditations")
+}
+
+model InstitutionContact {
+  id             String   @id @default(uuid()) @db.Uuid
+  institution_id String   @db.Uuid
+  full_name      String
+  designation    String?
+  department     String?
+  email          String?
+  phone_e164     String?
+  is_primary     Boolean  @default(false)
+  notes          String?
+
+  institution Institution @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+
+  @@index([institution_id])
+  @@map("institution_contacts")
+}
+
+model Campus {
+  id             String   @id @default(uuid()) @db.Uuid
+  institution_id String   @db.Uuid
+  name           String
+  is_main        Boolean  @default(false)
+  address_id     String?  @db.Uuid
+  timezone       String   @default("UTC")
+  phone_e164     String?
+  email          String?
+  is_active      Boolean  @default(true)
+
+  institution Institution     @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+  address     Address?        @relation(fields: [address_id], references: [id])
+  intakes     ProgramIntake[]
+  enrollments Enrollment[]
+
+  @@unique([institution_id, name])
+  @@map("campuses")
+}
+
+model School {
+  id             String   @id @default(uuid()) @db.Uuid
+  institution_id String   @db.Uuid
+  name           String
+  short_name     String?
+  is_active      Boolean  @default(true)
+
+  institution Institution  @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+  departments Department[]
+  programs    Program[]
+
+  @@unique([institution_id, name])
+  @@map("schools")
+}
+
+model Department {
+  id         String   @id @default(uuid()) @db.Uuid
+  school_id  String   @db.Uuid
+  name       String
+  short_name String?
+  is_active  Boolean  @default(true)
+
+  school   School    @relation(fields: [school_id], references: [id], onDelete: Cascade)
+  programs Program[]
+
+  @@unique([school_id, name])
+  @@map("departments")
+}
+
+enum DeliveryMode {
+  IN_PERSON
+  ONLINE
+  HYBRID
+  DISTANCE
+}
+
+// Course cadence pattern. Drives intake-label suggestions and per-period fee composition.
+// Use sparingly — `ProgramIntake.classes_start_on/_end_on` remain authoritative for actual dates.
+enum DurationPattern {
+  SEMESTER_2_PER_YEAR
+  TRIMESTER_3_PER_YEAR
+  QUARTER_4_PER_YEAR
+  ANNUAL_COHORT
+  BIANNUAL_2_YEARS
+  CONTINUOUS_ENROLLMENT
+  MONTHLY_INTAKE
+  MODULAR
+}
+
+model Program {
+  id                      String        @id @default(uuid()) @db.Uuid
+  tenant_id               String        @db.Uuid
+  institution_id          String        @db.Uuid
+  school_id               String?       @db.Uuid
+  department_id           String?       @db.Uuid
+  code                    String?
+  name                    String
+  short_name              String?
+  level                   AcademicLevel
+  field_of_study          String?
+  isced_code              String?       @db.Char(4)
+  delivery_mode           DeliveryMode  @default(IN_PERSON)
+  language_of_instruction String        @default("en")
+  duration_months         Int
+  // Cadence pattern (semester/trimester/annual/etc.) — drives intake-label suggestions
+  // and helps fee composition. Optional; null = unspecified.
+  duration_pattern        DurationPattern?
+  terms_per_year          Int?
+  credit_hours            Int?
+  description             String?
+  url                     String?
+  is_active               Boolean       @default(true)
+  version                 Int           @default(1)
+  created_at              DateTime      @default(now()) @db.Timestamptz
+  updated_at              DateTime      @updatedAt @db.Timestamptz
+  deleted_at              DateTime?     @db.Timestamptz
+
+  tenant       Tenant               @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  institution  Institution          @relation(fields: [institution_id], references: [id])
+  school       School?              @relation(fields: [school_id], references: [id])
+  department   Department?          @relation(fields: [department_id], references: [id])
+  intakes      ProgramIntake[]
+  requirements ProgramRequirement[]
+  modules      ProgramModule[]
+  enrollments  Enrollment[]
+
+  @@unique([institution_id, name, level])
+  @@index([institution_id, is_active])
+  @@index([level, field_of_study])
+  @@map("programs")
+}
+
+model ProgramIntake {
+  id                String       @id @default(uuid()) @db.Uuid
+  program_id        String       @db.Uuid
+  campus_id         String?      @db.Uuid
+  intake_year       Int
+  intake_month      Int
+  intake_label      String
+  application_open  DateTime?    @db.Date
+  application_close DateTime?    @db.Date
+  decision_date     DateTime?    @db.Date
+  classes_start_on  DateTime?    @db.Date
+  classes_end_on    DateTime?    @db.Date
+  capacity          Int?
+  is_open           Boolean      @default(true)
+  notes             String?
+
+  program     Program      @relation(fields: [program_id], references: [id], onDelete: Cascade)
+  campus      Campus?      @relation(fields: [campus_id], references: [id])
+  fees        ProgramFee[]
+  enrollments Enrollment[]
+
+  @@unique([program_id, campus_id, intake_year, intake_month])
+  @@index([program_id, intake_year, intake_month])
+  @@map("program_intakes")
+}
+
+enum RequirementCategory {
+  ACADEMIC
+  LANGUAGE
+  TEST
+  WORK_EXPERIENCE
+  PORTFOLIO
+  INTERVIEW
+  DOCUMENT
+  FINANCIAL
+  OTHER
+}
+
+model ProgramRequirement {
+  id           String              @id @default(uuid()) @db.Uuid
+  program_id   String              @db.Uuid
+  category     RequirementCategory
+  label        String
+  details      String?
+  min_value    Decimal?            @db.Decimal(8, 2)
+  unit         String?
+  is_mandatory Boolean             @default(true)
+
+  program Program @relation(fields: [program_id], references: [id], onDelete: Cascade)
+
+  @@index([program_id, category])
+  @@map("program_requirements")
+}
+
+model ProgramModule {
+  id          String   @id @default(uuid()) @db.Uuid
+  program_id  String   @db.Uuid
+  code        String
+  title       String
+  credits     Decimal? @db.Decimal(5, 2)
+  semester    Int?
+  is_core     Boolean  @default(true)
+  description String?
+
+  program Program @relation(fields: [program_id], references: [id], onDelete: Cascade)
+
+  @@unique([program_id, code])
+  @@index([program_id])
+  @@map("program_modules")
+}
+
+enum FeeAudience {
+  DOMESTIC
+  INTERNATIONAL
+  REGIONAL
+  OTHER
+}
+
+enum FeeType {
+  TUITION
+  REGISTRATION
+  APPLICATION
+  DEPOSIT
+  MATERIALS
+  LIVING_COST_ESTIMATE
+  OTHER
+}
+
+enum FeePeriod {
+  TOTAL
+  YEAR
+  SEMESTER
+  TERM
+  MONTH
+  MODULE
+}
+
+model ProgramFee {
+  id                String      @id @default(uuid()) @db.Uuid
+  program_intake_id String      @db.Uuid
+  audience          FeeAudience @default(INTERNATIONAL)
+  fee_type          FeeType
+  amount_minor      BigInt
+  currency          String      @db.Char(3)
+  per_period        FeePeriod   @default(YEAR)
+  is_estimated      Boolean     @default(false)
+  effective_from    DateTime?   @db.Date
+  notes             String?
+
+  program_intake ProgramIntake @relation(fields: [program_intake_id], references: [id], onDelete: Cascade)
+  currency_ref   Currency      @relation(fields: [currency], references: [code])
+
+  @@index([program_intake_id, audience, fee_type])
+  @@map("program_fees")
+}
+
+enum EnrollmentStatus {
+  OFFERED
+  ACCEPTED
+  ENROLLED
+  // SVT-WAVE-BILLING-2026-05 — mid-enrolment leave. Triggers FeePlan pause.
+  // FSM: ENROLLED ↔ ON_LEAVE → WITHDRAWN/COMPLETED.
+  ON_LEAVE
+  DEFERRED
+  WITHDRAWN
+  COMPLETED
+  CANCELLED
+}
+
+model Enrollment {
+  id                     String           @id @default(uuid()) @db.Uuid
+  tenant_id              String           @db.Uuid
+  student_id             String           @db.Uuid
+  institution_id         String           @db.Uuid
+  program_id             String           @db.Uuid
+  program_intake_id      String?          @db.Uuid
+  campus_id              String?          @db.Uuid
+  enrollment_no          String?
+  start_date             DateTime?        @db.Date
+  expected_end_date      DateTime?        @db.Date
+  actual_end_date        DateTime?        @db.Date
+  status                 EnrollmentStatus @default(OFFERED)
+  tuition_total_minor    BigInt?
+  tuition_currency       String?          @db.Char(3)
+  scholarship_minor      BigInt?          @default(0)
+  scholarship_name       String?
+  agent_commission_minor BigInt?
+  // Super-agent that brokered this specific enrollment. Nullable because not
+  // every enrollment goes through one (direct relationships exist). The link
+  // is verified server-side against institution_super_agents — see
+  // enrollments.service.ts.
+  super_agent_id         String?          @db.Uuid
+  notes                  String?
+  // SVT-WAVE-BILLING-2026-05 — pause-window mirrors for fast filtering.
+  // Authoritative state lives on FeePlan; these are caches set when the
+  // enrollment transitions to ON_LEAVE so the reminderScanner + dashboard
+  // queries can skip an extra join.
+  paused_at              DateTime?        @db.Timestamptz
+  resumed_at             DateTime?        @db.Timestamptz
+  version                Int              @default(1)
+  created_at             DateTime         @default(now()) @db.Timestamptz
+  created_by_id          String?          @db.Uuid
+  updated_at             DateTime         @updatedAt @db.Timestamptz
+  updated_by_id          String?          @db.Uuid
+  deleted_at             DateTime?        @db.Timestamptz
+
+  student        Student        @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  institution    Institution    @relation(fields: [institution_id], references: [id])
+  program        Program        @relation(fields: [program_id], references: [id])
+  program_intake ProgramIntake? @relation(fields: [program_intake_id], references: [id])
+  campus         Campus?        @relation(fields: [campus_id], references: [id])
+  super_agent    SuperAgent?    @relation(fields: [super_agent_id], references: [id], onDelete: SetNull)
+  finance_items  FinanceItem[]
+  reminders      Reminder[]
+  commission_claim CommissionClaim?
+  // SVT-WAVE-BILLING-2026-05 — billing aggregate root. 1:1 with active plan.
+  // History of regenerated plans is reachable via FeePlan.superseded_by_id.
+  fee_plans      FeePlan[]
+  payments       Payment[]
+  student_credits StudentCredit[]
+
+  @@index([student_id])
+  @@index([institution_id, program_id])
+  @@index([program_intake_id])
+  @@index([super_agent_id])
+  @@index([deleted_at])
+  @@map("enrollments")
+}
+
+// ============================================================================
+// Super-Agents — aggregator/intermediary platforms (Adventus, Edvoy, IDP,
+// Apply Board, BUSY) that the consultancy uses to access institutions.
+//
+// Long-term design v2 (replaces v1 partial schema):
+//   * SuperAgentType is an admin-configurable lookup (not a hardcoded enum) so
+//     new categories (CONSORTIUM, GOVERNMENT, ...) can be added without a
+//     schema migration.
+//   * SuperAgentCommissionRule carries effective-date ranges so historical
+//     rates are preserved when a deal renegotiates. Rules can be scoped to
+//     all enrollments under a super-agent (default), to a specific
+//     institution, or to a specific institution + program-level combo.
+//   * Status lifecycle FSM (ACTIVE -> PAUSED / TERMINATED) lives in
+//     modules/super-agents/fsm-def.ts and is registered with the shared
+//     /api/v1/fsm/:machine/options router.
+//   * Soft-delete + version columns for optimistic concurrency parity with
+//     other business tables.
+//   * Sub-processor link (sub_processor_id) lets admins register the agent for
+//     GDPR/DPDP compliance with one click.
+//
+// Many-to-many relationship with Institution lives in InstitutionSuperAgent
+// below: the same institution may be reachable through multiple super-agents.
+// Per Enrollment we capture which super-agent — if any — was used for that
+// specific case (drives commission attribution downstream via
+// modules/commissions/commission-resolver.ts).
+// ============================================================================
+
+enum SuperAgentStatus {
+  ACTIVE
+  PAUSED
+  TERMINATED
+}
+
+// Admin-configurable category lookup. Seeded with AGGREGATOR / REFERRAL_PARTNER /
+// WHITE_LABEL / CONSORTIUM / GOVERNMENT but admins can add more rows from the
+// /super-agent-types page without touching code.
+model SuperAgentType {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenant_id   String   @db.Uuid
+  key         String
+  label       String
+  description String?
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now()) @db.Timestamptz
+  updated_at  DateTime @updatedAt @db.Timestamptz
+
+  tenant       Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  super_agents SuperAgent[]
+
+  @@unique([tenant_id, key])
+  @@map("super_agent_types")
+}
+
+model SuperAgent {
+  id                     String           @id @default(uuid()) @db.Uuid
+  tenant_id              String           @db.Uuid
+  type_id                String?          @db.Uuid
+  name                   String
+  short_name             String?
+  legal_name             String?
+  country_code           String?          @db.Char(2)
+  website                String?
+  logo_url               String?
+  contact_email          String?
+  contact_phone_e164     String?
+  default_commission_pct Decimal?         @db.Decimal(5, 2)
+  default_currency       String?          @db.Char(3)
+  payment_terms_days     Int?
+  status                 SuperAgentStatus @default(ACTIVE)
+  // Legacy active flag — preserved for backwards compatibility with prior
+  // FE/queries. New code should drive status; is_active is auto-derived
+  // (status == ACTIVE => true, else false) by the service layer.
+  is_active              Boolean          @default(true)
+  notes                  String?
+  // Optional sub-processor registration for GDPR/DPDP compliance.
+  sub_processor_id       String?          @db.Uuid
+  version                Int              @default(1)
+  created_at             DateTime         @default(now()) @db.Timestamptz
+  created_by_id          String?          @db.Uuid
+  updated_at             DateTime         @updatedAt @db.Timestamptz
+  updated_by_id          String?          @db.Uuid
+  deleted_at             DateTime?        @db.Timestamptz
+
+  tenant            Tenant                     @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  type              SuperAgentType?            @relation(fields: [type_id], references: [id], onDelete: SetNull)
+  sub_processor     SubProcessor?              @relation(fields: [sub_processor_id], references: [id], onDelete: SetNull)
+  contacts          SuperAgentContact[]
+  commission_rules  SuperAgentCommissionRule[]
+  institution_links InstitutionSuperAgent[]
+  enrollments       Enrollment[]
+  commission_claims CommissionClaim[]
+
+  @@unique([tenant_id, name])
+  @@index([tenant_id, status])
+  @@index([tenant_id, type_id])
+  @@map("super_agents")
+}
+
+model SuperAgentContact {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenant_id      String    @db.Uuid
+  super_agent_id String    @db.Uuid
+  name           String
+  role           String?
+  email          String?
+  phone_e164     String?
+  is_primary     Boolean   @default(false)
+  notes          String?
+  created_at     DateTime  @default(now()) @db.Timestamptz
+  updated_at     DateTime  @updatedAt @db.Timestamptz
+  deleted_at     DateTime? @db.Timestamptz
+
+  super_agent SuperAgent @relation(fields: [super_agent_id], references: [id], onDelete: Cascade)
+
+  @@index([super_agent_id])
+  @@map("super_agent_contacts")
+}
+
+// Commission rules with effective-date ranges. The most-specific applicable
+// rule wins at calculation time (program-level override > institution-specific
+// > super-agent default). Older rules are retained — never overwritten — for
+// historical accuracy and audit.
+model SuperAgentCommissionRule {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenant_id      String    @db.Uuid
+  super_agent_id String    @db.Uuid
+  // Optional scope narrowers — null = applies to every link/program.
+  institution_id String?   @db.Uuid
+  // Stored as a string (matches AcademicLevel enum keys) so we don't pin this
+  // table to the academic-level enum. Null = applies to every level.
+  program_level  String?
+  commission_pct Decimal   @db.Decimal(5, 2)
+  currency       String    @db.Char(3)
+  effective_from DateTime  @db.Date
+  effective_to   DateTime? @db.Date
+  notes          String?
+  created_at     DateTime  @default(now()) @db.Timestamptz
+  created_by_id  String?   @db.Uuid
+
+  super_agent SuperAgent   @relation(fields: [super_agent_id], references: [id], onDelete: Cascade)
+  institution Institution? @relation(fields: [institution_id], references: [id], onDelete: SetNull)
+
+  @@index([tenant_id, super_agent_id, effective_from])
+  @@index([tenant_id, institution_id, effective_from])
+  @@map("super_agent_commission_rules")
+}
+
+// Pivot table: institution × super-agent. is_preferred is a soft signal admins
+// use to nudge counsellors toward a preferred channel.
+model InstitutionSuperAgent {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenant_id      String    @db.Uuid
+  institution_id String    @db.Uuid
+  super_agent_id String    @db.Uuid
+  is_preferred   Boolean   @default(false)
+  notes          String?
+  created_at     DateTime  @default(now()) @db.Timestamptz
+  created_by_id  String?   @db.Uuid
+  deleted_at     DateTime? @db.Timestamptz
+
+  institution Institution @relation(fields: [institution_id], references: [id], onDelete: Cascade)
+  super_agent SuperAgent  @relation(fields: [super_agent_id], references: [id], onDelete: Cascade)
+
+  @@unique([institution_id, super_agent_id])
+  @@index([tenant_id, institution_id])
+  @@index([super_agent_id])
+  @@map("institution_super_agents")
+}
+
+// ============================================================================
+// 10. Travel, Accommodation, Insurance
+// ============================================================================
+
+enum TravelStatus {
+  PLANNED
+  BOOKED
+  CANCELLED
+  COMPLETED
+}
+
+model TravelRecord {
+  id              String       @id @default(uuid()) @db.Uuid
+  tenant_id       String       @db.Uuid
+  student_id      String       @db.Uuid
+  pnr             String?
+  airline_iata    String?      @db.Char(2)
+  flight_number   String?
+  departure_iata  String?      @db.Char(3)
+  arrival_iata    String?      @db.Char(3)
+  departure_at    DateTime?    @db.Timestamptz
+  arrival_at      DateTime?    @db.Timestamptz
+  pickup_arranged Boolean      @default(false)
+  pickup_notes    String?
+  fare_minor      BigInt?
+  fare_currency   String?      @db.Char(3)
+  status          TravelStatus @default(BOOKED)
+  created_at      DateTime     @default(now()) @db.Timestamptz
+  updated_at      DateTime     @updatedAt @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, departure_at])
+  @@map("travel_records")
+}
+
+enum AccommodationType {
+  UNIVERSITY_HALL
+  HOMESTAY
+  PRIVATE_RENTAL
+  OWNED
+  OTHER
+}
+
+enum RentPeriod {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+model Accommodation {
+  id                 String            @id @default(uuid()) @db.Uuid
+  tenant_id          String            @db.Uuid
+  student_id         String            @db.Uuid
+  type               AccommodationType
+  provider_name      String?
+  contact_phone_e164 String?
+  contact_email      String?
+  address_id         String?           @db.Uuid
+  move_in_date       DateTime?         @db.Date
+  move_out_date      DateTime?         @db.Date
+  rent_minor         BigInt?
+  rent_currency      String?           @db.Char(3)
+  rent_period        RentPeriod?
+  deposit_minor      BigInt?
+  is_current         Boolean           @default(true)
+  created_at         DateTime          @default(now()) @db.Timestamptz
+  updated_at         DateTime          @updatedAt @db.Timestamptz
+
+  student Student  @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  address Address? @relation(fields: [address_id], references: [id])
+
+  @@index([student_id, is_current])
+  @@map("accommodations")
+}
+
+model InsuranceRecord {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenant_id         String   @db.Uuid
+  student_id        String   @db.Uuid
+  provider          String
+  policy_number_enc Bytes
+  coverage_type     String
+  starts_on         DateTime @db.Date
+  ends_on           DateTime @db.Date
+  premium_minor     BigInt?
+  premium_currency  String?  @db.Char(3)
+  created_at        DateTime @default(now()) @db.Timestamptz
+
+  student Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id])
+  @@index([ends_on])
+  @@index([tenant_id, ends_on])
+  @@map("insurance_records")
+}
+
+// ============================================================================
+// 11. Finance ledger
+// ============================================================================
+
+enum FinanceCategory {
+  TUITION
+  ACCOMMODATION
+  TRAVEL
+  INSURANCE
+  LIVING_COST
+  CONSULTANCY
+  COMMISSION
+  OTHER
+}
+
+enum FinanceStatus {
+  PENDING
+  PAID
+  OVERDUE
+  WAIVED
+  REFUNDED
+}
+
+model FinanceItem {
+  id                    String           @id @default(uuid()) @db.Uuid
+  tenant_id             String           @db.Uuid
+  student_id            String           @db.Uuid
+  enrollment_id         String?          @db.Uuid
+  sponsor_id            String?          @db.Uuid
+  category              FinanceCategory
+  description           String
+  amount_minor          BigInt
+  currency              String           @db.Char(3)
+  exchange_rate_to_base Decimal?         @db.Decimal(18, 8)
+  invoice_no            String?
+  due_on                DateTime?        @db.Date
+  paid_on               DateTime?        @db.Date
+  status                FinanceStatus    @default(PENDING)
+  reference             String?
+  created_at            DateTime         @default(now()) @db.Timestamptz
+  updated_at            DateTime         @updatedAt @db.Timestamptz
+
+  student      Student     @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  currency_ref Currency    @relation(fields: [currency], references: [code])
+  enrollment   Enrollment? @relation(fields: [enrollment_id], references: [id])
+
+  @@index([student_id, status])
+  @@index([enrollment_id])
+  // Perf P1 #2 — reminder scanner (FinanceItem.due_on ≤ now() AND status=PENDING)
+  // and per-tenant finance dashboard aggregates (status filter + due_on bucket).
+  @@index([tenant_id, status, due_on])
+  @@map("finance_items")
+}
+
+// ============================================================================
+// 12. Documents
+// ============================================================================
+
+enum DocumentVerification {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum AvStatus {
+  PENDING
+  CLEAN
+  INFECTED
+  ERROR
+}
+
+model Document {
+  id               String               @id @default(uuid()) @db.Uuid
+  tenant_id        String               @db.Uuid
+  student_id       String               @db.Uuid
+  document_type_id String               @db.Uuid
+  file_name        String
+  storage_key      String               @unique
+  mime_type        String
+  size_bytes       Int
+  sha256           String               @db.Char(64)
+  av_status        AvStatus             @default(PENDING)
+  av_scanned_at    DateTime?            @db.Timestamptz
+  issued_on        DateTime?            @db.Date
+  expires_on       DateTime?            @db.Date
+  verification     DocumentVerification @default(PENDING)
+  verified_at      DateTime?            @db.Timestamptz
+  verified_by_id   String?              @db.Uuid
+  retention_until  DateTime?            @db.Date
+  version          Int                  @default(1)
+  superseded_by_id String?              @db.Uuid
+  created_at       DateTime             @default(now()) @db.Timestamptz
+  created_by_id    String               @db.Uuid
+  deleted_at       DateTime?            @db.Timestamptz
+
+  tenant        Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  student       Student      @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  document_type DocumentType @relation(fields: [document_type_id], references: [id])
+
+  // Perf: documents_tenant_expiry_active_idx — partial(deleted_at IS NULL)
+  // on (tenant_id, expires_on) for the expiry-alerts document scan. SQL-only (partial).
+  @@index([student_id, document_type_id])
+  @@index([sha256])
+  @@index([tenant_id, expires_on])
+  // Perf P1 #5 — retentionErasure pagination walks (tenant_id, retention_until)
+  // ordered keyset scans to find documents past retention horizon.
+  @@index([tenant_id, retention_until])
+  @@map("documents")
+}
+
+// ============================================================================
+// 13. Comms
+// ============================================================================
+
+enum CommsChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+  IN_APP
+}
+
+model MessageTemplate {
+  id                  String       @id @default(uuid()) @db.Uuid
+  tenant_id           String       @db.Uuid
+  key                 String
+  channel             CommsChannel
+  subject             String?
+  body_md             String
+  destination_country String?      @db.Char(2)
+  stage_id            String?      @db.Uuid
+  is_active           Boolean      @default(true)
+
+  stage    LifecycleStage? @relation(fields: [stage_id], references: [id])
+  messages CommsMessage[]
+
+  @@unique([tenant_id, key, channel])
+  @@map("message_templates")
+}
+
+model CommsThread {
+  id         String       @id @default(uuid()) @db.Uuid
+  tenant_id  String       @db.Uuid
+  // Nullable so system-wide IN_APP transition notifications (super-agent
+  // status flips, commission claim FSM events, etc.) can share a per-tenant
+  // synthetic thread rather than spamming an arbitrary student's history.
+  student_id String?      @db.Uuid
+  channel    CommsChannel
+  subject    String?
+  created_at DateTime     @default(now()) @db.Timestamptz
+
+  student  Student?       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  messages CommsMessage[]
+
+  @@index([student_id, channel])
+  @@index([tenant_id, channel])
+  @@map("comms_threads")
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model CommsMessage {
+  id                String           @id @default(uuid()) @db.Uuid
+  tenant_id         String           @db.Uuid
+  thread_id         String           @db.Uuid
+  // When set, the message is an in-app notification targeted at a staff user
+  // (e.g. a reminder digest). Student-facing messages keep this null.
+  recipient_user_id String?          @db.Uuid
+  direction         MessageDirection
+  status            MessageStatus    @default(QUEUED)
+  subject           String?
+  template_id       String?          @db.Uuid
+  body              String
+  sent_at           DateTime?        @db.Timestamptz
+  delivered_at      DateTime?        @db.Timestamptz
+  read_at           DateTime?        @db.Timestamptz
+  provider_id       String?
+  metadata          Json?
+  created_by_id     String?          @db.Uuid
+  created_at        DateTime         @default(now()) @db.Timestamptz
+  // SVT-WAVE8-OUTBOX-2026-05 — outbox retry policy for external-provider
+  // channels (EMAIL/SMS/WHATSAPP). attempts increments on every send try;
+  // next_retry_at gates the comms.dispatcher job from picking the row up
+  // before backoff has elapsed. Both stay null for IN_APP (no external send).
+  attempts          Int              @default(0)
+  last_attempt_at   DateTime?        @db.Timestamptz
+  next_retry_at     DateTime?        @db.Timestamptz
+
+  thread    CommsThread      @relation(fields: [thread_id], references: [id], onDelete: Cascade)
+  template  MessageTemplate? @relation(fields: [template_id], references: [id])
+  recipient User?            @relation("CommsRecipient", fields: [recipient_user_id], references: [id])
+
+  @@index([tenant_id, thread_id, created_at])
+  @@index([thread_id])
+  @@index([tenant_id, recipient_user_id, read_at])
+  // Partial index for the comms.dispatcher job (QUEUED + retryable FAILED).
+  @@index([status, next_retry_at])
+  @@map("comms_messages")
+}
+
+// ============================================================================
+// 14. Tags / Notes / Generic Attributes / Saved Views
+// ============================================================================
+
+model Tag {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenant_id String  @db.Uuid
+  key       String
+  label     String
+  color_hex String? @db.Char(7)
+  is_active Boolean @default(true)
+
+  entity_tags EntityTag[]
+
+  @@unique([tenant_id, key])
+  @@map("tags")
+}
+
+model EntityTag {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  tag_id        String   @db.Uuid
+  entity_type   String
+  entity_id     String   @db.Uuid
+  created_at    DateTime @default(now()) @db.Timestamptz
+  created_by_id String?  @db.Uuid
+
+  tag Tag @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@unique([tag_id, entity_type, entity_id])
+  @@index([entity_type, entity_id])
+  @@map("entity_tags")
+}
+
+model Note {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenant_id     String    @db.Uuid
+  entity_type   String
+  entity_id     String    @db.Uuid
+  body          String
+  is_pinned     Boolean   @default(false)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String    @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+
+  @@index([entity_type, entity_id, created_at])
+  @@map("notes")
+}
+
+model AttributeDefinition {
+  id                  String  @id @default(uuid()) @db.Uuid
+  tenant_id           String  @db.Uuid
+  entity_type         String
+  key                 String
+  label               String
+  data_type           String
+  enum_values         Json?
+  is_pii              Boolean @default(false)
+  is_required         Boolean @default(false)
+  destination_country String? @db.Char(2)
+
+  values EntityAttribute[]
+
+  @@unique([tenant_id, entity_type, key])
+  @@map("attribute_definitions")
+}
+
+model EntityAttribute {
+  id            String              @id @default(uuid()) @db.Uuid
+  tenant_id     String              @db.Uuid
+  definition_id String              @db.Uuid
+  entity_type   String
+  entity_id     String              @db.Uuid
+  value_text    String?
+  value_number  Decimal?            @db.Decimal(20, 6)
+  value_date    DateTime?           @db.Date
+  value_bool    Boolean?
+
+  definition AttributeDefinition @relation(fields: [definition_id], references: [id], onDelete: Cascade)
+
+  @@index([entity_type, entity_id])
+  @@map("entity_attributes")
+}
+
+model SavedView {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenant_id  String   @db.Uuid
+  user_id    String?  @db.Uuid
+  resource   String
+  name       String
+  query_json Json
+  is_shared  Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  @@index([tenant_id, resource])
+  @@map("saved_views")
+}
+
+// ============================================================================
+// 15. Event log + tamper-evident AuditLog
+// ============================================================================
+
+model StudentLifecycleEvent {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  student_id    String   @db.Uuid
+  from_stage_id String?  @db.Uuid
+  to_stage_id   String   @db.Uuid
+  occurred_at   DateTime @default(now()) @db.Timestamptz
+  effective_at  DateTime @db.Timestamptz
+  reason_code   String?
+  notes         String?
+  actor_id      String   @db.Uuid
+  actor_role    UserRole
+  metadata      Json?
+
+  student    Student         @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  to_stage   LifecycleStage  @relation("ToStage", fields: [to_stage_id], references: [id])
+  from_stage LifecycleStage? @relation("FromStage", fields: [from_stage_id], references: [id])
+
+  @@index([student_id, occurred_at])
+  @@index([tenant_id, to_stage_id, occurred_at])
+  // Perf: backs the dashboard "recent events" feed (top-N by occurred_at desc per tenant).
+  @@index([tenant_id, occurred_at(sort: Desc)], map: "student_lifecycle_events_tenant_occurred_idx")
+  @@map("student_lifecycle_events")
+}
+
+model AuditLog {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenant_id        String?  @db.Uuid
+  actor_id         String?  @db.Uuid
+  actor_email_hash String?
+  action           String
+  entity_type      String
+  entity_id        String?  @db.Uuid
+  entity_version   Int?
+  before_enc       Bytes?
+  after_enc        Bytes?
+  ip_hash          String?
+  ua_hash          String?
+  request_id       String?
+  prev_hash        String?  @db.Char(64)
+  entry_hash       String   @db.Char(64)
+  created_at       DateTime @default(now()) @db.Timestamptz
+
+  tenant Tenant? @relation(fields: [tenant_id], references: [id], onDelete: SetNull)
+
+  @@index([tenant_id, entity_type, entity_id])
+  @@index([actor_id, created_at])
+  @@index([action, created_at])
+  // Perf P0 #4 — tenant audit list & hash-chain verify keyset pagination
+  // ORDER BY created_at DESC, id DESC needs the matching composite index
+  // to avoid full-tenant in-memory sort on every page.
+  @@index([tenant_id, created_at(sort: Desc), id(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// 16. Bulk import / export
+// ============================================================================
+
+enum ImportStatus {
+  UPLOADED
+  PARSING
+  VALIDATING
+  DRY_RUN_READY
+  APPLYING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model ImportJob {
+  id                String       @id @default(uuid()) @db.Uuid
+  tenant_id         String       @db.Uuid
+  resource          String
+  source_filename   String
+  storage_key       String
+  sha256            String       @db.Char(64)
+  row_total         Int?
+  row_processed     Int          @default(0)
+  row_created       Int          @default(0)
+  row_updated       Int          @default(0)
+  row_skipped       Int          @default(0)
+  row_failed        Int          @default(0)
+  status            ImportStatus @default(UPLOADED)
+  mapping_json      Json?
+  error_report_key  String?
+  result_key        String?
+  started_at        DateTime?    @db.Timestamptz
+  completed_at      DateTime?    @db.Timestamptz
+  created_at        DateTime     @default(now()) @db.Timestamptz
+  created_by_id     String       @db.Uuid
+  webhook_url       String?
+
+  @@index([tenant_id, resource, created_at])
+  // Perf: newest-first listing in the imports UI.
+  @@index([tenant_id, resource, created_at(sort: Desc)], map: "import_jobs_tenant_resource_created_desc_idx")
+  @@map("import_jobs")
+}
+
+model ImportMappingTemplate {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  resource      String
+  name          String
+  mapping_json  Json
+  created_by_id String   @db.Uuid
+  created_at    DateTime @default(now()) @db.Timestamptz
+
+  @@unique([tenant_id, resource, name])
+  @@map("import_mapping_templates")
+}
+
+enum ExportStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+model ExportJob {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenant_id     String       @db.Uuid
+  resource      String
+  format        String
+  filter_json   Json
+  columns_json  Json
+  redact_pii    Boolean      @default(true)
+  row_total     Int?
+  status        ExportStatus @default(QUEUED)
+  storage_key   String?
+  sha256        String?      @db.Char(64)
+  expires_at    DateTime?    @db.Timestamptz
+  created_at    DateTime     @default(now()) @db.Timestamptz
+  created_by_id String       @db.Uuid
+  completed_at  DateTime?    @db.Timestamptz
+
+  @@index([tenant_id, resource, created_at])
+  // Perf: newest-first listing in the exports UI.
+  @@index([tenant_id, resource, created_at(sort: Desc)], map: "export_jobs_tenant_resource_created_desc_idx")
+  @@map("export_jobs")
+}
+
+model ExternalId {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  entity_type   String
+  entity_id     String   @db.Uuid
+  external_id   String
+  source_system String?
+  created_at    DateTime @default(now()) @db.Timestamptz
+
+  @@unique([tenant_id, entity_type, external_id])
+  @@index([entity_type, entity_id])
+  @@map("external_ids")
+}
+
+// Cross-process idempotency for write endpoints (imports.apply, bulk operations).
+// The first request to use an Idempotency-Key inserts a row in PENDING status; subsequent
+// requests with the same key see the row and return the cached result. Race-safe because
+// the (tenant_id, scope, key) UNIQUE catches concurrent inserts at the DB level.
+model IdempotencyRecord {
+  id          String              @id @default(uuid()) @db.Uuid
+  tenant_id   String              @db.Uuid
+  // SVT-WAVE-BILLING-SEC-P1-F5 — user scoping. Two different users posting
+  // the same Idempotency-Key on the same scope must produce two independent
+  // records. NULL is reserved for non-user callers (webhooks, cron jobs).
+  // Folded into the UNIQUE so the database refuses cross-user collisions.
+  user_id     String?             @db.Uuid
+  scope       String                                    // "imports.apply", "students.bulk", ...
+  key         String
+  request_hash String                                   // sha256 of the canonical request body
+  status      IdempotencyStatus   @default(PENDING)
+  status_code Int?
+  response    Json?                                     // cached response body (after success)
+  expires_at  DateTime            @db.Timestamptz       // 24h default
+  created_at  DateTime            @default(now()) @db.Timestamptz
+  completed_at DateTime?          @db.Timestamptz
+
+  @@unique([tenant_id, user_id, scope, key])
+  @@index([expires_at])
+  @@map("idempotency_records")
+}
+
+enum IdempotencyStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// ============================================================================
+// 17. Reminders (admin-facing follow-ups + auto-generated alerts)
+// ============================================================================
+
+enum ReminderType {
+  INTAKE_START
+  PAYMENT_DUE
+  VISA_EXPIRY
+  PASSPORT_EXPIRY
+  INSURANCE_EXPIRY
+  DOCUMENT_EXPIRY
+  ENROLLMENT_DECISION_DUE
+  COMMISSION_CLAIM_DUE
+  CUSTOM
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  ACKNOWLEDGED
+  SNOOZED
+  DISMISSED
+}
+
+model Reminder {
+  id                 String         @id @default(uuid()) @db.Uuid
+  tenant_id          String         @db.Uuid
+  // Optional links — admin-wide reminders allowed when both null.
+  student_id         String?        @db.Uuid
+  enrollment_id      String?        @db.Uuid
+  type               ReminderType
+  // Polymorphic source pointer for auto-generated reminders (e.g. program_intake, finance_item).
+  source_entity_type String?
+  source_entity_id   String?        @db.Uuid
+  title              String
+  description        String?
+  due_on             DateTime       @db.Date
+  scheduled_for      DateTime       @db.Timestamptz
+  assigned_to_id     String?        @db.Uuid
+  status             ReminderStatus @default(PENDING)
+  fire_count         Int            @default(0)
+  sent_at            DateTime?      @db.Timestamptz
+  acknowledged_at    DateTime?      @db.Timestamptz
+  snooze_until       DateTime?      @db.Timestamptz
+  metadata           Json?
+  created_at         DateTime       @default(now()) @db.Timestamptz
+  created_by_id      String         @db.Uuid
+  updated_at         DateTime       @updatedAt @db.Timestamptz
+  deleted_at         DateTime?      @db.Timestamptz
+
+  student     Student?    @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  enrollment  Enrollment? @relation(fields: [enrollment_id], references: [id], onDelete: SetNull)
+  assigned_to User?       @relation("ReminderAssignee", fields: [assigned_to_id], references: [id], onDelete: SetNull)
+
+  // Idempotency: scanner reuses (source_entity_type, source_entity_id, scheduled_for) to avoid duplicates.
+  @@unique([tenant_id, source_entity_type, source_entity_id, scheduled_for], name: "reminder_source_dedup")
+  @@index([tenant_id, status, scheduled_for])
+  @@index([tenant_id, assigned_to_id, status])
+  @@index([student_id, status])
+  @@index([enrollment_id])
+  @@index([source_entity_type, source_entity_id])
+  @@map("reminders")
+}
+
+// ============================================================================
+// 18. Commission claims (institution → consultancy)
+// ============================================================================
+
+enum CommissionStatus {
+  PENDING
+  CLAIMED
+  INVOICED
+  PAID
+  DISPUTED
+  WAIVED
+}
+
+model CommissionClaim {
+  id                String           @id @default(uuid()) @db.Uuid
+  tenant_id         String           @db.Uuid
+  enrollment_id     String           @unique @db.Uuid
+  institution_id    String           @db.Uuid
+  student_id        String           @db.Uuid
+  // Optional: which super-agent (aggregator/intermediary) the originating
+  // enrollment was attributed to. Null for direct (no-broker) enrollments.
+  // SetNull on super-agent delete to preserve historical claims.
+  super_agent_id    String?          @db.Uuid
+  amount_minor      BigInt
+  currency          String           @db.Char(3)
+  commission_pct    Decimal          @db.Decimal(5, 2)
+  basis_minor       BigInt
+  status            CommissionStatus @default(PENDING)
+  claimed_on        DateTime?        @db.Date
+  invoice_no        String?
+  invoiced_on       DateTime?        @db.Date
+  paid_on           DateTime?        @db.Date
+  payment_reference String?
+  dispute_reason    String?
+  notes             String?
+  version           Int              @default(1)
+  created_at        DateTime         @default(now()) @db.Timestamptz
+  created_by_id     String           @db.Uuid
+  updated_at        DateTime         @updatedAt @db.Timestamptz
+  updated_by_id     String?          @db.Uuid
+  deleted_at        DateTime?        @db.Timestamptz
+
+  // Restrict (not Cascade) so a hard-delete attempt on an enrollment with an
+  // open commission claim surfaces an error instead of silently wiping the
+  // financial record. Enrollments are soft-deleted via deleted_at in normal
+  // operation — claims persist alongside.
+  enrollment   Enrollment  @relation(fields: [enrollment_id], references: [id], onDelete: Restrict)
+  institution  Institution @relation(fields: [institution_id], references: [id])
+  student      Student     @relation(fields: [student_id], references: [id])
+  currency_ref Currency    @relation(fields: [currency], references: [code])
+  super_agent  SuperAgent? @relation(fields: [super_agent_id], references: [id], onDelete: SetNull)
+
+  @@index([tenant_id, institution_id, status])
+  @@index([tenant_id, status, claimed_on])
+  @@index([student_id])
+  @@index([super_agent_id])
+  @@map("commission_claims")
+}
+
+// ============================================================================
+// 19. Background-job observability
+// ============================================================================
+//
+// Each invocation of a scheduled job (reminder.dispatcher, reminder.scanner,
+// expiry.alerts, hash.anchor, retention.erasure, ...) writes a JobRun row so
+// operators can answer "did the job run, did it succeed, how long did it
+// take, what did it process?" without scraping logs. Rows are insert-then-
+// update: the job inserts with status RUNNING and updates to SUCCEEDED /
+// FAILED / PARTIAL / SKIPPED_LOCKED on completion.
+
+enum JobRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  PARTIAL
+  SKIPPED_LOCKED
+}
+
+model JobRun {
+  id             String       @id @default(uuid()) @db.Uuid
+  job_name       String
+  started_at     DateTime     @default(now()) @db.Timestamptz
+  finished_at    DateTime?    @db.Timestamptz
+  status         JobRunStatus @default(RUNNING)
+  rows_processed Int          @default(0)
+  rows_failed    Int          @default(0)
+  error_message  String?
+  metadata       Json?
+
+  @@index([job_name, started_at(sort: Desc)])
+  @@map("job_runs")
+}
+
+// ============================================================================
+// SVT-WAVE-BILLING-2026-05 — School/College-style fee management.
+//
+// Bounded context: billing tables hold NO FK to finance_items. FinanceItem
+// stays for ad-hoc non-installment money (travel, accommodation,
+// sponsorship, consultancy fee). Reporting that needs "all money" UNIONs
+// the two by (tenant_id, student_id, enrollment_id) — never by FK.
+//
+// All tables gated by Tenant.billing_enabled (default false). Existing
+// consultancy tenants see zero impact until they flip the flag.
+//
+// FSMs defined in apps/backend/src/modules/billing/fsm-def.ts.
+// ============================================================================
+
+enum FeePlanStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum FeeInstallmentStatus {
+  SCHEDULED      // plan created, due_on in future, no invoice yet
+  INVOICED       // invoice generated, awaiting payment
+  DUE            // due_on reached
+  OVERDUE        // past due_on + tenant.grace_days
+  PARTIAL        // some allocations applied, balance > 0
+  PAID           // balance = 0 via allocations
+  WAIVED         // admin waiver (counts as paid for plan-completion)
+  SUSPENDED      // plan paused (ON_LEAVE); reminders skip these
+  CANCELLED      // plan cancelled before installment matured
+  REFUNDED       // post-payment refund reversed the allocation
+}
+
+enum PaymentStatus {
+  RECEIVED
+  VOIDED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  CHEQUE
+  OTHER
+}
+
+enum FeeAdjustmentKind {
+  LATE_FEE       // positive amount; added to gross
+  DISCOUNT       // negative; subtracted from gross
+  SCHOLARSHIP    // negative; sub-type of discount, separately reportable
+  WAIVER         // negative; cancels portion of balance with reason
+  WRITE_OFF      // negative; tax/regulatory write-off
+}
+
+enum RefundStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum BillingCadence {
+  MONTHLY
+  QUARTERLY
+  TRIMESTER
+  SEMESTER
+  TERM
+  ANNUAL
+  CUSTOM
+}
+
+// ---------------------------------------------------------------------------
+// FeePlan — per-enrollment installment schedule. One ACTIVE plan per
+// enrollment (enforced by partial unique index in migration SQL).
+// Regeneration creates a new row + back-points the old via superseded_by_id.
+// ---------------------------------------------------------------------------
+model FeePlan {
+  id                   String          @id @default(uuid()) @db.Uuid
+  tenant_id            String          @db.Uuid
+  enrollment_id        String          @db.Uuid
+  cadence              BillingCadence
+  total_minor          BigInt
+  currency             String          @db.Char(3)
+  scholarship_minor    BigInt          @default(0)
+  status               FeePlanStatus   @default(DRAFT)
+  starts_on            DateTime        @db.Date
+  ends_on              DateTime?       @db.Date
+  paused_at            DateTime?       @db.Timestamptz
+  paused_reason        String?
+  resumed_at           DateTime?       @db.Timestamptz
+  superseded_by_id     String?         @db.Uuid
+  // Optional per-tenant late-fee policy snapshot. Kept as JSON so the v1
+  // doesn't need a separate policy table — promote when ≥3 tenants need
+  // distinct curves. Shape: { grace_days, fee_minor | fee_pct, max_per_installment }.
+  late_fee_policy      Json?
+  notes                String?
+  version              Int             @default(1)
+  created_at           DateTime        @default(now()) @db.Timestamptz
+  created_by_id        String?         @db.Uuid
+  updated_at           DateTime        @updatedAt @db.Timestamptz
+  updated_by_id        String?         @db.Uuid
+  deleted_at           DateTime?       @db.Timestamptz
+
+  tenant       Tenant         @relation(fields: [tenant_id], references: [id])
+  enrollment   Enrollment     @relation(fields: [enrollment_id], references: [id], onDelete: Cascade)
+  superseded_by FeePlan?      @relation("FeePlanSupersedes", fields: [superseded_by_id], references: [id])
+  successors    FeePlan[]     @relation("FeePlanSupersedes")
+  installments FeeInstallment[]
+
+  @@index([tenant_id, status])
+  @@index([tenant_id, enrollment_id])
+  // Partial unique "one active plan per enrollment" lives in migration SQL
+  // (Prisma can't express WHERE clauses on @@unique indexes yet).
+  @@map("fee_plans")
+}
+
+// ---------------------------------------------------------------------------
+// FeeInstallment — one row per scheduled payment in a FeePlan.
+// State machine in apps/backend/src/modules/billing/fsm-def.ts.
+// ---------------------------------------------------------------------------
+model FeeInstallment {
+  id                   String                @id @default(uuid()) @db.Uuid
+  tenant_id            String                @db.Uuid
+  fee_plan_id          String                @db.Uuid
+  sequence_no          Int
+  label                String
+  due_on               DateTime              @db.Date
+  // gross_minor = base scheduled amount (before adjustments).
+  // net_minor  = gross + late_fees - discounts - waivers - write_offs.
+  //              Recomputed inside FeeAdjustment write path.
+  // paid_minor = SUM(PaymentAllocation.amount_minor) (cached on insert).
+  // balance_minor = net - paid (cached; checked against allocation invariant).
+  gross_minor          BigInt
+  net_minor            BigInt
+  paid_minor           BigInt                @default(0)
+  balance_minor        BigInt
+  currency             String                @db.Char(3)
+  status               FeeInstallmentStatus  @default(SCHEDULED)
+  version              Int                   @default(1)
+  created_at           DateTime              @default(now()) @db.Timestamptz
+  created_by_id        String?               @db.Uuid
+  updated_at           DateTime              @updatedAt @db.Timestamptz
+  updated_by_id        String?               @db.Uuid
+  deleted_at           DateTime?             @db.Timestamptz
+
+  tenant       Tenant              @relation(fields: [tenant_id], references: [id])
+  fee_plan     FeePlan             @relation(fields: [fee_plan_id], references: [id], onDelete: Cascade)
+  allocations  PaymentAllocation[]
+  adjustments  FeeAdjustment[]
+
+  @@unique([fee_plan_id, sequence_no])
+  // Hot indexes for: overdue scan (status + due_on), dashboard outstanding
+  // by tenant, per-plan listing.
+  @@index([tenant_id, status, due_on])
+  @@index([tenant_id, due_on])
+  @@map("fee_installments")
+}
+
+// ---------------------------------------------------------------------------
+// Payment — receipt of money from a student. Allocation across installments
+// happens via PaymentAllocation rows (1:N).
+// receipt_no is tenant-scoped via Postgres SEQUENCE + nextReceiptNo() fn.
+// ---------------------------------------------------------------------------
+model Payment {
+  id                       String          @id @default(uuid()) @db.Uuid
+  tenant_id                String          @db.Uuid
+  student_id               String          @db.Uuid
+  enrollment_id            String          @db.Uuid
+  received_on              DateTime        @db.Date
+  method                   PaymentMethod
+  reference                String?
+  receipt_no               String
+  currency                 String          @db.Char(3)
+  gross_minor              BigInt
+  status                   PaymentStatus   @default(RECEIVED)
+  notes                    String?
+  version                  Int             @default(1)
+  created_at               DateTime        @default(now()) @db.Timestamptz
+  created_by_id            String?         @db.Uuid
+  updated_at               DateTime        @updatedAt @db.Timestamptz
+  updated_by_id            String?         @db.Uuid
+  deleted_at               DateTime?       @db.Timestamptz
+
+  tenant       Tenant              @relation(fields: [tenant_id], references: [id])
+  student      Student             @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  enrollment   Enrollment          @relation(fields: [enrollment_id], references: [id], onDelete: Cascade)
+  allocations  PaymentAllocation[]
+  refunds      Refund[]
+
+  @@unique([tenant_id, receipt_no])
+  @@index([tenant_id, student_id, received_on(sort: Desc)])
+  @@index([tenant_id, enrollment_id, status])
+  // Perf P1 #3 — 30d payment aggregates filter by tenant + status + received_on
+  // window. Avoids scanning all payments per dashboard refresh.
+  @@index([tenant_id, status, received_on])
+  @@map("payments")
+}
+
+// ---------------------------------------------------------------------------
+// PaymentAllocation — distributes a Payment across one or more
+// FeeInstallments. Invariant (DB CHECK + service guard):
+//   SUM(amount_minor) per payment_id ≤ Payment.gross_minor
+// Service may leave overflow as a StudentCredit row instead of allocating.
+// ---------------------------------------------------------------------------
+model PaymentAllocation {
+  id                   String     @id @default(uuid()) @db.Uuid
+  tenant_id            String     @db.Uuid
+  payment_id           String     @db.Uuid
+  fee_installment_id   String     @db.Uuid
+  amount_minor         BigInt
+  created_at           DateTime   @default(now()) @db.Timestamptz
+  created_by_id        String?    @db.Uuid
+
+  tenant         Tenant         @relation(fields: [tenant_id], references: [id])
+  payment        Payment        @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+  fee_installment FeeInstallment @relation(fields: [fee_installment_id], references: [id], onDelete: Restrict)
+
+  @@index([tenant_id, payment_id])
+  @@index([tenant_id, fee_installment_id])
+  @@map("payment_allocations")
+}
+
+// ---------------------------------------------------------------------------
+// FeeAdjustment — per-installment add/sub. One row per adjustment for full
+// audit trail (never edit in place). Late-fee cron writes LATE_FEE rows;
+// admin waiver writes WAIVER row.
+//
+// amount_minor convention:
+//   LATE_FEE   → positive   (adds to net)
+//   DISCOUNT   → negative   (reduces net)
+//   SCHOLARSHIP→ negative
+//   WAIVER     → negative
+//   WRITE_OFF  → negative
+// ---------------------------------------------------------------------------
+model FeeAdjustment {
+  id                   String              @id @default(uuid()) @db.Uuid
+  tenant_id            String              @db.Uuid
+  fee_installment_id   String              @db.Uuid
+  kind                 FeeAdjustmentKind
+  amount_minor         BigInt
+  reason_code          String?
+  reason_text          String
+  applied_on           DateTime            @db.Date
+  created_at           DateTime            @default(now()) @db.Timestamptz
+  created_by_id        String?             @db.Uuid
+
+  tenant          Tenant         @relation(fields: [tenant_id], references: [id])
+  fee_installment FeeInstallment @relation(fields: [fee_installment_id], references: [id], onDelete: Cascade)
+
+  @@index([tenant_id, fee_installment_id])
+  @@index([tenant_id, kind, applied_on])
+  @@map("fee_adjustments")
+}
+
+// ---------------------------------------------------------------------------
+// Refund — partial or full refund of a Payment. Two-step:
+//   1. Admin creates Refund in PENDING.
+//   2. Admin completes (or system auto-completes for CASH/CARD) → COMPLETED.
+//      On completion, linked PaymentAllocations are reversed and underlying
+//      installments transition INVOICED/PAID → REFUNDED.
+// ---------------------------------------------------------------------------
+model Refund {
+  id                   String         @id @default(uuid()) @db.Uuid
+  tenant_id            String         @db.Uuid
+  payment_id           String         @db.Uuid
+  amount_minor         BigInt
+  refunded_on          DateTime?      @db.Date
+  method               PaymentMethod
+  reference            String?
+  reason_code          String
+  reason_text          String
+  status               RefundStatus   @default(PENDING)
+  notes                String?
+  version              Int            @default(1)
+  created_at           DateTime       @default(now()) @db.Timestamptz
+  created_by_id        String?        @db.Uuid
+  updated_at           DateTime       @updatedAt @db.Timestamptz
+  updated_by_id        String?        @db.Uuid
+
+  tenant   Tenant  @relation(fields: [tenant_id], references: [id])
+  payment  Payment @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+
+  @@index([tenant_id, payment_id])
+  @@index([tenant_id, status])
+  // Perf P1 #3 — 30d refund aggregates filter by tenant + status + refunded_on
+  // window (pairs with payments composite for symmetric dashboard queries).
+  @@index([tenant_id, status, refunded_on])
+  @@map("refunds")
+}
+
+// ---------------------------------------------------------------------------
+// StudentCredit — overpayment carry-forward + refund-source credit.
+// Created when:
+//   - Payment.gross_minor exceeds sum of explicit allocations
+//   - Refund of an installment that's already been waived/cancelled
+//   - Manual admin credit (e.g. tenant goodwill gesture)
+// Consumed by future PaymentAllocation rows (drawn down via consumed_minor).
+// ---------------------------------------------------------------------------
+model StudentCredit {
+  id                   String     @id @default(uuid()) @db.Uuid
+  tenant_id            String     @db.Uuid
+  student_id           String     @db.Uuid
+  enrollment_id        String?    @db.Uuid
+  amount_minor         BigInt
+  currency             String     @db.Char(3)
+  source               String
+  source_ref_id        String?    @db.Uuid
+  consumed_minor       BigInt     @default(0)
+  expires_on           DateTime?  @db.Date
+  notes                String?
+  created_at           DateTime   @default(now()) @db.Timestamptz
+  created_by_id        String?    @db.Uuid
+  updated_at           DateTime   @updatedAt @db.Timestamptz
+
+  tenant     Tenant      @relation(fields: [tenant_id], references: [id])
+  student    Student     @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  enrollment Enrollment? @relation(fields: [enrollment_id], references: [id], onDelete: SetNull)
+
+  @@index([tenant_id, student_id])
+  @@index([tenant_id, enrollment_id])
+  @@map("student_credits")
+}

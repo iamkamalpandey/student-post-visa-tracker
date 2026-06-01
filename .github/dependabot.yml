@@ -1,0 +1,74 @@
+version: 2
+
+# SVT-AUDIT-OPS-2026-05 — automated dependency updates.
+# Three ecosystems: pnpm-managed npm packages at repo root + per-app, GitHub
+# Actions workflows, and Dockerfiles. Weekly cadence keeps PR volume manageable
+# without letting security patches age. Security updates fire immediately.
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: scope
+    labels:
+      - dependencies
+      - automation
+    # Group all non-major dev-deps into one PR per week (less review churn).
+    groups:
+      dev-deps:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+      types:
+        patterns:
+          - "@types/*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Prisma major upgrades land via deliberate migration PRs.
+      - dependency-name: "prisma"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@prisma/client"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+
+  - package-ecosystem: docker
+    directory: "/apps/backend"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: docker
+    directory: "/apps/frontend"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "deps(docker)"

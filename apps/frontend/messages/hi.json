@@ -1,0 +1,701 @@
+{
+  "app": {
+    "name": "Student Post-Visa Tracker"
+  },
+  "auth": {
+    "login": {
+      "title": "Sign in",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "mfa": "Authentication code"
+    }
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "students": "Students",
+    "calendar": "Calendar",
+    "inbox": "Inbox",
+    "institutions": "Institutions",
+    "programs": "Courses",
+    "imports": "Imports",
+    "exports": "Exports",
+    "reports": "Reports",
+    "catalog": "Catalog",
+    "commissions": "Commissions",
+    "stages": "Stages",
+    "visaTypes": "Visa types",
+    "users": "Users",
+    "audit": "Audit",
+    "dsar": "DSAR",
+    "consents": "Consents",
+    "breaches": "Breaches",
+    "subProcessors": "Sub-processors",
+    "compliance": "Compliance",
+    "settings": "Settings",
+    "admin": "Admin",
+    "billing": "Billing"
+  },
+  "common": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "edit": "Edit",
+    "delete": "Delete",
+    "confirm": "Confirm",
+    "close": "Close",
+    "unspecified": "Unspecified",
+    "loading": "Loading…",
+    "error": "Something went wrong",
+    "add": "Add",
+    "reset": "Reset",
+    "refresh": "Refresh",
+    "clear": "Clear",
+    "done": "Done",
+    "search": "Search",
+    "actions": "Actions",
+    "status": "Status",
+    "saving": "Saving…",
+    "noMatches": "No matches",
+    "aria": {
+      "changeTheme": "Change theme",
+      "accountMenu": "Account menu",
+      "skipToContent": "Skip to content",
+      "openNavigation": "Open navigation",
+      "primaryNavigation": "Primary"
+    }
+  },
+  "settings": {
+    "email": "Email",
+    "role": "Role",
+    "locale": "Locale",
+    "timezone": "Timezone",
+    "language": "Language",
+    "english": "English",
+    "arabic": "العربية",
+    "nepali": "नेपाली",
+    "changeLanguage": "Change language"
+  },
+  "students": {
+    "list": {
+      "title": "Students",
+      "description": "The single source of truth for every learner you support.",
+      "addStudent": "Add student",
+      "searchPlaceholder": "Search by name or student code",
+      "clearSearch": "Clear search",
+      "stage": "Stage",
+      "allStages": "All stages",
+      "statusLabel": "Status",
+      "statusOptions": {
+        "all": "All statuses",
+        "active": "Active",
+        "onHold": "On hold",
+        "withdrawn": "Withdrawn",
+        "completed": "Completed",
+        "deferred": "Deferred"
+      },
+      "refresh": "Refresh",
+      "couldNotLoad": "Could not load students",
+      "failedToLoad": "Failed to load students",
+      "emptyTitle": "No students yet",
+      "emptyDescription": "Quick-add a student to get started, or import a roster from XLSX.",
+      "ariaLabel": "Students",
+      "columns": {
+        "code": "Code",
+        "name": "Name",
+        "stage": "Stage",
+        "status": "Status",
+        "nationality": "Nationality",
+        "created": "Created"
+      },
+      "noMatchesHint": "No matches — try clearing the filters.",
+      "clearFilters": "Clear filters",
+      "items_count": "{count, plural, =0 {No students} one {# student} other {# students}}"
+    },
+    "detail": {
+      "assignCounsellorTitle": "Assign counsellor",
+      "counsellorPickerLabel": "Counsellor",
+      "assignCounsellorSuccess": "Counsellor assignment updated",
+      "unassignWarning": "Saving without a selection will unassign the current counsellor."
+    },
+    "advanceStage": {
+      "title": "Advance stage",
+      "subtitle": "Move this student to a new lifecycle stage. The change is recorded in the timeline.",
+      "targetStage": "Target stage",
+      "groupCurrent": "Current",
+      "groupSuggested": "Suggested next",
+      "groupForward": "Other forward stages",
+      "groupBackward": "Move backward (admin override)",
+      "groupBackwardDisabled": "Move backward (admin only)",
+      "currentSuffix": "(current)",
+      "matrixDisallowed": "Not in configured matrix",
+      "backwardWarning": "You are moving this student backward. A reason is required.",
+      "reasonRequiredBackward": "Reason is required for backward transitions (min 3 characters).",
+      "successToast": "Stage advanced",
+      "errorToast": "Could not advance stage"
+    }
+  },
+  "expiries": {
+    "title": "Expiries",
+    "description": "Triaged inbox of expiring documents across passports, visas, insurance and more.",
+    "searchPlaceholder": "Search by student name",
+    "withinLabel": "Within",
+    "withinOption": "{days} days",
+    "couldNotLoad": "Couldn't load expiries",
+    "emptyTitle": "Nothing expiring",
+    "emptyDescription": "No expiries within selected window.",
+    "columns": {
+      "student": "Student",
+      "kind": "Kind",
+      "expiresOn": "Expires on",
+      "daysRemaining": "Days remaining",
+      "source": "Source"
+    }
+  },
+  "reminders": {
+    "list": {
+      "title": "Reminders",
+      "description": "Auto-generated alerts and manual follow-ups across your student pipeline.",
+      "newReminder": "New reminder",
+      "searchPlaceholder": "Search by title",
+      "clearSearch": "Clear search",
+      "statusLabel": "Status",
+      "allStatuses": "All statuses",
+      "typeLabel": "Type",
+      "allTypes": "All types",
+      "assignedTo": "Assigned to",
+      "me": "Me",
+      "dueFrom": "Due from",
+      "dueTo": "Due to",
+      "refresh": "Refresh",
+      "refreshReminders": "Refresh reminders",
+      "couldNotLoad": "Could not load reminders",
+      "failedToLoad": "Failed to load reminders",
+      "emptyTitle": "Nothing on your radar",
+      "emptyDescription": "When pipelines fire SLA, document, or visa expiry alerts they will appear here. You can also add a manual reminder.",
+      "noMatchTitle": "No reminders match",
+      "noMatchDescription": "Try clearing the filters above or widening the date range.",
+      "columns": {
+        "type": "Type",
+        "title": "Title",
+        "student": "Student",
+        "dueOn": "Due on",
+        "scheduled": "Scheduled",
+        "assignedTo": "Assigned to",
+        "status": "Status"
+      },
+      "rowActions": "Row actions",
+      "actions": {
+        "acknowledge": "Acknowledge",
+        "snooze": "Snooze…",
+        "dismiss": "Dismiss",
+        "edit": "Edit…",
+        "delete": "Delete…"
+      },
+      "toasts": {
+        "acknowledged": "Reminder acknowledged",
+        "ackError": "Could not acknowledge",
+        "dismissed": "Reminder dismissed",
+        "dismissError": "Could not dismiss",
+        "deleted": "Reminder deleted",
+        "deleteError": "Could not delete"
+      },
+      "deleteTitle": "Delete reminder",
+      "deleteDescription": "This permanently removes the reminder. It can't be undone.",
+      "deleteConfirm": "Delete reminder",
+      "badges": {
+        "overdue": "Overdue",
+        "dueSoon": "Due soon"
+      }
+    },
+    "dialogs": {
+      "create": {
+        "title": "New reminder",
+        "subtitle": "Schedule a manual follow-up. The bell badge fires at the scheduled time.",
+        "submit": "Create reminder",
+        "submitting": "Creating…",
+        "successToast": "Reminder created",
+        "errorToast": "Could not create reminder"
+      },
+      "edit": {
+        "title": "Edit reminder",
+        "subtitleNote": "Type is set at creation and can't be changed here.",
+        "submit": "Save changes",
+        "submitting": "Saving…",
+        "successToast": "Reminder updated",
+        "errorToast": "Could not update reminder"
+      },
+      "snooze": {
+        "title": "Snooze reminder",
+        "submit": "Snooze",
+        "submitting": "Snoozing…",
+        "quickOptions": "Quick options",
+        "snoozeUntil": "Snooze until",
+        "snoozeUntilHelp": "The reminder will reappear at this time.",
+        "options": {
+          "oneDay": "+1 day",
+          "threeDays": "+3 days",
+          "oneWeek": "+1 week"
+        },
+        "validDate": "Pick a valid date and time first.",
+        "futureRequired": "Snooze time must be in the future.",
+        "successToast": "Snoozed until {when}",
+        "errorToast": "Could not snooze reminder"
+      }
+    }
+  },
+  "commissions": {
+    "list": {
+      "title": "Commissions",
+      "description": "Track agent commission claims through their lifecycle: pending → claimed → invoiced → paid. Disputes and waivers are first-class transitions.",
+      "claimSelected": "Claim selected ({count})",
+      "noPendingSelection": "No pending rows in selection",
+      "claimedSummary": "{count, plural, =0 {Claimed 0 commissions.} one {Claimed # commission.} other {Claimed # commissions.}}",
+      "claimedFailed": "Claimed {ok}, failed {failed}.",
+      "couldNotLoad": "Couldn’t load commissions",
+      "tryAgain": "Please try again.",
+      "noMatchesTitle": "No matches",
+      "noMatchesDescription": "Try clearing the filters or switching the status tab.",
+      "noCommissionsTitle": "No commissions yet",
+      "noCommissionsDescription": "Commissions are generated automatically when an enrolment becomes ENROLLED.",
+      "filters": {
+        "institution": "Institution",
+        "student": "Student",
+        "search": "Search…",
+        "claimedFrom": "Claimed from",
+        "claimedTo": "Claimed to",
+        "paidFrom": "Paid from",
+        "paidTo": "Paid to",
+        "clear": "Clear",
+        "enrolmentChip": "Enrolment: {id}…"
+      },
+      "columns": {
+        "student": "Student",
+        "institution": "Institution",
+        "course": "Course",
+        "intake": "Intake",
+        "tuitionBasis": "Tuition basis",
+        "pct": "%",
+        "amount": "Amount",
+        "status": "Status",
+        "claimed": "Claimed",
+        "invoiceNo": "Invoice no",
+        "paidOn": "Paid on"
+      },
+      "summary": {
+        "totalCaption": "Total {label} commissions"
+      },
+      "actions": {
+        "claim": "Claim",
+        "editManual": "Edit (manual)",
+        "waive": "Waive",
+        "generateInvoice": "Generate invoice",
+        "markPaid": "Mark paid",
+        "raiseDispute": "Raise dispute",
+        "viewReceipt": "View receipt",
+        "resolveBack": "Resolve (back to invoiced)",
+        "viewDetails": "View details"
+      },
+      "selectAllPending": "Select all pending commissions",
+      "selectCommission": "Select commission {id}",
+      "actionsForCommission": "Actions for commission {id}",
+      "forbiddenTitle": "You don’t have access to this page",
+      "forbiddenDescription": "Commission management is restricted to administrators. Ask an admin to grant access.",
+      "toasts": {
+        "claimed": "Commission claimed",
+        "claimError": "Could not claim",
+        "waived": "Commission waived",
+        "waiveError": "Could not waive",
+        "disputeResolved": "Dispute resolved",
+        "disputeResolvedDetailed": "Dispute resolved — claim moved back to INVOICED.",
+        "concurrencyWarn": "Someone else updated this commission; please reload",
+        "resolveError": "Could not resolve dispute",
+        "resolveConflict": "This claim is no longer in DISPUTED status; reload to see the latest state."
+      },
+      "waiveTitle": "Waive commission?",
+      "waiveDescription": "Waiving permanently removes this commission from the AR pipeline. The audit trail is preserved.",
+      "waiveConfirm": "Waive",
+      "resolveTitle": "Resolve dispute?",
+      "resolveDescription": "This reverts the commission to INVOICED so it re-enters the standard payment flow. The original dispute reason stays on the record.",
+      "resolveConfirm": "Resolve",
+      "receiptTitle": "Payment receipt",
+      "receiptSubtitle": "Audit trail for {institution}.",
+      "receipt": {
+        "status": "Status",
+        "amount": "Amount",
+        "commissionPct": "Commission %",
+        "tuitionBasis": "Tuition basis",
+        "claimedOn": "Claimed on",
+        "invoiceNo": "Invoice no",
+        "invoicedOn": "Invoiced on",
+        "paidOn": "Paid on",
+        "paymentReference": "Payment reference",
+        "created": "Created",
+        "updated": "Updated"
+      }
+    },
+    "dialogs": {
+      "invoice": {
+        "title": "Generate invoice",
+        "subtitle": "Mark this commission as invoiced to {institution}.",
+        "submit": "Generate invoice",
+        "submitting": "Generating…",
+        "successToast": "Invoice generated",
+        "errorToast": "Could not generate invoice",
+        "footnote": "Status will move from CLAIMED to INVOICED. The invoiced-on timestamp is recorded automatically."
+      },
+      "markPaid": {
+        "title": "Mark commission as paid",
+        "subtitle": "Record payment received from {institution}.",
+        "submit": "Mark paid",
+        "submitting": "Saving…",
+        "successToast": "Commission marked paid",
+        "errorToast": "Could not mark as paid"
+      },
+      "dispute": {
+        "title": "Raise dispute",
+        "subtitle": "Flag a discrepancy on the invoice to {institution}.",
+        "submit": "Raise dispute",
+        "submitting": "Submitting…",
+        "successToast": "Commission marked as disputed",
+        "errorToast": "Could not raise dispute"
+      },
+      "edit": {
+        "title": "Edit commission",
+        "subtitle": "Manual correction for {institution}. Status, currency, and lifecycle dates use their own controls.",
+        "submit": "Save changes",
+        "submitting": "Saving…",
+        "successToast": "Commission updated",
+        "errorToast": "Could not update commission"
+      }
+    }
+  },
+  "users": {
+    "list": {
+      "title": "Users",
+      "description": "Manage admin and counsellor accounts. Reset passwords, revoke sessions, and audit access.",
+      "newUser": "New user",
+      "searchPlaceholder": "Search by name or email",
+      "couldNotLoad": "Couldn’t load users",
+      "tryAgain": "Please try again.",
+      "noMatchTitle": "No users match your search",
+      "noMatchDescription": "Try a different name or email fragment.",
+      "emptyTitle": "No users yet",
+      "emptyDescription": "Invite your first teammate by clicking “New user”.",
+      "ariaLabel": "Users",
+      "columns": {
+        "email": "Email",
+        "name": "Name",
+        "role": "Role",
+        "active": "Active",
+        "lastSignIn": "Last sign-in",
+        "actions": "Actions"
+      },
+      "actionsForUser": "Actions for {email}",
+      "activeStateAria": "Active state for {email}",
+      "selfDeactivateTooltip": "You can’t deactivate your own account",
+      "selfDeleteTooltip": "You can’t delete your own account",
+      "actions": {
+        "edit": "Edit",
+        "resetPassword": "Reset password",
+        "revokeAllSessions": "Revoke all sessions",
+        "delete": "Delete"
+      },
+      "deleteTitle": "Delete user?",
+      "deleteDescription": "{email} will be deactivated and all active sessions will be revoked. This action is reversible in the database but not from the UI.",
+      "deleteSuccess": "User deleted.",
+      "deleteError": "Failed to delete user.",
+      "revokeTitle": "Revoke all sessions?",
+      "revokeDescription": "All active refresh tokens for {email} will be invalidated. They’ll be signed out everywhere and need to log in again.",
+      "revokeConfirm": "Revoke sessions",
+      "revokeSuccess": "{count, plural, =0 {Revoked 0 active sessions.} one {Revoked # active session.} other {Revoked # active sessions.}}",
+      "revokeError": "Failed to revoke sessions.",
+      "updateError": "Failed to update user.",
+      "forbiddenTitle": "You don’t have access to this page",
+      "forbiddenDescription": "User management is restricted to workspace administrators. If you need access, ask an admin to update your role.",
+      "lastSignInNever": "Never",
+      "relative": {
+        "justNow": "just now",
+        "minAgo": "{count} min ago",
+        "hrAgo": "{count} hr ago",
+        "dayAgo": "{count, plural, one {# day ago} other {# days ago}}",
+        "moAgo": "{count} mo ago",
+        "yrAgo": "{count, plural, one {# yr ago} other {# yrs ago}}"
+      }
+    },
+    "dialogs": {
+      "edit": {
+        "title": "Edit user",
+        "submit": "Save changes",
+        "submitting": "Saving…",
+        "role": "Role",
+        "active": "Active",
+        "inactive": "Inactive",
+        "successToast": "User updated.",
+        "errorToast": "Could not update user.",
+        "networkError": "Network error. Please try again."
+      },
+      "resetPassword": {
+        "title": "Reset password",
+        "submit": "Reset password",
+        "submitting": "Resetting…",
+        "done": "Done",
+        "newPassword": "New password",
+        "minHelp": "Minimum 12 characters.",
+        "generateAria": "Generate password",
+        "generateTooltip": "Generate strong password",
+        "showPassword": "Show password",
+        "hidePassword": "Hide password",
+        "copyAria": "Copy password",
+        "copyTooltip": "Copy",
+        "copySuccess": "Copied to clipboard.",
+        "copyFailed": "Copy failed — select and copy manually.",
+        "shareNotice": "Share this password with the user via a secure channel — it will not be shown again.",
+        "forceChange": "Require user to change password on next sign-in",
+        "successToast": "Password reset. Existing sessions revoked.",
+        "errorToast": "Failed to reset password.",
+        "networkError": "Network error. Please try again."
+      }
+    }
+  },
+  "dashboard": {
+    "welcomeBack": "Welcome back, {name}",
+    "welcomeFallback": "there",
+    "errorBanner": "Some dashboard data failed to load: {message}. Showing what we have.",
+    "dismissError": "Dismiss error",
+    "kpi": {
+      "totalStudents": "Total students",
+      "activeStudents": "Active students",
+      "upcomingExpiries": "Upcoming expiries",
+      "recentActivity": "Recent activity",
+      "vsLast30": "vs last 30 days",
+      "next60Days": "Next 60 days",
+      "last10Events": "Last 10 events"
+    },
+    "pipeline": {
+      "title": "Pipeline",
+      "subtitleCount": "{students} across {stages}",
+      "subtitleStudents": "{count, plural, =0 {No students} one {# student} other {# students}}",
+      "subtitleStages": "{count, plural, =0 {0 stages} one {# stage} other {# stages}}",
+      "subtitleFallback": "How students are distributed across pipeline stages",
+      "emptyTitle": "Pipeline is empty",
+      "emptyDescription": "Add students or run an import to see how the pipeline is distributed across stages.",
+      "unassigned": "Unassigned"
+    },
+    "recent": {
+      "title": "Recent activity",
+      "subtitle": "Latest stage transitions across all students",
+      "auditLog": "Audit log",
+      "emptyTitle": "No recent activity",
+      "emptyDescription": "Stage transitions and notes will appear here as your team moves students through the pipeline.",
+      "movedTo": "moved to",
+      "unknownStage": "Unknown stage"
+    },
+    "expiries": {
+      "title": "Upcoming expiries",
+      "subtitle": "Visa, passport, insurance & documents",
+      "emptyTitle": "All clear",
+      "emptyDescription": "No upcoming expiries — visa, passport, and insurance dates are clear for the next 60 days.",
+      "viewAll": "View all",
+      "today": "Today",
+      "oneDay": "1 day",
+      "days": "{count} days",
+      "kinds": {
+        "visa": "Visa",
+        "passport": "Passport",
+        "insurance": "Insurance",
+        "document": "Document"
+      }
+    },
+    "quick": {
+      "title": "Quick actions",
+      "subtitle": "Jump straight to common workflows",
+      "addStudent": "Add student",
+      "runImport": "Run import",
+      "openInbox": "Open inbox"
+    }
+  },
+  "audit": {
+    "aria": {
+      "lifecycleEvents": "Audit lifecycle events"
+    }
+  },
+  "breach": {
+    "aria": {
+      "markReported": "Mark reported",
+      "markClosed": "Mark closed"
+    }
+  },
+  "calendar": {
+    "aria": {
+      "calendarView": "Calendar view",
+      "monthView": "Month view",
+      "listView": "List view",
+      "refresh": "Refresh calendar",
+      "prevMonth": "Previous month",
+      "nextMonth": "Next month"
+    }
+  },
+  "exports": {
+    "aria": {
+      "refresh": "Refresh exports",
+      "exportJobs": "Export jobs"
+    }
+  },
+  "imports": {
+    "aria": {
+      "refresh": "Refresh",
+      "importJobs": "Import jobs",
+      "viewContinue": "View / continue",
+      "downloadErrors": "Download errors.jsonl",
+      "downloadResult": "Download result.jsonl",
+      "reapply": "Re-apply with same mapping"
+    }
+  },
+  "institutions": {
+    "aria": {
+      "table": "Institutions",
+      "clear": "Clear"
+    },
+    "detail": {
+      "aria": {
+        "identifiers": "Institution identifiers",
+        "accreditations": "Institution accreditations",
+        "contacts": "Institution contacts",
+        "campuses": "Institution campuses",
+        "programs": "Institution programs",
+        "departmentsIn": "Departments in {name}",
+        "deleteIdentifier": "Delete",
+        "deleteAccreditation": "Delete accreditation",
+        "deleteContact": "Delete contact",
+        "editCampus": "Edit campus {name}",
+        "deleteCampus": "Delete campus {name}",
+        "editSchool": "Edit school {name}",
+        "deleteSchool": "Delete school {name}",
+        "editDepartment": "Edit department {name}",
+        "deleteDepartment": "Delete department {name}"
+      }
+    }
+  },
+  "programs": {
+    "detail": {
+      "aria": {
+        "intakes": "Program intakes",
+        "requirements": "Program requirements",
+        "modules": "Program modules",
+        "editIntake": "Edit intake {label}",
+        "deleteIntake": "Delete intake {label}",
+        "editRequirement": "Edit requirement {label}",
+        "deleteRequirement": "Delete requirement {label}",
+        "editModule": "Edit module {code}",
+        "deleteModule": "Delete module {code}"
+      }
+    }
+  },
+  "visaTypes": {
+    "aria": {
+      "table": "Visa types for {country}",
+      "rowActions": "Actions for {name}"
+    }
+  },
+  "stages": {
+    "aria": {
+      "table": "Lifecycle stages",
+      "moveUp": "Move stage up",
+      "moveDown": "Move stage down",
+      "edit": "Edit stage",
+      "delete": "Delete stage"
+    }
+  },
+  "legal": {
+    "common": {
+      "effectiveDate": "Effective date",
+      "contact": "Contact",
+      "returnToLogin": "Return to login",
+      "draftBanner": "DRAFT — Subject to revision pending legal review. Not a substitute for a signed Data Processing Agreement.",
+      "draftFlag": "[DRAFT — REVIEW WITH COUNSEL]"
+    },
+    "terms": {
+      "title": "Terms of Service",
+      "metaDescription": "Terms of Service governing use of the workspace (draft).",
+      "sections": {
+        "acceptance": "1. Acceptance of terms",
+        "definitions": "2. Definitions",
+        "permittedUse": "3. Permitted use",
+        "accountResponsibilities": "4. Account responsibilities",
+        "paymentTerms": "5. Payment terms",
+        "acceptableUse": "6. Acceptable use policy",
+        "dataOwnership": "7. Data ownership",
+        "serviceAvailability": "8. Service availability",
+        "limitationOfLiability": "9. Limitation of liability",
+        "termination": "10. Termination",
+        "governingLaw": "11. Governing law",
+        "contact": "12. Contact"
+      },
+      "contactQuestions": "Questions about these Terms:"
+    },
+    "privacy": {
+      "title": "Privacy Policy",
+      "metaDescription": "How we collect, process, and protect personal data.",
+      "sections": {
+        "whoWeAre": "1. Who we are",
+        "dataWeCollect": "2. Data we collect",
+        "lawfulBasis": "3. Lawful basis",
+        "howWeUseData": "4. How we use data",
+        "subProcessors": "5. Sub-processors",
+        "dataResidency": "6. Data residency",
+        "retention": "7. Retention",
+        "security": "8. Security",
+        "yourRights": "9. Your rights",
+        "internationalTransfers": "10. International transfers",
+        "cookies": "11. Cookies",
+        "contactComplaints": "12. Contact & complaints"
+      },
+      "contactQueries": "Privacy queries:"
+    },
+    "support": {
+      "title": "Support",
+      "metaDescription": "How to reach us, expected response times, and where to file a bug.",
+      "intro": "We're here to help. Please include your tenant name, the URL or page you were on, and a short description of what you expected vs what happened.",
+      "sections": {
+        "contact": "Contact",
+        "responseTime": "Expected response time",
+        "status": "Status page",
+        "incidents": "Known incidents",
+        "bugReport": "How to file a bug"
+      },
+      "emailLabel": "Email:",
+      "statusIntro": "Live system status, incident history, and scheduled maintenance:",
+      "noIncidents": "No known incidents at this time.",
+      "bugIntro": "Send an email to {email} with the subject line \"Bug:\" followed by a short summary. Please include:"
+    }
+  },
+  "status": {
+    "title": "System status",
+    "metaDescription": "Live operational status, subsystem health, and incident history for the past 90 days.",
+    "intro": "Live operational status, subsystem health, and incident history for the past 90 days. Updated every 60 seconds.",
+    "asOf": "As of {when}",
+    "overall": {
+      "operational": "All systems operational",
+      "degraded": "Some systems are degraded",
+      "major_outage": "Major outage in progress"
+    },
+    "subsystems": {
+      "title": "Subsystems",
+      "empty": "No subsystem data available.",
+      "lastChecked": "Last checked {when}"
+    },
+    "subsystemStatus": {
+      "operational": "Operational",
+      "degraded": "Degraded",
+      "unknown": "Unknown"
+    },
+    "incidents": {
+      "title": "Recent incidents",
+      "empty": "No incidents in the last 90 days.",
+      "startedAt": "Started {when}",
+      "resolvedAt": " · Resolved {when}",
+      "resolved": "Resolved",
+      "open": "Open"
+    }
+  }
+}
