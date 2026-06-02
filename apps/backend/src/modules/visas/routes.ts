@@ -26,11 +26,11 @@ visaStudentRouter.post(
   validate(CreateVisaRequest),
   c.create,
 );
-visaStudentRouter.get('/', uuidParam('studentId'), validate(VisaListQuery, 'query'), c.list);
+visaStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(VisaListQuery, 'query'), c.list);
 
 export const visaRouter: Router = Router();
 visaRouter.use(authenticate, tenantContext);
-visaRouter.get('/:id', uuidParam('id'), c.get);
+visaRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('visa', 'id'), c.get);
 visaRouter.patch(
   '/:id',
   uuidParam('id'),

@@ -26,11 +26,11 @@ dependentStudentRouter.post(
   validate(CreateDependentRequest),
   c.create,
 );
-dependentStudentRouter.get('/', uuidParam('studentId'), validate(DependentListQuery, 'query'), c.list);
+dependentStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(DependentListQuery, 'query'), c.list);
 
 export const dependentRouter: Router = Router();
 dependentRouter.use(authenticate, tenantContext);
-dependentRouter.get('/:id', uuidParam('id'), c.get);
+dependentRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('dependent', 'id'), c.get);
 dependentRouter.patch(
   '/:id',
   uuidParam('id'),

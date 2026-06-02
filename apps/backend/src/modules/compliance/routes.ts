@@ -26,11 +26,11 @@ complianceStudentRouter.post(
   validate(CreateComplianceRequest),
   c.create,
 );
-complianceStudentRouter.get('/', uuidParam('studentId'), validate(ComplianceListQuery, 'query'), c.list);
+complianceStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(ComplianceListQuery, 'query'), c.list);
 
 export const complianceRouter: Router = Router();
 complianceRouter.use(authenticate, tenantContext);
-complianceRouter.get('/:id', uuidParam('id'), c.get);
+complianceRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('compliance', 'id'), c.get);
 complianceRouter.patch(
   '/:id',
   uuidParam('id'),

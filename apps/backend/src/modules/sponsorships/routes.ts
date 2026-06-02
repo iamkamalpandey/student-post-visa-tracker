@@ -53,7 +53,7 @@ sponsorshipStudentRouter.get(
 // /api/v1/sponsorships/:id
 export const sponsorshipRouter: Router = Router();
 sponsorshipRouter.use(authenticate, tenantContext);
-sponsorshipRouter.get('/:id', uuidParam('id'), sponsorshipController.get);
+sponsorshipRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('sponsorship', 'id'), sponsorshipController.get);
 sponsorshipRouter.patch(
   '/:id',
   uuidParam('id'),

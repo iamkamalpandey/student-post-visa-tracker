@@ -23,11 +23,11 @@ travelStudentRouter.post(
   validate(CreateTravelRequest),
   travelController.create,
 );
-travelStudentRouter.get('/', uuidParam('studentId'), validate(TravelListQuery, 'query'), travelController.list);
+travelStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(TravelListQuery, 'query'), travelController.list);
 
 export const travelRouter: Router = Router();
 travelRouter.use(authenticate, tenantContext);
-travelRouter.get('/:id', uuidParam('id'), travelController.get);
+travelRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('travel', 'id'), travelController.get);
 travelRouter.patch(
   '/:id',
   uuidParam('id'),

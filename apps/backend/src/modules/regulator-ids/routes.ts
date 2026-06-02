@@ -26,11 +26,11 @@ regulatorIdStudentRouter.post(
   validate(CreateRegulatorIdRequest),
   c.create,
 );
-regulatorIdStudentRouter.get('/', uuidParam('studentId'), validate(RegulatorIdListQuery, 'query'), c.list);
+regulatorIdStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(RegulatorIdListQuery, 'query'), c.list);
 
 export const regulatorIdRouter: Router = Router();
 regulatorIdRouter.use(authenticate, tenantContext);
-regulatorIdRouter.get('/:id', uuidParam('id'), c.get);
+regulatorIdRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('regulatorId', 'id'), c.get);
 regulatorIdRouter.patch(
   '/:id',
   uuidParam('id'),

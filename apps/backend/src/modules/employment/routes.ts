@@ -26,11 +26,11 @@ employmentStudentRouter.post(
   validate(CreateEmploymentRequest),
   c.create,
 );
-employmentStudentRouter.get('/', uuidParam('studentId'), validate(EmploymentListQuery, 'query'), c.list);
+employmentStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(EmploymentListQuery, 'query'), c.list);
 
 export const employmentRouter: Router = Router();
 employmentRouter.use(authenticate, tenantContext);
-employmentRouter.get('/:id', uuidParam('id'), c.get);
+employmentRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('employment', 'id'), c.get);
 employmentRouter.patch(
   '/:id',
   uuidParam('id'),

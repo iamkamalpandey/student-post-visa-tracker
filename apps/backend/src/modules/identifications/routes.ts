@@ -26,11 +26,11 @@ identificationStudentRouter.post(
   validate(CreateIdentificationRequest),
   c.create,
 );
-identificationStudentRouter.get('/', uuidParam('studentId'), validate(IdentificationListQuery, 'query'), c.list);
+identificationStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(IdentificationListQuery, 'query'), c.list);
 
 export const identificationRouter: Router = Router();
 identificationRouter.use(authenticate, tenantContext);
-identificationRouter.get('/:id', uuidParam('id'), c.get);
+identificationRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('identification', 'id'), c.get);
 identificationRouter.patch(
   '/:id',
   uuidParam('id'),

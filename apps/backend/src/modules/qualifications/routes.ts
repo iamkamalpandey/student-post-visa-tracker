@@ -26,11 +26,11 @@ qualificationStudentRouter.post(
   validate(CreateQualificationRequest),
   c.create,
 );
-qualificationStudentRouter.get('/', uuidParam('studentId'), validate(QualificationListQuery, 'query'), c.list);
+qualificationStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(QualificationListQuery, 'query'), c.list);
 
 export const qualificationRouter: Router = Router();
 qualificationRouter.use(authenticate, tenantContext);
-qualificationRouter.get('/:id', uuidParam('id'), c.get);
+qualificationRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('qualification', 'id'), c.get);
 qualificationRouter.patch(
   '/:id',
   uuidParam('id'),

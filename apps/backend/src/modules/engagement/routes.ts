@@ -26,11 +26,11 @@ engagementStudentRouter.post(
   validate(CreateEngagementRequest),
   c.create,
 );
-engagementStudentRouter.get('/', uuidParam('studentId'), validate(EngagementListQuery, 'query'), c.list);
+engagementStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(EngagementListQuery, 'query'), c.list);
 
 export const engagementRouter: Router = Router();
 engagementRouter.use(authenticate, tenantContext);
-engagementRouter.get('/:id', uuidParam('id'), c.get);
+engagementRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('engagement', 'id'), c.get);
 engagementRouter.patch(
   '/:id',
   uuidParam('id'),

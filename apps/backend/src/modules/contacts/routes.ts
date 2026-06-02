@@ -25,11 +25,11 @@ contactStudentRouter.post(
   validate(CreateContactRequest),
   c.create,
 );
-contactStudentRouter.get('/', uuidParam('studentId'), validate(ContactListQuery, 'query'), c.list);
+contactStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(ContactListQuery, 'query'), c.list);
 
 export const contactRouter: Router = Router();
 contactRouter.use(authenticate, tenantContext);
-contactRouter.get('/:id', uuidParam('id'), c.get);
+contactRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('contact', 'id'), c.get);
 contactRouter.patch(
   '/:id',
   uuidParam('id'),

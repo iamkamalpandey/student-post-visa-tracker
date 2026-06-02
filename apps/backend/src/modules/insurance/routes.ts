@@ -26,11 +26,11 @@ insuranceStudentRouter.post(
   validate(CreateInsuranceRequest),
   c.create,
 );
-insuranceStudentRouter.get('/', uuidParam('studentId'), validate(InsuranceListQuery, 'query'), c.list);
+insuranceStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(InsuranceListQuery, 'query'), c.list);
 
 export const insuranceRouter: Router = Router();
 insuranceRouter.use(authenticate, tenantContext);
-insuranceRouter.get('/:id', uuidParam('id'), c.get);
+insuranceRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('insurance', 'id'), c.get);
 insuranceRouter.patch(
   '/:id',
   uuidParam('id'),

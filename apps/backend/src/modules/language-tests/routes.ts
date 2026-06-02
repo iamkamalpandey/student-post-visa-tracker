@@ -26,11 +26,11 @@ languageTestStudentRouter.post(
   validate(CreateLanguageTestRequest),
   c.create,
 );
-languageTestStudentRouter.get('/', uuidParam('studentId'), validate(LanguageTestListQuery, 'query'), c.list);
+languageTestStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(LanguageTestListQuery, 'query'), c.list);
 
 export const languageTestRouter: Router = Router();
 languageTestRouter.use(authenticate, tenantContext);
-languageTestRouter.get('/:id', uuidParam('id'), c.get);
+languageTestRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('languageTest', 'id'), c.get);
 languageTestRouter.patch(
   '/:id',
   uuidParam('id'),

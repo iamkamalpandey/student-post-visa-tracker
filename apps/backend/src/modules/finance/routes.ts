@@ -26,11 +26,11 @@ financeStudentRouter.post(
   validate(CreateFinanceRequest),
   c.create,
 );
-financeStudentRouter.get('/', uuidParam('studentId'), validate(FinanceListQuery, 'query'), c.list);
+financeStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(FinanceListQuery, 'query'), c.list);
 
 export const financeRouter: Router = Router();
 financeRouter.use(authenticate, tenantContext);
-financeRouter.get('/:id', uuidParam('id'), c.get);
+financeRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('finance', 'id'), c.get);
 financeRouter.patch(
   '/:id',
   uuidParam('id'),

@@ -26,11 +26,11 @@ accommodationStudentRouter.post(
   validate(CreateAccommodationRequest),
   c.create,
 );
-accommodationStudentRouter.get('/', uuidParam('studentId'), validate(AccommodationListQuery, 'query'), c.list);
+accommodationStudentRouter.get('/', uuidParam('studentId'), requireStudentOwnership('studentId'), validate(AccommodationListQuery, 'query'), c.list);
 
 export const accommodationRouter: Router = Router();
 accommodationRouter.use(authenticate, tenantContext);
-accommodationRouter.get('/:id', uuidParam('id'), c.get);
+accommodationRouter.get('/:id', uuidParam('id'), requireStudentOwnershipViaChild('accommodation', 'id'), c.get);
 accommodationRouter.patch(
   '/:id',
   uuidParam('id'),
