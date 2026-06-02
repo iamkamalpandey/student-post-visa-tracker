@@ -160,7 +160,16 @@ webhooksRouter.post(
       });
       return;
     }
-    const bodyBuf = (req.body as Buffer) ?? Buffer.alloc(0);
+    // SVT-AUDIT-SEC-2026-06 (backlog rank 1) — prefer the raw bytes captured by
+    // the global express.json({ verify }) (production path, where the global
+    // parser has already consumed the stream). Fall back to req.body when it is
+    // itself a Buffer (the isolated-router test path, which mounts this router
+    // without the global parser so the route's own raw() parser populates it).
+    const bodyBuf = Buffer.isBuffer(req.rawBody)
+      ? req.rawBody
+      : Buffer.isBuffer(req.body)
+        ? (req.body as Buffer)
+        : Buffer.alloc(0);
     if (!verifySignature(req, bodyBuf)) {
       logger.warn({ ip: req.ip }, 'webhooks/resend: signature verification failed');
       // Resend retries on non-2xx, so a 401 here means they back off — exactly

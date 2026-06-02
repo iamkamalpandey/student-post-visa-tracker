@@ -145,7 +145,21 @@ export function createApp(): Express {
     }),
   );
 
-  app.use(express.json({ limit: '256kb', strict: true }));
+  // SVT-AUDIT-SEC-2026-06 (backlog rank 1) — capture the raw body bytes so
+  // signed-webhook routes (Resend HMAC) can verify against exactly what the
+  // sender signed. Without this, the global JSON parser consumes the body
+  // (sets req._body) before the webhook router's own raw parser can run, so the
+  // HMAC was computed over a re-stringified object and every signed webhook
+  // 401'd in production. `verify` runs before JSON.parse and never blocks.
+  app.use(
+    express.json({
+      limit: '256kb',
+      strict: true,
+      verify: (req, _res, buf) => {
+        (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
   app.use(cookieParser());
   app.use(securityHeaders);

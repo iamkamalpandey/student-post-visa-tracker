@@ -196,3 +196,60 @@ describe('POST /api/v1/webhooks/resend', () => {
     expect(auditCalls).toHaveLength(0);
   });
 });
+
+// SVT-AUDIT-SEC-2026-06 (backlog rank 1) — regression: the PRODUCTION app mounts
+// a global express.json() BEFORE the webhook router. That parser consumes the
+// body (sets req._body) so the webhook's own raw() parser is skipped and the
+// HMAC was being computed over a re-stringified object → every signed webhook
+// 401'd in prod. The isolated makeApp() above masked it (no global parser).
+// These tests mirror the real middleware ordering: global json with the
+// rawBody-capturing `verify` callback, THEN the webhook router.
+function makeAppWithGlobalJson() {
+  const app = express();
+  app.use(
+    express.json({
+      limit: '256kb',
+      strict: true,
+      verify: (req, _res, buf) => {
+        (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
+  app.use('/api/v1/webhooks', webhooksRouter);
+  return app;
+}
+
+describe('POST /api/v1/webhooks/resend behind the global JSON parser (prod ordering)', () => {
+  it('valid signed bounce still verifies + flips the flag (was 401 before the fix)', async () => {
+    const body = JSON.stringify({
+      type: 'email.bounced',
+      data: { to: 'alice@example.com', email_id: 'r-prod-1' },
+    });
+    const ts = Math.floor(Date.now() / 1000);
+    const sig = signEvent('evt-prod-1', ts, body);
+    const res = await request(makeAppWithGlobalJson())
+      .post('/api/v1/webhooks/resend')
+      .set('content-type', 'application/json')
+      .set('svix-id', 'evt-prod-1')
+      .set('svix-timestamp', String(ts))
+      .set('svix-signature', sig)
+      .send(body);
+    expect(res.status).toBe(200);
+    expect(store.users[0]!.notifications_email_enabled).toBe(false);
+    expect(auditCalls.some((c) => c.action === 'comms.bounced')).toBe(true);
+  });
+
+  it('tampered signature still 401s through the global parser', async () => {
+    const body = JSON.stringify({ type: 'email.bounced', data: { to: 'alice@example.com' } });
+    const ts = Math.floor(Date.now() / 1000);
+    const res = await request(makeAppWithGlobalJson())
+      .post('/api/v1/webhooks/resend')
+      .set('content-type', 'application/json')
+      .set('svix-id', 'evt-prod-2')
+      .set('svix-timestamp', String(ts))
+      .set('svix-signature', 'v1,deadbeef')
+      .send(body);
+    expect(res.status).toBe(401);
+    expect(store.users[0]!.notifications_email_enabled).toBe(true);
+  });
+});

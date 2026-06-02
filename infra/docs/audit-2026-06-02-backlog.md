@@ -15,7 +15,7 @@ Severity legend: 🔴 high · 🟠 medium · 🟡 low. Status: ☐ todo · ⏳ i
 ## Wave 1 — Security / Authorization / Data-integrity (HIGH)
 | # | Sev | Item | Status |
 |---|-----|------|--------|
-| 1 | 🔴 | Resend webhook HMAC always 401s in prod (global `express.json` eats raw body) | ☐ |
+| 1 | 🔴 | Resend webhook HMAC always 401s in prod (global `express.json` eats raw body) | ✅ |
 | 2 | 🔴 | Cross-counsellor PII IDOR: ~15 child `GET /:id` reads not ownership-gated | ✅ |
 | 3 | 🔴 | User lifecycle (create/role-change/deactivate/pw-reset/revoke) writes NO audit | ☐ |
 | 4 | 🔴 | Comms thread LIST leaks last-message body tenant-wide to any counsellor | ✅ |

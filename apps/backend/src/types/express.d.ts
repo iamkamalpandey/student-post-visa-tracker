@@ -42,6 +42,13 @@ declare global {
       audit?: AuditContextLike;
       /** Timestamp of a successful MFA step-up, set by `requireMfa` middleware. */
       mfaVerifiedAt?: Date;
+      /**
+       * Raw request body bytes, captured by the global `express.json({ verify })`
+       * so webhook signature checks (Resend HMAC) can hash exactly what the
+       * sender signed — the parsed `req.body` object cannot be re-serialised
+       * byte-identically. See app.ts + modules/comms/webhooks.routes.ts.
+       */
+      rawBody?: Buffer;
     }
   }
 }
