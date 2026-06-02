@@ -1,6 +1,6 @@
 'use client';
 
-import { type ReactNode } from 'react';
+import { type ReactNode, type ReactElement, cloneElement, isValidElement, useId } from 'react';
 import { Box, Stack, Tooltip, Typography } from '@mui/material';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 
@@ -70,6 +70,32 @@ export default function LabeledField({
     );
   }
 
+  // SVT-AUDIT-A11Y-2026-06 (backlog rank 9) — programmatically associate the
+  // helper/error text with the wrapped input so a screen reader announces the
+  // REASON ("Required", "Min 12 chars") instead of only "invalid". We clone the
+  // child (typically a MUI TextField) to merge aria-describedby into its
+  // inputProps, preserving any the caller already set, and set aria-invalid in
+  // the error state. The error helper also becomes a role="alert" live region
+  // (WCAG 3.3.1 Error Identification + 4.1.3 Status Messages).
+  const reactId = useId();
+  const helperId = helperText ? `${reactId}-helper` : undefined;
+  type WithInputProps = { inputProps?: Record<string, unknown> };
+  const describedChild =
+    helperId && isValidElement(children)
+      ? cloneElement(children as ReactElement<WithInputProps>, {
+          inputProps: {
+            ...((children as ReactElement<WithInputProps>).props.inputProps ?? {}),
+            'aria-describedby': [
+              (children as ReactElement<WithInputProps>).props.inputProps?.['aria-describedby'],
+              helperId,
+            ]
+              .filter(Boolean)
+              .join(' '),
+            ...(error ? { 'aria-invalid': true } : {}),
+          },
+        })
+      : children;
+
   return (
     <Stack spacing={0.5} sx={{ mb: 0.5 }}>
       <Stack direction="row" alignItems="center" spacing={0.5} component="span">
@@ -117,9 +143,15 @@ export default function LabeledField({
           </Tooltip>
         )}
       </Stack>
-      {children}
+      {describedChild}
       {helperText && (
-        <Typography variant="caption" color={error ? 'error.main' : 'text.secondary'} sx={{ minHeight: 16 }}>
+        <Typography
+          id={helperId}
+          role={error ? 'alert' : undefined}
+          variant="caption"
+          color={error ? 'error.main' : 'text.secondary'}
+          sx={{ minHeight: 16 }}
+        >
           {helperText}
         </Typography>
       )}

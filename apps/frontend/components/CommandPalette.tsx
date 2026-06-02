@@ -5,7 +5,7 @@
 // Keyboard-first: arrows + Enter to navigate, Escape to close. Mounted once
 // at the AppShell level so it's available on every page.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import {
@@ -137,6 +137,13 @@ export default function CommandPalette() {
     return out;
   }, [items]);
 
+  // SVT-AUDIT-A11Y-2026-06 (backlog rank 24) — ARIA 1.2 combobox/listbox ids so
+  // the active result is conveyed to assistive tech via aria-activedescendant,
+  // not visual highlight alone (WCAG 4.1.2).
+  const baseId = useId();
+  const listboxId = `${baseId}-listbox`;
+  const optionId = (i: number) => `${baseId}-opt-${i}`;
+
   return (
     <Dialog
       open={open}
@@ -156,7 +163,14 @@ export default function CommandPalette() {
         <InputBase
           fullWidth
           placeholder="Search routes, students…"
-          inputProps={{ 'aria-label': 'Command palette search', autoComplete: 'off' }}
+          inputProps={{
+            'aria-label': 'Command palette search',
+            autoComplete: 'off',
+            role: 'combobox',
+            'aria-expanded': true,
+            'aria-controls': listboxId,
+            'aria-activedescendant': items.length ? optionId(active) : undefined,
+          }}
           {...register('q')}
         />
         <Chip size="small" label="Esc" variant="outlined" />
@@ -185,15 +199,23 @@ export default function CommandPalette() {
             </Stack>
           </Box>
         ) : null}
-        <List ref={listRef} dense disablePadding subheader={<li />}>
+        <List
+          ref={listRef}
+          dense
+          disablePadding
+          subheader={<li />}
+          role="listbox"
+          id={listboxId}
+          aria-label="Command results"
+        >
           {grouped.length === 0 && (
             <Box sx={{ px: 3, py: 4 }}>
               <Typography variant="body2" color="text.secondary">No matches.</Typography>
             </Box>
           )}
           {grouped.map((g) => (
-            <li key={g.group}>
-              <ul style={{ padding: 0 }}>
+            <li key={g.group} role="presentation">
+              <ul style={{ padding: 0 }} role="group" aria-label={g.group}>
                 <ListSubheader disableSticky sx={{ bgcolor: 'transparent', lineHeight: '28px', fontSize: 11 }}>
                   {g.group}
                 </ListSubheader>
@@ -201,6 +223,9 @@ export default function CommandPalette() {
                   <ListItemButton
                     key={item.id}
                     data-cmd-idx={idx}
+                    id={optionId(idx)}
+                    role="option"
+                    aria-selected={idx === active}
                     selected={idx === active}
                     onMouseEnter={() => setActive(idx)}
                     onClick={() => runItem(item)}

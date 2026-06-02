@@ -42,10 +42,10 @@ Severity legend: 🔴 high · 🟠 medium · 🟡 low. Status: ☐ todo · ⏳ i
 ## Wave 4 — Accessibility / i18n / UX
 | # | Sev | Item | Status |
 |---|-----|------|--------|
-| 9 | 🔴 | Form errors not linked to inputs (no `aria-describedby`) — shared `LabeledField` | ☐ |
-| 21 | 🟡 | Error toasts `aria-live=polite` not assertive | ☐ |
-| 24 | 🟡 | Cmd-K palette lacks combobox/listbox ARIA | ☐ |
-| 19 | 🟡 | Notification-bell badge undercounts reminders (capped 10, wrong scope) | ☐ |
+| 9 | 🔴 | Form errors not linked to inputs (no `aria-describedby`) — shared `LabeledField` | ✅ |
+| 21 | 🟡 | Error toasts `aria-live=polite` not assertive | ✅ |
+| 24 | 🟡 | Cmd-K palette lacks combobox/listbox ARIA | ✅ |
+| 19 | 🟡 | Notification-bell badge undercounts reminders (capped 10, wrong scope) | ✅ |
 | 22 | 🟡 | Bell + Admin hub not internationalized; raw `/reminders` link text | ☐ |
 | 8 | 🔴 | ar/ne locale catalogs are 100% English placeholders | ☐ |
 | 31a | 🟡 | hi.json unreachable dead catalog | ☐ |

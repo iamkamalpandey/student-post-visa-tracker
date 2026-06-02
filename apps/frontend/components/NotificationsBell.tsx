@@ -128,11 +128,19 @@ export default function NotificationsBell() {
           due_to: dueTo,
         },
       });
-      return unwrap<Reminder[]>(res.data) ?? [];
+      const items = unwrap<Reminder[]>(res.data) ?? [];
+      // SVT-AUDIT-UX-2026-06 (backlog rank 19) — the badge must reflect the TRUE
+      // count of due-soon reminders, not the capped (limit:10) preview list
+      // length, or a counsellor with 11+ sees a badge frozen below the real
+      // number. Read page.total when the API supplies it; fall back to length.
+      const total =
+        (res.data as { page?: { total?: number } } | undefined)?.page?.total ?? items.length;
+      return { items, total };
     },
   });
 
-  const reminders = remindersQuery.data ?? [];
+  const reminders = remindersQuery.data?.items ?? [];
+  const reminderTotal = remindersQuery.data?.total ?? reminders.length;
 
   // SVT-WAVE7-INBOX-2026-05 — fetch IN_APP notifications alongside reminders.
   // Both feed the bell badge and the drawer. Refresh on the same cadence so a
@@ -150,7 +158,7 @@ export default function NotificationsBell() {
   });
   const inboxMessages = inboxQuery.data?.data ?? [];
   const inboxUnreadCount = inboxQuery.data?.unread_count ?? 0;
-  const count = reminders.length + inboxUnreadCount;
+  const count = reminderTotal + inboxUnreadCount;
 
   const markRead = useMutation({
     mutationFn: async (id: string) => {
@@ -291,7 +299,7 @@ export default function NotificationsBell() {
                 onClick={handleViewAll}
                 sx={{ verticalAlign: 'baseline' }}
               >
-                /reminders
+                the Inbox
               </MuiLink>
               .
             </Typography>

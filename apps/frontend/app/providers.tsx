@@ -4,7 +4,7 @@
 // reference to @tanstack+query-devtools after dependency upgrade. Safe to
 // remove on the next planned dev-server restart.
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, forwardRef, type ReactNode } from 'react';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -15,11 +15,25 @@ const ReactQueryDevtools = dynamic(
   () => import('@tanstack/react-query-devtools').then((m) => m.ReactQueryDevtools),
   { ssr: false }
 );
-import { SnackbarProvider } from 'notistack';
+import { SnackbarProvider, MaterialDesignContent, type CustomContentProps } from 'notistack';
 import Cookies from 'js-cookie';
 import { createAppTheme } from '@/theme/theme';
 import { getQueryClient } from '@/lib/queryClient';
 import { AuthProvider } from '@/lib/auth';
+
+// SVT-AUDIT-A11Y-2026-06 (backlog rank 21) — error/warning toasts must be
+// announced ASSERTIVELY so screen-reader users catch failures mid-task.
+// notistack has no per-variant aria-live, and the provider-level SnackbarProps
+// makes EVERY variant polite. We override just the error + warning variants
+// with content marked role="alert" (implicit aria-live="assertive"); info /
+// success keep the polite default. WCAG 2.2 SC 4.1.3 Status Messages.
+// role is injected via spread because notistack's CustomContentProps type does
+// not list it; MaterialDesignContent (a styled div) forwards it to the DOM.
+const AssertiveToastContent = forwardRef<HTMLDivElement, CustomContentProps>(
+  function AssertiveToastContent(props, ref) {
+    return <MaterialDesignContent ref={ref} {...props} {...({ role: 'alert' } as object)} />;
+  },
+);
 
 type Mode = 'light' | 'dark' | 'system';
 const THEME_COOKIE = 'spv-theme';
@@ -102,13 +116,12 @@ export default function Providers({ children }: { children: ReactNode }) {
             autoHideDuration={4500}
             preventDuplicate
             dense={false}
-            // SVT-A11Y-2026-05 — assistive-tech announcement. Errors +
-            // warnings interrupt (assertive) so users with screen readers
-            // catch failures; info/success are polite to avoid flooding.
-            // Per WCAG 2.2 SC 4.1.3 "Status Messages".
+            // SVT-A11Y-2026-05/06 — assistive-tech announcement. info/success are
+            // polite (this default) to avoid flooding; error/warning interrupt
+            // (assertive) via the role="alert" Components override below so
+            // screen-reader users catch failures. WCAG 2.2 SC 4.1.3.
             SnackbarProps={{ role: 'status', 'aria-live': 'polite' } as never}
-            // For error / warning specifically, override via Components prop
-            // since notistack doesn't expose a per-variant aria-live prop.
+            Components={{ error: AssertiveToastContent, warning: AssertiveToastContent }}
           >
             <AuthProvider>
               {/* suppress mismatch on first paint while we hydrate the theme */}
