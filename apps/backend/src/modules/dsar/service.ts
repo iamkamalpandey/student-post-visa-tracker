@@ -17,9 +17,13 @@
 // Plus a derived `is_overdue` / `days_remaining` pair attached at list-time so the FE
 // can surface the GDPR / UK DPA 30-day clock without re-implementing the formula.
 import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+// Runtime value import for Prisma namespace helpers (Prisma.DbNull when nulling
+// a nullable Json column during erasure). Kept separate from the `import type`
+// above so existing type-only references (Prisma.TransactionClient) are unaffected.
+import { Prisma as PrismaNS } from '@prisma/client';
 import { prisma } from '../../config/db.js';
 import { logger } from '../../config/logger.js';
-import { NotFound, UnprocessableEntity } from '../../shared/errors.js';
+import { NotFound, UnprocessableEntity, Conflict } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
 import { notifyStatusTransition } from '../../shared/transitionNotify.js';
 import { assertOrThrow } from '../../shared/fsm.js';
@@ -225,6 +229,201 @@ async function eraseStudent(
     await tx.reminder.updateMany({
       where: { tenant_id: tenantId, student_id: studentId, deleted_at: null },
       data: { deleted_at: now },
+    });
+
+    // SVT-DSAR-ERASURE-COMPLETE-2026-06 (backlog rank 7) — the tables below were
+    // confirmed by audit to carry student-linked PII but were NOT being shredded
+    // by the original routine, leaving a silent partial-erasure. All run inside
+    // the same $transaction so the erasure stays atomic.
+
+    // 7. ComplianceCheck — free-text result + notes about the subject's
+    // medical/biometric/police checks. Redact the free-text carriers; the
+    // check_type / dates are operational metadata kept for the soft-deleted
+    // record skeleton.
+    await tx.complianceCheck.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: {
+        result: null,
+        notes: null,
+      },
+    });
+
+    // 8. EngagementCheck — free-text notes on attendance/engagement contact.
+    await tx.engagementCheck.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: { notes: null },
+    });
+
+    // 9. Addresses. StudentAddress is the per-student link row; Address is a
+    // SHARED catalog row (referenced by accommodations, contacts, sponsors,
+    // employer_addresses, institutions, campuses — see schema relations). We
+    // therefore:
+    //   (a) collect this student's linked address_ids,
+    //   (b) anonymise an Address row ONLY when it is orphaned — i.e. no OTHER
+    //       entity still references it — so we never destroy a catalog row that
+    //       a different student/institution legitimately shares,
+    //   (c) hard-delete the StudentAddress link rows (they carry no PII of their
+    //       own beyond the FK + validity dates, and the subject record should
+    //       not survive the erasure per ICO guidance).
+    const studentAddressLinks = await tx.studentAddress.findMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      select: { address_id: true },
+    });
+    const linkedAddressIds = [...new Set(studentAddressLinks.map((l) => l.address_id))];
+    // Remove this student's link rows first so the orphan check below doesn't
+    // count them as live references.
+    await tx.studentAddress.deleteMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+    });
+    for (const addressId of linkedAddressIds) {
+      // An Address is orphaned when nothing else points at it. Count every
+      // referrer relation declared on Address in schema.prisma.
+      const [
+        otherStudentAddrs,
+        accommodations,
+        contacts,
+        sponsors,
+        employerAddrs,
+        institutions,
+        campuses,
+      ] = await Promise.all([
+        tx.studentAddress.count({ where: { address_id: addressId } }),
+        tx.accommodation.count({ where: { address_id: addressId } }),
+        tx.studentContact.count({ where: { address_id: addressId } }),
+        tx.sponsor.count({ where: { address_id: addressId } }),
+        tx.studentEmployment.count({ where: { employer_address_id: addressId } }),
+        tx.institution.count({ where: { primary_address_id: addressId } }),
+        tx.campus.count({ where: { address_id: addressId } }),
+      ]);
+      const stillReferenced =
+        otherStudentAddrs +
+        accommodations +
+        contacts +
+        sponsors +
+        employerAddrs +
+        institutions +
+        campuses;
+      if (stillReferenced === 0) {
+        // Orphaned → safe to anonymise the underlying Address PII. We keep the
+        // row (FK targets may briefly dangle in other shredded child rows) but
+        // null/blank every locational identifier.
+        await tx.address.updateMany({
+          where: { id: addressId, tenant_id: tenantId },
+          data: {
+            line1: ERASED,
+            line2: null,
+            line3: null,
+            locality: ERASED,
+            region: null,
+            postal_code: null,
+            latitude: null,
+            longitude: null,
+            formatted: null,
+          },
+        });
+      }
+      // else: shared catalog row — left intact for the other referencing entity.
+    }
+
+    // 10. TravelRecord — itinerary PII (PNR, flight, pickup notes, fare).
+    await tx.travelRecord.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: {
+        pnr: null,
+        flight_number: null,
+        pickup_notes: null,
+        fare_minor: null,
+      },
+    });
+
+    // 11. StudentEmployment — employer name + free-text notes. The linked
+    // employer Address is a shared catalog row handled by the orphan sweep in
+    // step 9 when it was reachable via this student's StudentAddress; we do not
+    // touch employer_address_id here to avoid orphaning a shared employer row.
+    await tx.studentEmployment.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: {
+        employer_name: ERASED,
+        notes: null,
+      },
+    });
+
+    // 12. Accommodation — provider contact PII. The linked Address is handled by
+    // the orphan sweep in step 9.
+    await tx.accommodation.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: {
+        provider_name: null,
+        contact_phone_e164: null,
+        contact_email: null,
+      },
+    });
+
+    // 13. AcademicQualification — institution + grade free-text. institution is
+    // NOT NULL so it gets the ERASED sentinel; the rest are nullable.
+    await tx.academicQualification.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: {
+        institution: ERASED,
+        board_or_university: null,
+        field_of_study: null,
+        grade_value: null,
+        grade_scale: null,
+      },
+    });
+
+    // 14. StudentSponsorship — the link row carries this student's financial PII
+    // (amount, notes, letter doc id) and has no `deleted_at` column, so we
+    // HARD-DELETE it (the established remove path in modules/sponsorships and
+    // consistent with the StudentAddress link removal in step 9) rather than
+    // merely nulling — a per-student link row does not independently justify
+    // retention once the subject is erased. The Sponsor entity itself is a
+    // tenant-level SHARED catalog (it has no student_id) so we never
+    // blanket-erase it; we only anonymise a Sponsor row when it becomes orphaned
+    // (no remaining StudentSponsorship references it after this student's links
+    // are removed). Capturing the sponsor_ids BEFORE the delete, and deleting
+    // BEFORE the orphan count, is what makes the count exclude this student's
+    // own links (otherwise the count never reaches 0 and an orphaned Sponsor's
+    // PII would silently survive the erasure).
+    const sponsorshipLinks = await tx.studentSponsorship.findMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      select: { sponsor_id: true },
+    });
+    const linkedSponsorIds = [...new Set(sponsorshipLinks.map((l) => l.sponsor_id))];
+    await tx.studentSponsorship.deleteMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+    });
+    for (const sponsorId of linkedSponsorIds) {
+      const remaining = await tx.studentSponsorship.count({
+        where: { sponsor_id: sponsorId },
+      });
+      if (remaining === 0) {
+        // Orphaned sponsor → anonymise its identifying PII. Kept (not deleted)
+        // because it's a catalog row whose Address is swept separately.
+        await tx.sponsor.updateMany({
+          where: { id: sponsorId, tenant_id: tenantId },
+          data: {
+            legal_name: ERASED,
+            registration_no: null,
+            email: null,
+            phone_e164: null,
+          },
+        });
+      }
+      // else: still shared by another student's sponsorship — left intact.
+    }
+
+    // 15. ConsentRecord — polymorphic (subject_type/subject_id). We preserve the
+    // row as proof-of-action (lawful_basis / granted history is a record of the
+    // erasure decision itself) but withdraw any live consent and null the only
+    // free-text PII carrier, `evidence` (a JSON blob that may embed identifiers).
+    await tx.consentRecord.updateMany({
+      where: { tenant_id: tenantId, subject_type: 'student', subject_id: studentId },
+      data: {
+        granted: false,
+        revoked_at: now,
+        evidence: PrismaNS.DbNull,
+      },
     });
   });
 
@@ -704,11 +903,26 @@ export const dsarService = {
     }
 
     // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+    // SVT-AUDIT-SEC-2026-06 (backlog rank 16) — when this PATCH is a status
+    // TRANSITION, guard the write on the from-status so two concurrent
+    // transitions can't both win (which would fire the COMPLETED side-effects —
+    // export bundle generation and ERASURE purge — twice). The loser matches 0
+    // rows and is rejected as a concurrent modification rather than silently
+    // re-running irreversible work.
+    const isTransition = Boolean(body.status && body.status !== beforeStatus);
     const r = await db(req).dSARRequest.updateMany({
-      where: { id, tenant_id: req.user!.tid },
+      where: {
+        id,
+        tenant_id: req.user!.tid,
+        ...(isTransition ? { status: beforeStatus } : {}),
+      },
       data: data as never,
     });
-    if (r.count !== 1) throw NotFound('DSAR request not found');
+    if (r.count !== 1) {
+      throw isTransition
+        ? Conflict('DSAR request was modified concurrently; reload and retry')
+        : NotFound('DSAR request not found');
+    }
     const after = await db(req).dSARRequest.findFirstOrThrow({
       where: { id, tenant_id: req.user!.tid },
     });
@@ -821,31 +1035,64 @@ export const dsarService = {
         const tenantId = req.user!.tid;
         const actorId = req.user?.sub ?? null;
 
-        let result: Record<string, unknown> = {};
-        if (subjectType === 'student' && subjectId) {
-          result = await eraseStudent(subjectId, tenantId, actorId);
-        } else if (subjectType === 'user' && subjectId) {
-          result = await eraseUser(subjectId, tenantId, actorId);
-        } else {
-          // Unknown subject_type → audit + leave the rest to the operator. Do
-          // NOT throw: the DSAR is already COMPLETED at the operator's intent.
-          logger.warn(
-            { dsar_id: id, subject_type: subjectType, subject_id: subjectId },
-            'DSAR erasure: unknown subject_type — manual purge required',
-          );
-          result = { skipped: true, reason: 'unknown_subject_type' };
-        }
+        try {
+          let result: Record<string, unknown> = {};
+          if (subjectType === 'student' && subjectId) {
+            result = await eraseStudent(subjectId, tenantId, actorId);
+          } else if (subjectType === 'user' && subjectId) {
+            result = await eraseUser(subjectId, tenantId, actorId);
+          } else {
+            // Unknown subject_type → audit + leave the rest to the operator. Do
+            // NOT throw: the DSAR is already COMPLETED at the operator's intent.
+            logger.warn(
+              { dsar_id: id, subject_type: subjectType, subject_id: subjectId },
+              'DSAR erasure: unknown subject_type — manual purge required',
+            );
+            result = { skipped: true, reason: 'unknown_subject_type' };
+          }
 
-        await writeAudit(req as never, {
-          action: 'dsar.erasure.executed',
-          entityType: 'dsar_request',
-          entityId: id,
-          after: {
-            subject_type: subjectType ?? null,
-            subject_id: subjectId ?? null,
-            ...result,
-          },
-        });
+          await writeAudit(req as never, {
+            action: 'dsar.erasure.executed',
+            entityType: 'dsar_request',
+            entityId: id,
+            after: {
+              subject_type: subjectType ?? null,
+              subject_id: subjectId ?? null,
+              ...result,
+            },
+          });
+        } catch (err) {
+          // SVT-AUDIT-SEC-2026-06 (backlog rank 5) — erasure IS the legal point
+          // of a type=ERASURE DSAR. Previously it ran after the status had
+          // already committed COMPLETED, with no error handling, so a failed
+          // purge left the request COMPLETED while the subject's PII survived —
+          // a silent incomplete-erasure breach (and the old comment claiming the
+          // status stays IN_PROGRESS on failure was false). Revert the status to
+          // its pre-transition value, clear completed_at, audit the failure, and
+          // re-throw so the operator sees the error and retries rather than
+          // trusting a false COMPLETED.
+          logger.error(
+            { err, dsar_id: id, subject_type: subjectType, subject_id: subjectId },
+            'DSAR erasure failed — reverting status from COMPLETED',
+          );
+          await db(req).dSARRequest.updateMany({
+            where: { id, tenant_id: tenantId },
+            data: { status: beforeStatus, completed_at: null } as never,
+          });
+          await writeAudit(req as never, {
+            action: 'dsar.erasure.failed',
+            entityType: 'dsar_request',
+            entityId: id,
+            before: { status: 'COMPLETED' },
+            after: {
+              reverted_to: beforeStatus,
+              error: (err as Error)?.message ?? String(err),
+              subject_type: subjectType ?? null,
+              subject_id: subjectId ?? null,
+            },
+          });
+          throw err;
+        }
       }
     }
 

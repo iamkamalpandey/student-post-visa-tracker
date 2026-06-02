@@ -19,11 +19,11 @@ Severity legend: 🔴 high · 🟠 medium · 🟡 low. Status: ☐ todo · ⏳ i
 | 2 | 🔴 | Cross-counsellor PII IDOR: ~15 child `GET /:id` reads not ownership-gated | ✅ |
 | 3 | 🔴 | User lifecycle (create/role-change/deactivate/pw-reset/revoke) writes NO audit | ✅ |
 | 4 | 🔴 | Comms thread LIST leaks last-message body tenant-wide to any counsellor | ✅ |
-| 5 | 🔴 | GDPR Art.17 erasure non-atomic (status COMPLETED before erase, unguarded) | ☐ |
+| 5 | 🔴 | GDPR Art.17 erasure non-atomic (status COMPLETED before erase, unguarded) | ✅ |
 | 6 | 🔴 | `completeRefund`/`voidPayment` double-reversal race (no idempotency/status guard) | ✅ |
-| 7 | 🔴 | GDPR Art.17 erasure incomplete (address/travel/employment/etc. survive) | ☐ |
+| 7 | 🔴 | GDPR Art.17 erasure incomplete (address/travel/employment/etc. survive) | ✅ |
 | 15 | 🟠 | `failRefund` missing MFA step-up + Idempotency-Key (siblings have them) | ✅ |
-| 16 | 🟠 | DSAR status update has no status guard (concurrent PATCH runs erasure twice) | ☐ |
+| 16 | 🟠 | DSAR status update has no status guard (concurrent PATCH runs erasure twice) | ✅ |
 
 ## Wave 2 — Data-integrity / GDPR (MEDIUM)
 | # | Sev | Item | Status |

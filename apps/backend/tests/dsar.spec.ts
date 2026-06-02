@@ -193,6 +193,16 @@ vi.mock('../src/shared/idempotencyHandler.js', () => ({
     const body = await work();
     res.status(201).json(body);
   },
+  // routes.ts requires an Idempotency-Key on POST; tests bypass the guard.
+  requireIdempotencyKey: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+// routes.ts mounts the real dsarLimiter/heavyReadLimiter (20/min). Across this
+// suite many DSARs are created, which trips the real limiter; bypass it so the
+// FSM/decoration assertions aren't masked by spurious 429s.
+vi.mock('../src/middlewares/rateLimit.js', () => ({
+  dsarLimiter: (_req: unknown, _res: unknown, next: () => void) => next(),
+  heavyReadLimiter: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
 const { dsarRouter } = await import('../src/modules/dsar/routes.js');
