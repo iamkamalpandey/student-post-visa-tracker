@@ -89,10 +89,25 @@ vi.mock('../src/config/db.js', () => {
     payment: {
       findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
         matchWhere(store.payments, where)[0] ?? null),
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const p = store.payments.find((x) => x.id === where.id);
+        if (!p) throw new Error('payment not found');
+        return p;
+      }),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const p = store.payments.find((x) => x.id === where.id)!;
         Object.assign(p, data);
         return p;
+      }),
+      // Status-guarded updateMany (SVT-AUDIT-SEC-2026-06). Matches by where
+      // (id + status), applies non-increment fields, returns the matched count.
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const rows = matchWhere(store.payments, where);
+        for (const p of rows) for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'object' && v !== null && 'increment' in (v as object)) continue;
+          (p as Record<string, unknown>)[k] = v;
+        }
+        return { count: rows.length };
       }),
     },
     paymentAllocation: {
@@ -147,6 +162,11 @@ vi.mock('../src/config/db.js', () => {
     refund: {
       findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
         matchWhere(store.refunds, where)[0] ?? null),
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const r = store.refunds.find((x) => x.id === where.id);
+        if (!r) throw new Error('refund not found');
+        return r;
+      }),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         const r = { id: randomUUID(), ...data } as Refund;
         store.refunds.push(r);
@@ -156,6 +176,15 @@ vi.mock('../src/config/db.js', () => {
         const r = store.refunds.find((x) => x.id === where.id)!;
         Object.assign(r, data);
         return r;
+      }),
+      // Status-guarded updateMany (SVT-AUDIT-SEC-2026-06).
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const rows = matchWhere(store.refunds, where);
+        for (const r of rows) for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'object' && v !== null && 'increment' in (v as object)) continue;
+          (r as Record<string, unknown>)[k] = v;
+        }
+        return { count: rows.length };
       }),
       aggregate: vi.fn(async ({ where }: { where: Record<string, unknown> }) => ({
         _sum: { amount_minor: sumBy(matchWhere(store.refunds, where) as never, 'amount_minor') },
@@ -211,6 +240,12 @@ vi.mock('../src/shared/audit.js', () => ({
 }));
 
 const svc = await import('../src/modules/billing/payment.service.js');
+// Handle to the mocked prisma so the concurrency-guard tests can force a
+// status-guarded updateMany to match 0 rows (simulating a racing writer that
+// flipped the row between the outside-tx read and the in-tx write).
+const { prisma: mockDb } = (await import('../src/config/db.js')) as unknown as {
+  prisma: { payment: { updateMany: ReturnType<typeof vi.fn> }; refund: { updateMany: ReturnType<typeof vi.fn> } };
+};
 
 beforeEach(() => {
   store.installments.length = 0; store.payments.length = 0;
@@ -370,5 +405,44 @@ describe('applyAdjustment', () => {
         kind: 'WAIVER', amount_minor: -100n, reason_text: 'hardship', applied_on: '2026-05-19',
       } as never),
     ).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+// SVT-AUDIT-SEC-2026-06 (backlog rank 6) — in-tx status-guard concurrency
+// coverage. The outside-tx status check can be passed by two racing writers;
+// the in-tx status-guarded updateMany is the hard backstop. We simulate the
+// loser (a concurrent writer flipped the row first) by forcing the guarded
+// updateMany to match 0 rows, and assert the operation aborts with 409 so its
+// balance reversal rolls back rather than double-applying.
+describe('in-tx status guards reject the concurrent loser (409)', () => {
+  it('completeRefund: guarded refund flip matching 0 rows → 409', async () => {
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(100n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 100n, status: 'PENDING' };
+    store.refunds.push(refund);
+    mockDb.refund.updateMany.mockResolvedValueOnce({ count: 0 }); // racing writer won
+    await expect(
+      svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('voidPayment: guarded payment flip matching 0 rows → 409', async () => {
+    const inst = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(100n); store.payments.push(pay);
+    seedAlloc(pay.id, inst.id, 100n);
+    mockDb.payment.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(
+      svc.voidPayment(admin as never, pay.id, { reason: 'dup' } as never),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('markRefundFailed: guarded refund flip matching 0 rows → 409', async () => {
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: randomUUID(), amount_minor: 50n, status: 'PENDING' };
+    store.refunds.push(refund);
+    mockDb.refund.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(
+      svc.markRefundFailed(admin as never, refund.id, { reason: 'bank rejected' }),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });

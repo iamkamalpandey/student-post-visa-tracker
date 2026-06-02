@@ -355,8 +355,12 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
     // Delete allocation rows (audit retains the original Payment row).
     await tx.paymentAllocation.deleteMany({ where: { payment_id: paymentId, tenant_id: tenantId } });
 
-    return tx.payment.update({
-      where: { id: paymentId },
+    // SVT-AUDIT-SEC-2026-06 (backlog rank 6) — in-tx status guard so two
+    // concurrent voids can't both reverse the same allocations. before.status
+    // was read outside this tx; gating the flip on it still holding means the
+    // loser matches 0 rows, throws, and its reversal rolls back.
+    const flip = await tx.payment.updateMany({
+      where: { id: paymentId, status: before.status },
       data: {
         status: 'VOIDED',
         notes: input.reason,
@@ -364,6 +368,10 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
         version: { increment: 1 },
       },
     });
+    if (flip.count !== 1) {
+      throw Conflict('Payment was modified concurrently');
+    }
+    return tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
   });
 
   await writeAudit(ctx as never, {
@@ -630,8 +638,14 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
       },
     });
 
-    const completed = await tx.refund.update({
-      where: { id: refund.id },
+    // SVT-AUDIT-SEC-2026-06 (backlog rank 6) — in-tx status guard. The PENDING
+    // check above runs OUTSIDE this transaction, so two concurrent completions
+    // both pass it; the FOR UPDATE on the installment serialises them, but the
+    // loser would otherwise reverse the installment balances a SECOND time.
+    // Gating the terminal flip on the row still being PENDING means the loser
+    // matches 0 rows, throws, and its double-reversal rolls back with the tx.
+    const flip = await tx.refund.updateMany({
+      where: { id: refund.id, status: 'PENDING' },
       data: {
         status: 'COMPLETED',
         refunded_on: new Date(input.refunded_on),
@@ -640,6 +654,10 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
         version: { increment: 1 },
       },
     });
+    if (flip.count !== 1) {
+      throw Conflict('Refund was completed concurrently');
+    }
+    const completed = await tx.refund.findUniqueOrThrow({ where: { id: refund.id } });
 
     return { refund: completed, surplus, paymentStatus: nextPaymentStatus };
   });
@@ -690,8 +708,11 @@ export async function markRefundFailed(
 
   const updated = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    return tx.refund.update({
-      where: { id: refundId },
+    // SVT-AUDIT-SEC-2026-06 (backlog rank 6/15) — in-tx status guard; the
+    // PENDING check above is outside this tx, so a concurrent fail/complete
+    // could race. Gate the flip on the row still being PENDING.
+    const flip = await tx.refund.updateMany({
+      where: { id: refundId, status: 'PENDING' },
       data: {
         status: 'FAILED',
         notes: `${input.reason}${input.provider_error ? ` :: ${input.provider_error}` : ''}`,
@@ -699,6 +720,10 @@ export async function markRefundFailed(
         version: { increment: 1 },
       },
     });
+    if (flip.count !== 1) {
+      throw Conflict('Refund was modified concurrently');
+    }
+    return tx.refund.findUniqueOrThrow({ where: { id: refundId } });
   });
 
   await writeAudit(ctx as never, {

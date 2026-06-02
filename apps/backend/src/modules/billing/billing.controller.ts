@@ -133,8 +133,13 @@ export const paymentController = {
   async void(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params['id']!;
-      const out = await paySvc.voidPayment(req as never, id, req.body);
-      res.json({ data: out });
+      // SVT-AUDIT-SEC-2026-06 (backlog rank 6) — honour the required
+      // Idempotency-Key so a retry replays the cached response instead of
+      // re-running (the in-tx status guard already prevents double-reversal,
+      // but a retry should return the original 200, not a 409).
+      await runIdempotent(req, res, { scope: 'billing.payment.void' }, () =>
+        paySvc.voidPayment(req as never, id, req.body),
+      );
     } catch (e) { next(e); }
   },
 
@@ -152,8 +157,13 @@ export const paymentController = {
   async completeRefund(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params['id']!;
-      const out = await paySvc.completeRefund(req as never, id, req.body);
-      res.json({ data: out });
+      // SVT-AUDIT-SEC-2026-06 (backlog rank 6) — wrap in runIdempotent so a
+      // retry replays the cached response (the route requires the key but the
+      // controller previously ignored it). In-tx status guard in the service
+      // is the hard correctness backstop against double-reversal.
+      await runIdempotent(req, res, { scope: 'billing.refund.complete' }, () =>
+        paySvc.completeRefund(req as never, id, req.body),
+      );
     } catch (e) { next(e); }
   },
 
@@ -161,8 +171,11 @@ export const paymentController = {
   async failRefund(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params['id']!;
-      const out = await paySvc.markRefundFailed(req as never, id, req.body);
-      res.json({ data: out });
+      // SVT-AUDIT-SEC-2026-06 (backlog rank 15) — idempotent like its money-mover
+      // siblings; the route now also requires MFA step-up + Idempotency-Key.
+      await runIdempotent(req, res, { scope: 'billing.refund.fail' }, () =>
+        paySvc.markRefundFailed(req as never, id, req.body),
+      );
     } catch (e) { next(e); }
   },
 };

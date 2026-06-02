@@ -237,9 +237,14 @@ billingRouter.post(
   validate(CompleteRefundRequest),
   payCtl.completeRefund,
 );
+// SVT-AUDIT-SEC-2026-06 (backlog rank 15) — failing a refund flips
+// refund/payment status sums, the same reconciliation surface its siblings
+// (/complete, /void, /refunds) protect. Match them: MFA step-up + Idempotency-Key.
 billingRouter.post(
   '/refunds/:id/fail',
   requireRole('ADMIN'),
+  requireMfa({ enrollmentRequired: true }),
+  requireIdempotencyKey,
   uuidParam('id'),
   validate(FailRefundRequest),
   payCtl.failRefund,
