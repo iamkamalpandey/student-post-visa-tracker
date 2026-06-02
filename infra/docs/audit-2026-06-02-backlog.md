@@ -17,7 +17,7 @@ Severity legend: 🔴 high · 🟠 medium · 🟡 low. Status: ☐ todo · ⏳ i
 |---|-----|------|--------|
 | 1 | 🔴 | Resend webhook HMAC always 401s in prod (global `express.json` eats raw body) | ✅ |
 | 2 | 🔴 | Cross-counsellor PII IDOR: ~15 child `GET /:id` reads not ownership-gated | ✅ |
-| 3 | 🔴 | User lifecycle (create/role-change/deactivate/pw-reset/revoke) writes NO audit | ☐ |
+| 3 | 🔴 | User lifecycle (create/role-change/deactivate/pw-reset/revoke) writes NO audit | ✅ |
 | 4 | 🔴 | Comms thread LIST leaks last-message body tenant-wide to any counsellor | ✅ |
 | 5 | 🔴 | GDPR Art.17 erasure non-atomic (status COMPLETED before erase, unguarded) | ☐ |
 | 6 | 🔴 | `completeRefund`/`voidPayment` double-reversal race (no idempotency/status guard) | ✅ |

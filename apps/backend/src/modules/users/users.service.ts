@@ -69,7 +69,7 @@ export const usersService = {
     };
   },
 
-  async create(tenantId: string, input: CreateUserRequest) {
+  async create(tenantId: string, input: CreateUserRequest, actorId: string) {
     const existing = await prisma.user.findUnique({
       where: { tenant_id_email: { tenant_id: tenantId, email: input.email.toLowerCase() } },
     });
@@ -107,6 +107,23 @@ export const usersService = {
       },
       select: PUBLIC_FIELDS,
     });
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — account-creation is a privileged
+    // lifecycle event (a new principal gains a role in the tenant). Record an
+    // append-only audit row. NEVER log the password or its hash; capture only
+    // the public shape of the created account.
+    await writeAudit({
+      action: 'user.created',
+      entityType: 'user',
+      entityId: created.id,
+      actorId,
+      tenantId,
+      after: {
+        email: created.email,
+        role: created.role,
+        given_name: input.given_name,
+        family_name: input.family_name,
+      },
+    } as never);
     return created;
   },
 
@@ -155,6 +172,15 @@ export const usersService = {
       select: { id: true, role: true, is_active: true },
     });
     if (!target) throw NotFound('User not found');
+
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — snapshot the pre-mutation state for
+    // the audit `before` NOW, before the updateMany below. Mirrors the
+    // adminDisableMfa `wasEnabled` capture: some Prisma test doubles return a
+    // live row reference that updateMany mutates in place, so reading
+    // target.role/target.is_active AFTER the write would silently report the
+    // new value and lose forensic signal.
+    const beforeRole = target.role;
+    const beforeIsActive = target.is_active;
 
     const wantsRoleChange = input.role !== undefined && input.role !== target.role;
     const wantsDeactivation = input.is_active === false && target.is_active;
@@ -214,6 +240,26 @@ export const usersService = {
       data: input,
     });
     if (updated.count === 0) throw NotFound('User not found');
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — privilege-escalation (promoting a
+    // peer to ADMIN) and deactivation are the security-critical mutations, so
+    // the audit row carries an explicit before/after of (role, is_active).
+    // beforeRole/beforeIsActive were snapshotted PRE-update so they hold the
+    // prior state even when a Prisma test double mutates the row reference in
+    // place. `input.role` / `input.is_active` may be undefined (field not in
+    // this PATCH); fall back to the prior value so the snapshot always reflects
+    // the effective state.
+    await writeAudit({
+      action: 'user.updated',
+      entityType: 'user',
+      entityId: id,
+      actorId,
+      tenantId,
+      before: { role: beforeRole, is_active: beforeIsActive },
+      after: {
+        role: input.role ?? beforeRole,
+        is_active: input.is_active ?? beforeIsActive,
+      },
+    } as never);
     return this.getById(tenantId, id);
   },
 
@@ -227,6 +273,11 @@ export const usersService = {
       select: { role: true, is_active: true },
     });
     if (!target) throw NotFound('User not found');
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — snapshot prior state before the
+    // updateMany mutates the (possibly shared) row reference, so the audit
+    // `before` reports the pre-deletion role/active status, not the new one.
+    const beforeRole = target.role;
+    const beforeIsActive = target.is_active;
     if (target.role === 'ADMIN' && target.is_active) {
       const adminCount = await prisma.user.count({
         where: {
@@ -247,9 +298,21 @@ export const usersService = {
       where: { user_id: id, revoked_at: null },
       data: { revoked_at: new Date() },
     });
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — soft-deletion removes a principal
+    // from the tenant; capture the prior (role, is_active) so a forensic
+    // reviewer can see what was deactivated.
+    await writeAudit({
+      action: 'user.deleted',
+      entityType: 'user',
+      entityId: id,
+      actorId,
+      tenantId,
+      before: { is_active: beforeIsActive, role: beforeRole },
+      after: { deleted: true },
+    } as never);
   },
 
-  async resetPassword(tenantId: string, id: string, newPassword: string) {
+  async resetPassword(tenantId: string, id: string, newPassword: string, actorId: string) {
     const exists = await prisma.user.findFirst({
       where: { tenant_id: tenantId, id, deleted_at: null },
       select: { id: true },
@@ -272,9 +335,21 @@ export const usersService = {
       where: { user_id: id, revoked_at: null },
       data: { revoked_at: new Date() },
     });
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — admin password reset is an
+    // account-takeover-adjacent action (the admin sets a credential they then
+    // know). NEVER log the password or its hash; record only that the reset
+    // happened and that live sessions were revoked.
+    await writeAudit({
+      action: 'user.password_reset_by_admin',
+      entityType: 'user',
+      entityId: id,
+      actorId,
+      tenantId,
+      after: { sessions_revoked: true },
+    } as never);
   },
 
-  async revokeAllSessions(tenantId: string, id: string) {
+  async revokeAllSessions(tenantId: string, id: string, actorId: string) {
     const exists = await prisma.user.findFirst({
       where: { tenant_id: tenantId, id, deleted_at: null },
       select: { id: true },
@@ -284,6 +359,17 @@ export const usersService = {
       where: { user_id: id, revoked_at: null },
       data: { revoked_at: new Date() },
     });
+    // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — force session revocation is an
+    // admin action against another principal's live sessions; record it with
+    // the number of sessions revoked for forensic review.
+    await writeAudit({
+      action: 'user.sessions_revoked',
+      entityType: 'user',
+      entityId: id,
+      actorId,
+      tenantId,
+      after: { revoked: result.count },
+    } as never);
     return { revoked: result.count };
   },
 

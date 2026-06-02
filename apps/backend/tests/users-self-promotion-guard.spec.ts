@@ -33,6 +33,11 @@ type Row = {
 
 const store = { users: [] as Row[] };
 
+// Audit writes are best-effort (writeAudit never throws); mock so the new
+// user.* audit calls don't reach the real $transaction path through this
+// spec's minimal prisma mock. SVT-AUDIT-SEC-2026-06.
+vi.mock('../src/shared/audit.js', () => ({ writeAudit: vi.fn(async () => undefined) }));
+
 vi.mock('../src/config/db.js', () => {
   const matchWhere = (rows: Row[], where: Record<string, unknown>): Row[] =>
     rows.filter((r) => {

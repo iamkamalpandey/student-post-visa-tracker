@@ -42,7 +42,12 @@ export const usersController = {
 
   async create(req: Request, res: Response, next: NextFunction) {
     try {
-      const created = await usersService.create(tenant(req), req.body as CreateUserRequest);
+      if (!req.user?.sub) throw Unauthorized();
+      const created = await usersService.create(
+        tenant(req),
+        req.body as CreateUserRequest,
+        req.user.sub,
+      );
       res.status(201).json({ data: created });
     } catch (err) {
       next(err);
@@ -106,8 +111,14 @@ export const usersController = {
 
   async resetPassword(req: Request, res: Response, next: NextFunction) {
     try {
+      if (!req.user?.sub) throw Unauthorized();
       const { new_password } = req.body as ResetPasswordRequest;
-      await usersService.resetPassword(tenant(req), req.params['id']!, new_password);
+      await usersService.resetPassword(
+        tenant(req),
+        req.params['id']!,
+        new_password,
+        req.user.sub,
+      );
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -116,7 +127,12 @@ export const usersController = {
 
   async revokeAllSessions(req: Request, res: Response, next: NextFunction) {
     try {
-      const result = await usersService.revokeAllSessions(tenant(req), req.params['id']!);
+      if (!req.user?.sub) throw Unauthorized();
+      const result = await usersService.revokeAllSessions(
+        tenant(req),
+        req.params['id']!,
+        req.user.sub,
+      );
       res.json({ data: result });
     } catch (err) {
       next(err);
