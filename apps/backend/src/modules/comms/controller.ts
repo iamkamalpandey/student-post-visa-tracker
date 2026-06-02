@@ -152,19 +152,33 @@ export const commsThreadsController = {
       const where: Record<string, unknown> = { tenant_id: tenantId };
       if (channel) where['channel'] = channel;
       if (studentIdQ) where['student_id'] = studentIdQ;
+      // SVT-AUDIT-SEC-2026-06 (backlog rank 4) — ownership scope. The single-
+      // thread get() above gates on student.assigned_to_id; the LIST must too,
+      // or any COUNSELLOR can enumerate every thread tenant-wide (subjects,
+      // student names, and the last-message body) for students assigned to
+      // other counsellors. Non-admins see only threads for their assigned
+      // students, plus student-less tenant threads (which get() also leaves
+      // ungated). An explicit ?student_id the caller doesn't own falls outside
+      // this scope and yields nothing. Composed via AND so it coexists with the
+      // q-search OR below (Prisma allows only one top-level OR).
+      const and: Record<string, unknown>[] = [];
+      if (req.user.role !== 'ADMIN') {
+        and.push({ OR: [{ student: { is: { assigned_to_id: userId } } }, { student_id: null }] });
+      }
       // SVT-WAVE29-THREAD-SEARCH-2026-05 — substring match against thread
       // subject OR student given/family/student_code. Case-insensitive. Bounded
       // by `take` so the cost stays O(limit). Matches against last-message
       // body happen client-side because Prisma can't OR-join the related table
       // without a separate query.
       if (q) {
-        where['OR'] = [
+        and.push({ OR: [
           { subject: { contains: q, mode: 'insensitive' } },
           { student: { is: { given_name: { contains: q, mode: 'insensitive' } } } },
           { student: { is: { family_name: { contains: q, mode: 'insensitive' } } } },
           { student: { is: { student_code: { contains: q, mode: 'insensitive' } } } },
-        ];
+        ] });
       }
+      if (and.length) where['AND'] = and;
 
       const threads = await db.commsThread.findMany({
         where,
