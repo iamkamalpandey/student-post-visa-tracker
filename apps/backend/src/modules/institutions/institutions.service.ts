@@ -448,6 +448,15 @@ export async function createContact(
   input: CreateInstitutionContactRequest,
 ): Promise<unknown> {
   await assertOwnsInstitution(ctx.db, ctx.tenantId, institutionId);
+  // SVT-DQ-2026-06 — at most one primary contact per institution (radio-button
+  // semantics): demote any existing primary before promoting this one. Backed by
+  // a partial unique index as the concurrent-race safety net.
+  if (input.is_primary) {
+    await ctx.db.institutionContact.updateMany({
+      where: { institution_id: institutionId, is_primary: true },
+      data: { is_primary: false },
+    });
+  }
   const created = await ctx.db.institutionContact.create({
     data: {
       institution_id: institutionId,
@@ -507,6 +516,13 @@ export async function createCampus(
   input: CreateCampusRequest,
 ): Promise<unknown> {
   await assertOwnsInstitution(ctx.db, ctx.tenantId, institutionId);
+  // SVT-DQ-2026-06 — at most one main campus per institution; demote the prior.
+  if (input.is_main) {
+    await ctx.db.campus.updateMany({
+      where: { institution_id: institutionId, is_main: true },
+      data: { is_main: false },
+    });
+  }
   return ctx.db.campus.create({
     data: {
       institution_id: institutionId,
@@ -527,9 +543,17 @@ export async function updateCampus(
 ): Promise<unknown> {
   const row = await ctx.db.campus.findFirst({
     where: { id: campusId, institution: { tenant_id: ctx.tenantId, deleted_at: null } },
-    select: { id: true },
+    select: { id: true, institution_id: true },
   });
   if (!row) throw NotFound('Campus not found');
+
+  // SVT-DQ-2026-06 — promoting this campus to main demotes the prior main.
+  if (input.is_main === true) {
+    await ctx.db.campus.updateMany({
+      where: { institution_id: row.institution_id, is_main: true, id: { not: campusId } },
+      data: { is_main: false },
+    });
+  }
 
   const data: Prisma.CampusUpdateInput = {};
   if (input.name !== undefined) data.name = input.name;
