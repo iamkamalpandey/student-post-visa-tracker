@@ -82,9 +82,42 @@
     "sequence": 8,
     "category": "ENROLLED",
     "is_initial": false,
-    "is_terminal": true,
+    "is_terminal": false,
     "color_hex": "#388e3c",
     "icon": "CheckCircle",
+    "sla_hours": null
+  },
+  {
+    "key": "course_completed",
+    "label": "Course Completed",
+    "sequence": 9,
+    "category": "COMPLETED",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#2e7d32",
+    "icon": "School",
+    "sla_hours": null
+  },
+  {
+    "key": "graduated",
+    "label": "Graduated",
+    "sequence": 10,
+    "category": "COMPLETED",
+    "is_initial": false,
+    "is_terminal": false,
+    "color_hex": "#1b5e20",
+    "icon": "WorkspacePremium",
+    "sla_hours": null
+  },
+  {
+    "key": "post_study_work",
+    "label": "Post-Study Work",
+    "sequence": 11,
+    "category": "COMPLETED",
+    "is_initial": false,
+    "is_terminal": true,
+    "color_hex": "#004d40",
+    "icon": "Work",
     "sla_hours": null
   }
 ]
