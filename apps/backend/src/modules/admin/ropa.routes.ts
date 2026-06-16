@@ -206,17 +206,21 @@ ropaRouter.get('/ropa.csv', async (req, res, next) => {
     lines.push('');
     lines.push('--- Sub-Processors (Art 28(2)) ---');
     lines.push(
-      ['name', 'purpose', 'region', 'contract_url', 'added_at', 'removed_at', 'status']
+      ['name', 'purpose', 'region', 'contract_url', 'dpa_signed_at', 'transfer_mechanism', 'added_at', 'removed_at', 'status']
         .map(csvEscape)
         .join(','),
     );
     for (const sp of subProcessors) {
+      const spx = sp as typeof sp & { dpa_signed_at: Date | null; transfer_mechanism: string | null };
       lines.push([
-        sp.name, sp.purpose, sp.region,
-        sp.contract_url ?? '',
-        sp.added_at.toISOString().slice(0, 10),
-        sp.removed_at ? sp.removed_at.toISOString().slice(0, 10) : '',
-        sp.removed_at ? 'REMOVED' : 'ACTIVE',
+        spx.name, spx.purpose, spx.region,
+        spx.contract_url ?? '',
+        // GDPR Art. 28 + Chapter V evidence in the register.
+        spx.dpa_signed_at ? spx.dpa_signed_at.toISOString().slice(0, 10) : '',
+        spx.transfer_mechanism ?? '',
+        spx.added_at.toISOString().slice(0, 10),
+        spx.removed_at ? spx.removed_at.toISOString().slice(0, 10) : '',
+        spx.removed_at ? 'REMOVED' : 'ACTIVE',
       ].map(csvEscape).join(','));
     }
 

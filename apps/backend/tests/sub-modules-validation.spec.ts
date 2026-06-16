@@ -153,3 +153,25 @@ describe('CreateConsentRequest — GDPR Art. 6(1)(f) balancing test', () => {
     expect(CreateConsentRequest.safeParse({ ...base, lawful_basis: 'CONTRACT' }).success).toBe(true);
   });
 });
+
+describe('CreateSubProcessorRequest — Art. 28 / Chapter V fields', () => {
+  const base = { name: 'AWS', purpose: 'hosting', region: 'eu-west-1' };
+
+  it('accepts a valid transfer_mechanism + dpa_signed_at', () => {
+    for (const tm of ['ADEQUACY', 'SCC', 'BCR', 'DEROGATION', 'NONE']) {
+      expect(
+        CreateSubProcessorRequest.safeParse({ ...base, transfer_mechanism: tm, dpa_signed_at: '2026-01-15T00:00:00Z' }).success,
+        tm,
+      ).toBe(true);
+    }
+  });
+
+  it('rejects an unknown transfer_mechanism or a malformed dpa_signed_at', () => {
+    expect(CreateSubProcessorRequest.safeParse({ ...base, transfer_mechanism: 'PRIVACY_SHIELD' }).success).toBe(false);
+    expect(CreateSubProcessorRequest.safeParse({ ...base, dpa_signed_at: '2026-01-15' }).success).toBe(false);
+  });
+
+  it('leaves both optional (in-jurisdiction processor)', () => {
+    expect(CreateSubProcessorRequest.safeParse(base).success).toBe(true);
+  });
+});

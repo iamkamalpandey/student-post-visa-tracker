@@ -111,6 +111,10 @@ model SubProcessor {
   purpose      String
   region       String
   contract_url String?
+  // GDPR Art. 28 — when the Data Processing Agreement was signed (null = not yet).
+  dpa_signed_at      DateTime? @db.Timestamptz
+  // GDPR Chapter V — international-transfer safeguard: ADEQUACY/SCC/BCR/DEROGATION/NONE.
+  transfer_mechanism String?
   added_at     DateTime  @default(now()) @db.Timestamptz
   removed_at   DateTime? @db.Timestamptz
 

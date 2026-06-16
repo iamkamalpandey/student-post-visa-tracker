@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { Iso8601DateTime, PaginationQuery } from './common.js';
 
+// GDPR Chapter V — the safeguard relied on for an international transfer to a
+// sub-processor: ADEQUACY (Art. 45 decision), SCC (Art. 46 standard clauses),
+// BCR (Art. 47 binding corporate rules), DEROGATION (Art. 49), or NONE (the
+// processor is in-jurisdiction, so no transfer mechanism is needed).
+export const TransferMechanismEnum = z.enum(['ADEQUACY', 'SCC', 'BCR', 'DEROGATION', 'NONE']);
+export type TransferMechanism = z.infer<typeof TransferMechanismEnum>;
+
 export const CreateSubProcessorRequest = z
   .object({
     name: z.string().min(1).max(200),
@@ -13,6 +20,10 @@ export const CreateSubProcessorRequest = z
       .max(500)
       .refine((v) => /^https?:/i.test(v), 'Must be an http(s) URL')
       .optional(),
+    // GDPR Art. 28 — proof the Data Processing Agreement is in place.
+    dpa_signed_at: Iso8601DateTime.optional(),
+    // GDPR Chapter V — international-transfer safeguard (see enum above).
+    transfer_mechanism: TransferMechanismEnum.optional(),
   })
   .strict();
 export type CreateSubProcessorRequest = z.infer<typeof CreateSubProcessorRequest>;
