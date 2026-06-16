@@ -44,6 +44,7 @@ import AssignCounsellorDialog from '@/features/students/AssignCounsellorDialog';
 import ContactsSection from '@/features/students/profile/ContactsSection';
 import IdentificationsSection from '@/features/students/profile/IdentificationsSection';
 import VisasSection from '@/features/students/profile/VisasSection';
+import InsuranceSection from '@/features/students/profile/InsuranceSection';
 import RegulatorIdsSection from '@/features/students/profile/RegulatorIdsSection';
 import DependentsSection from '@/features/students/profile/DependentsSection';
 import ComplianceSection from '@/features/students/profile/ComplianceSection';
@@ -641,6 +642,9 @@ function ProfileTab({ student, onEdit }: { student: Student; onEdit?: () => void
       </SectionAnchor>
       <SectionAnchor id="visa">
         <VisasSection studentId={student.id} />
+      </SectionAnchor>
+      <SectionAnchor id="insurance">
+        <InsuranceSection studentId={student.id} />
       </SectionAnchor>
       <SectionAnchor id="regulator-ids">
         <RegulatorIdsSection studentId={student.id} />
