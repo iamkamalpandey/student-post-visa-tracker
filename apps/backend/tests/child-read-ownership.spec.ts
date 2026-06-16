@@ -156,4 +156,30 @@ describe('child read routes keep their ownership guard (wiring guard)', () => {
     expect(flatGet).toBeDefined();
     expect(flatGet!).toContain("requireStudentOwnershipViaChild('sponsorship', 'id')");
   });
+
+  // SVT-RBAC-OWN-2026-06 — checklist + enrollments use bespoke router names
+  // (studentChecklistProgressRouter / studentEnrollmentsRouter) that the generic
+  // `StudentRouter.get('/')` regex above never matched, which is exactly how the
+  // read IDOR on these two slipped past the wiring guard. Pin them explicitly.
+  it('checklist student-progress GET / is ownership-gated', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'modules', 'checklist', 'routes.ts'), 'utf8');
+    const idx = src.indexOf('studentChecklistProgressRouter.get(');
+    expect(idx, 'studentChecklistProgressRouter.get route').toBeGreaterThan(-1);
+    expect(src.slice(idx, idx + 220)).toContain("requireStudentOwnership('studentId')");
+  });
+
+  it('checklist student-progress POST / is ownership-gated', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'modules', 'checklist', 'routes.ts'), 'utf8');
+    const idx = src.indexOf('studentChecklistProgressRouter.post(');
+    expect(idx, 'studentChecklistProgressRouter.post route').toBeGreaterThan(-1);
+    expect(src.slice(idx, idx + 260)).toContain("requireStudentOwnership('studentId')");
+  });
+
+  it('enrollments student-nested list GET / is ownership-gated', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'modules', 'enrollments', 'enrollments.routes.ts'), 'utf8');
+    const idx = src.indexOf('studentEnrollmentsRouter.get(');
+    expect(idx, 'studentEnrollmentsRouter.get route').toBeGreaterThan(-1);
+    // Window spans the route block (the guard may sit a few comment lines in).
+    expect(src.slice(idx, idx + 500)).toContain("requireStudentOwnership('studentId')");
+  });
 });

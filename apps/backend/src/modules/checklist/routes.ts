@@ -22,7 +22,7 @@ import {
   Uuid,
 } from '@spv/zod-schemas';
 
-import { authenticate, requireRole } from '../../middlewares/auth.js';
+import { authenticate, requireRole, requireStudentOwnership } from '../../middlewares/auth.js';
 import { tenantContext } from '../../middlewares/tenantContext.js';
 import { validate } from '../../middlewares/validate.js';
 import { BadRequest } from '../../shared/errors.js';
@@ -75,11 +75,21 @@ stageChecklistItemFlatRouter.delete(
 // ----- /students/:studentId/checklist-progress --------------------------
 export const studentChecklistProgressRouter: Router = Router({ mergeParams: true });
 studentChecklistProgressRouter.use(authenticate, tenantContext);
-studentChecklistProgressRouter.get('/', requireStudentId, ctl.listProgressHandler);
+// SVT-RBAC-OWN-2026-06 — ownership-gate like every other student-nested router
+// (visas/enrollments/finance/etc). Without it any COUNSELLOR could read (GET) or
+// mutate (POST) another counsellor's student's checklist by id — cross-counsellor
+// IDOR. requireStudentOwnership allows ADMIN tenant-wide, COUNSELLOR own-assigned.
+studentChecklistProgressRouter.get(
+  '/',
+  requireStudentId,
+  requireStudentOwnership('studentId'),
+  ctl.listProgressHandler,
+);
 studentChecklistProgressRouter.post(
   '/',
   requireStudentId,
   requireRole('ADMIN', 'COUNSELLOR'),
+  requireStudentOwnership('studentId'),
   validate(UpsertChecklistProgressRequest),
   ctl.upsertProgressHandler,
 );

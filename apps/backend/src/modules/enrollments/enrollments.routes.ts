@@ -76,6 +76,10 @@ export const studentEnrollmentsRouter: Router = Router({ mergeParams: true });
 studentEnrollmentsRouter.get(
   '/',
   requireUuidStudentId,
+  // SVT-RBAC-OWN-2026-06 — the sibling POST is ownership-gated but this list GET
+  // was not, so any COUNSELLOR could read another counsellor's student's
+  // enrollments (institution/program/tuition/commission) by id. Gate it.
+  requireStudentOwnership('studentId'),
   ctl.listForStudentHandler,
 );
 studentEnrollmentsRouter.post(
