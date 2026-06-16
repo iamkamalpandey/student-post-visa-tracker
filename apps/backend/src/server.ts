@@ -1,7 +1,7 @@
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
-import { disconnectDb } from './config/db.js';
+import { disconnectDb, assertRuntimeRoleRespectsRls } from './config/db.js';
 import { disconnectV2Pool } from './integrations/v2-mis/pool.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { initSentry, captureException } from './config/sentry.js';
@@ -50,6 +50,10 @@ const server = app.listen(env.PORT, env.HOST, () => {
   // Background workers (reminder dispatch + scan) only run outside tests so
   // the test suite stays deterministic and doesn't poll Postgres on a timer.
   if (env.NODE_ENV !== 'test') {
+    // SVT-SEC-RLS-ROLE-ASSERT-2026-06 — fail-fast in production if the runtime
+    // DB role bypasses RLS (superuser/BYPASSRLS) — that silently disables tenant
+    // isolation. Async DB probe; exits the process on a privileged prod role.
+    void assertRuntimeRoleRespectsRls();
     schedulerHandle = startScheduler();
   }
 });

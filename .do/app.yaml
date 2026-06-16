@@ -64,7 +64,17 @@ services:
       failure_threshold: 5
     envs:
       - { key: NODE_ENV, scope: RUN_AND_BUILD_TIME, value: production }
-      - { key: DATABASE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      # RUNTIME DB ROLE — MUST be the de-privileged `spv_app` role, NOT the DB
+      # admin/owner. Postgres RLS (tenant isolation) does NOT apply to superusers
+      # or BYPASSRLS roles, so ${spvt-db.DATABASE_URL} (DO's admin) silently
+      # disables isolation for the whole app — every tenant could read every other
+      # tenant's data. Create `spv_app` (NOSUPERUSER NOBYPASSRLS + the GRANTs in
+      # apps/backend/.env.example), then set its connection string here as a SECRET.
+      # The backend now REFUSES to boot in production on a privileged role
+      # (config/db.ts assertRuntimeRoleRespectsRls), so a misconfig fails loud.
+      - { key: DATABASE_URL, scope: RUN_TIME, type: SECRET }
+      # Owner/admin role — runs DDL (prisma migrate PRE_DEPLOY job) + the narrow
+      # auth-time BYPASS-RLS lookups (prismaAdmin). Admin is correct here.
       - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
       - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
       # CORS_ORIGIN has NO default — backend won't boot without it (any env).
@@ -78,6 +88,12 @@ services:
       # Prod-required — backend fails-fast without these (config/env.ts superRefine):
       - { key: REFRESH_TOKEN_PEPPER, scope: RUN_TIME, type: SECRET } # openssl rand -hex 32
       - { key: LOG_HMAC_KEY_BASE64, scope: RUN_TIME, type: SECRET }  # openssl rand -base64 32
+      # Required in EVERY non-test env — the backend exits at boot if unset
+      # (server.ts P1-WB6). Resend webhook signing secret.
+      - { key: RESEND_WEBHOOK_SECRET, scope: RUN_TIME, type: SECRET }
+      # Bearer token guarding GET /metrics (>=16 chars). Without it Prometheus
+      # gets 401 and prod metric collection silently never starts.
+      - { key: METRICS_TOKEN, scope: RUN_TIME, type: SECRET } # openssl rand -hex 24
       # --- KMS (envelope encryption) ---
       # Deploy-now: local KMS, gated by KMS_LOCAL_OK. FINANCE-GRADE: switch to a
       # managed KMS (KMS_PROVIDER=aws|gcp|vault + KMS_KEY_ID) and drop KMS_LOCAL_OK.

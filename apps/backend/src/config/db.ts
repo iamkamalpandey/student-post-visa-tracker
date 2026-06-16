@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { logger } from './logger.js';
+import { env } from './env.js';
 
 // Single PrismaClient per process. Tenant isolation enforced via RLS + middleware that runs
 // `SET LOCAL app.tenant_id` per request (see middlewares/tenantContext.ts).
@@ -54,6 +55,51 @@ prismaAdmin.$on('warn' as never, (e: { message?: string }) => {
 prismaAdmin.$on('error' as never, (e: { message?: string }) => {
   logger.error({ prisma: 'admin', message: e.message });
 });
+
+// SVT-SEC-RLS-ROLE-ASSERT-2026-06 — the runtime `prisma` client MUST connect as
+// a role that RLS actually applies to. Postgres silently ignores every
+// tenant_isolation policy for superusers and BYPASSRLS roles (FORCE ROW LEVEL
+// SECURITY only forces policies on the *owner*, not on superusers), so a
+// DATABASE_URL pointing at the DB admin/owner (e.g. DigitalOcean's `doadmin`,
+// `${db.DATABASE_URL}`) would disable tenant isolation for the WHOLE app with no
+// other symptom — every tenant could read every other tenant's data. We probe
+// the runtime role at boot and refuse to serve a privileged role in production.
+// `prismaAdmin` is deliberately superuser (narrow auth-time cross-tenant
+// lookups) and is intentionally NOT checked here.
+export async function assertRuntimeRoleRespectsRls(): Promise<void> {
+  let row: { rolname: string; rolsuper: boolean; rolbypassrls: boolean } | undefined;
+  try {
+    const rows = await prisma.$queryRaw<
+      Array<{ rolname: string; rolsuper: boolean; rolbypassrls: boolean }>
+    >`SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`;
+    row = rows[0];
+  } catch (err) {
+    // DB unreachable at boot — don't block startup on a transient outage; the
+    // readyz gate + scheduler DB-probe handle availability, and the check
+    // re-runs on the next boot.
+    logger.warn({ err }, 'rls-role-assert: could not probe runtime DB role (DB unreachable?) — skipped');
+    return;
+  }
+  if (!row) {
+    logger.warn('rls-role-assert: current_user not found in pg_roles — skipped');
+    return;
+  }
+  if (!row.rolsuper && !row.rolbypassrls) {
+    logger.info({ role: row.rolname }, 'rls-role-assert: runtime DB role is RLS-enforced');
+    return;
+  }
+  if (env.NODE_ENV === 'production') {
+    logger.fatal(
+      { role: row.rolname, rolsuper: row.rolsuper, rolbypassrls: row.rolbypassrls },
+      'FATAL: runtime DATABASE_URL connects as a superuser/BYPASSRLS role — Postgres RLS does NOT apply, so tenant isolation is OFF. Point DATABASE_URL at the de-privileged app role (e.g. spv_app); keep DATABASE_MIGRATE_URL on the owner. Refusing to start.',
+    );
+    process.exit(1);
+  }
+  logger.warn(
+    { role: row.rolname, rolsuper: row.rolsuper, rolbypassrls: row.rolbypassrls },
+    'rls-role-assert: runtime DB role is superuser/BYPASSRLS so RLS is bypassed — OK for a single-role dev DB, but production MUST use spv_app.',
+  );
+}
 
 export async function disconnectDb(): Promise<void> {
   await Promise.all([prisma.$disconnect(), prismaAdmin.$disconnect()]);

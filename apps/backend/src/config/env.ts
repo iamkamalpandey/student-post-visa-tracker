@@ -176,6 +176,8 @@ const EnvSchema = z.object({
   //   'mirror' = read the synced crm_* tables (current default).
   //   'live'   = read V2 directly per request (read-only) + stitch the spv_*
   //              overlay; no sync. Flip only after the live path is verified.
+  // Prometheus /metrics endpoint bearer token. Required for scraper access.
+  METRICS_TOKEN: z.string().min(16).optional(),
   SPV_READ_MODE: z.enum(['mirror', 'live']).default('mirror'),
 }).superRefine((cfg, ctx) => {
   // KMS_KEK_BASE64 must be present in production when using the local provider

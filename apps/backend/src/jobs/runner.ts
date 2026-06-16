@@ -23,6 +23,7 @@ import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
 import { captureJobException, startJobSpan } from '../config/sentry.js';
 import { writeAudit } from '../shared/audit.js';
+import { jobRunsTotal, jobDuration, jobRowsProcessed, jobRowsFailed } from '../config/metrics.js';
 
 import { withJobLock } from './lock.js';
 
@@ -144,8 +145,13 @@ export async function runJob(
         entityId: runId ?? null,
         after: { status, rowsProcessed, rowsFailed, durationMs: finishedAt.getTime() - startedAt.getTime() },
       });
+      const durationMs = finishedAt.getTime() - startedAt.getTime();
+      jobRunsTotal.inc({ job: jobName, status });
+      jobDuration.observe({ job: jobName }, durationMs / 1000);
+      if (rowsProcessed > 0) jobRowsProcessed.inc({ job: jobName }, rowsProcessed);
+      if (rowsFailed > 0) jobRowsFailed.inc({ job: jobName }, rowsFailed);
       logger.info(
-        { jobName, runId, status, rowsProcessed, rowsFailed, durationMs: finishedAt.getTime() - startedAt.getTime() },
+        { jobName, runId, status, rowsProcessed, rowsFailed, durationMs },
         'job: completed',
       );
       return runId;
@@ -170,8 +176,11 @@ export async function runJob(
         entityId: runId ?? null,
         after: { error: message.slice(0, 1000) },
       });
+      const durationMs = finishedAt.getTime() - startedAt.getTime();
+      jobRunsTotal.inc({ job: jobName, status: 'FAILED' });
+      jobDuration.observe({ job: jobName }, durationMs / 1000);
       logger.error(
-        { err, jobName, runId, durationMs: finishedAt.getTime() - startedAt.getTime() },
+        { err, jobName, runId, durationMs },
         'job: all retries failed',
       );
       // SVT-OBS-JOBS-2026-05 — report to Sentry with job tag so the
@@ -205,6 +214,7 @@ export async function runJob(
             },
             select: { id: true },
           });
+          jobRunsTotal.inc({ job: jobName, status: 'SKIPPED_LOCKED' });
           logger.debug({ jobName, runId: skipped.id }, 'job: skipped (lock held by another replica)');
           return skipped.id;
         } catch (err) {

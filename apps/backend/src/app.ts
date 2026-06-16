@@ -12,7 +12,9 @@ import { pinoHttp } from 'pino-http';
 
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
+import { register } from './config/metrics.js';
 import { requestId } from './middlewares/requestId.js';
+import { httpMetrics } from './middlewares/httpMetrics.js';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
 import { globalLimiter } from './middlewares/rateLimit.js';
 import { authenticate } from './middlewares/auth.js';
@@ -105,6 +107,7 @@ export function createApp(): Express {
   app.set('trust proxy', 1);
 
   app.use(requestId);
+  app.use(httpMetrics);
   app.use(
     pinoHttp({
       logger,
@@ -351,6 +354,18 @@ export function createApp(): Express {
   if (env.isDev) {
     app.use('/api/v1', openapiRouter);
   }
+
+  // Prometheus metrics — guarded by METRICS_TOKEN bearer or admin JWT.
+  app.get('/metrics', async (req, res) => {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    const metricsToken = process.env['METRICS_TOKEN'];
+    if (metricsToken && token === metricsToken) {
+      res.set('Content-Type', register.contentType);
+      res.end(await register.metrics());
+      return;
+    }
+    res.status(401).json({ status: 401, detail: 'METRICS_TOKEN required' });
+  });
 
   // 404 + error handler last
   app.use(notFoundHandler);
