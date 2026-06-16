@@ -65,3 +65,35 @@ describe('default lifecycle stages data', () => {
     expect(byKey.get('post_study_work')?.is_terminal).toBe(true);
   });
 });
+
+const countryTemplates: Record<string, Stage[]> = JSON.parse(
+  readFileSync(resolve(process.cwd(), 'prisma/data/country-stage-templates.json'), 'utf8'),
+);
+
+describe('country stage templates data', () => {
+  const COUNTRY_PSW: Record<string, string> = {
+    US: 'opt',
+    UK: 'graduate_route',
+    AU: 'post_study_work_485',
+    CA: 'pgwp',
+  };
+
+  for (const [country, sts] of Object.entries(countryTemplates)) {
+    it(`${country}: well-formed with one terminal + country-specific post-study stage`, () => {
+      // Single terminal, contiguous sequence, valid categories.
+      expect(sts.filter((s) => s.is_terminal)).toHaveLength(1);
+      const seqs = sts.map((s) => s.sequence).sort((a, b) => a - b);
+      expect(seqs).toEqual(Array.from({ length: sts.length }, (_, i) => i + 1));
+      for (const s of sts) expect(VALID_CATEGORIES.has(s.category), s.category).toBe(true);
+      const byKey = new Map(sts.map((s) => [s.key, s]));
+      // enrolment is no longer terminal; graduation + the destination's PSW route follow.
+      expect(byKey.get('enrolled')?.is_terminal).toBe(false);
+      expect(byKey.has('graduated')).toBe(true);
+      const psw = COUNTRY_PSW[country];
+      if (psw) {
+        expect(byKey.has(psw), `${country} expects ${psw}`).toBe(true);
+        expect(byKey.get(psw)?.is_terminal).toBe(true);
+      }
+    });
+  }
+});
