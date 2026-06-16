@@ -42,21 +42,32 @@ export async function findUpcomingExpiries(opts: {
   }
   const tenantWhere = opts.tenantId ? { tenant_id: opts.tenantId } : {};
 
+  // SVT-PERF-2026-06 — the date-window already bounds these to the next
+  // `within` days, but with no row cap a tenant with a huge expiry backlog
+  // would still materialise the whole set into Node on every dashboard load
+  // (the summary only shows the soonest ~25). Cap each kind at MAX_PER_KIND
+  // ordered soonest-first so the most-urgent are never dropped, and WARN (never
+  // silently truncate) if any kind hits the cap so the limit is observable.
+  const MAX_PER_KIND = 1000;
+
   const [visas, passports, insurances, docs] = await Promise.all([
     client.studentVisa.findMany({
       where: { ...tenantWhere, is_active: true, expires_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, expires_on: true },
       orderBy: { expires_on: 'asc' },
+      take: MAX_PER_KIND,
     }),
     client.studentIdentification.findMany({
       where: { ...tenantWhere, type: 'PASSPORT', expires_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, expires_on: true },
       orderBy: { expires_on: 'asc' },
+      take: MAX_PER_KIND,
     }),
     client.insuranceRecord.findMany({
       where: { ...tenantWhere, ends_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, ends_on: true },
       orderBy: { ends_on: 'asc' },
+      take: MAX_PER_KIND,
     }),
     client.document.findMany({
       where: {
@@ -66,8 +77,22 @@ export async function findUpcomingExpiries(opts: {
       },
       select: { id: true, student_id: true, expires_on: true },
       orderBy: { expires_on: 'asc' },
+      take: MAX_PER_KIND,
     }),
   ]);
+
+  const truncated = [
+    ['visa', visas.length],
+    ['passport', passports.length],
+    ['insurance', insurances.length],
+    ['document', docs.length],
+  ].filter(([, n]) => (n as number) >= MAX_PER_KIND);
+  if (truncated.length > 0) {
+    logger.warn(
+      { tenantId: opts.tenantId, within, cap: MAX_PER_KIND, kinds: truncated.map(([k]) => k) },
+      'expiry scan: result capped at MAX_PER_KIND for one or more kinds — soonest are kept; widen handling if this recurs',
+    );
+  }
 
   const days = (d: Date) => Math.ceil((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 
