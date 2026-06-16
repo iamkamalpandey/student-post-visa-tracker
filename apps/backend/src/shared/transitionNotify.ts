@@ -77,7 +77,10 @@ export type TransitionNotifyArgs = {
     // SVT-SYNC-2026-06 — student-level status changes (ACTIVE→ON_HOLD/WITHDRAWN/
     // COMPLETED/…) surface a bell ping for the assigned counsellor, matching the
     // existing enrollment-status notification.
-    | 'student';
+    | 'student'
+    // SVT-AUDIT-VERIFY-2026-06 — the nightly audit-chain verify job pings the
+    // tenant ADMIN's bell when a hash-chain break is detected (possible tampering).
+    | 'audit';
 };
 
 // SVT-WAVE12-NOTIFY-DEDUP-2026-05 — when several rapid-fire transitions hit

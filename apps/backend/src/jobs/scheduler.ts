@@ -31,6 +31,7 @@ import { prisma } from '../config/db.js';
 import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import { captureJobException, withTenantScope } from '../config/sentry.js';
+import { notifyStatusTransition } from '../shared/transitionNotify.js';
 
 import { dispatchPending } from './reminderDispatcher.js';
 import { dispatchCommsOutbox } from './commsDispatcher.js';
@@ -261,6 +262,21 @@ async function runAuditVerifyPass(): Promise<JobOutcome> {
             { job: 'audit.chain.verify', tenant_id: t.id },
             { brokenCount: rows.length },
           );
+          // SVT-AUDIT-VERIFY-2026-06 — Sentry pages on-call, but the tenant
+          // ADMIN owns GDPR accountability for their own audit trail and may
+          // never see the SRE alerting stack. Ping their in-app bell too so a
+          // suspected-tampering signal reaches the data owner directly.
+          // Best-effort (never throws); deduped per the helper's window.
+          void notifyStatusTransition({
+            tenantId: t.id,
+            entityId: t.id,
+            source: 'audit',
+            title: 'Audit chain integrity FAILED',
+            body: `${rows.length} audit ${rows.length === 1 ? 'entry' : 'entries'} failed hash-chain verification — possible tampering or storage corruption. Investigate immediately.`,
+            href: '/audit',
+            preferUserId: null, // fan out to the tenant ADMIN
+            actorId: null,
+          });
         }
       });
     } catch (err) {
