@@ -2375,6 +2375,9 @@ enum ReminderType {
   DOCUMENT_EXPIRY
   ENROLLMENT_DECISION_DUE
   COMMISSION_CLAIM_DUE
+  // SVT-COMPLIANCE-REMINDERS-2026-06 — biometric/police-registration/BRP/CAS/
+  // medical compliance-check deadlines (ComplianceCheck.scheduled_at).
+  COMPLIANCE_CHECK_DUE
   CUSTOM
 }
 

@@ -29,6 +29,10 @@ import { logger } from '../config/logger.js';
 const INTAKE_OFFSETS_DAYS = [30, 14, 7];
 const PAYMENT_OFFSETS_DAYS = [14, 7, 3];
 const EXPIRY_OFFSETS_DAYS = [60, 30, 14];
+// SVT-COMPLIANCE-REMINDERS-2026-06 — statutory post-arrival deadlines (UK police
+// registration ~7 days, BRP collection ~10 days, biometrics, CAS, medical) are
+// short and hard, so the staircase is tight and ends with a same-window nudge.
+const COMPLIANCE_OFFSETS_DAYS = [14, 7, 3, 1];
 // Commission claims have no per-institution payment-terms column in the schema
 // (the concept lives on SuperAgent, not Institution), so we chase on a flat
 // default window until a real override is modelled.
@@ -389,6 +393,55 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           assigned_to_id: assignee,
           status: 'PENDING',
           metadata: { offset_days: offset, provider: ins.provider, href: `/students/${ins.student_id}` },
+          created_by_id: creatorId,
+        });
+      }
+    }
+    result.inserted += await bulkInsertReminders(tenantId, rows);
+  }
+
+  // -------------------------------------------------------------------------
+  // 5b. Compliance-check deadlines — ComplianceCheck.scheduled_at (not yet done)
+  // -------------------------------------------------------------------------
+  // SVT-COMPLIANCE-REMINDERS-2026-06 — biometric / police-registration / BRP /
+  // CAS / medical checks carry a hard scheduled_at deadline. The model + UI
+  // existed but nothing ever reminded on them, so a statutory window (e.g. UK
+  // police registration) could lapse silently and breach the student's visa.
+  // We chase any check that is NOT yet completed and whose deadline is upcoming.
+  const complianceChecks = await safeFind('compliance_check', () => db.complianceCheck.findMany({
+    where: {
+      tenant_id: tenantId,
+      completed_at: null,
+      scheduled_at: { not: null },
+      student: { is: { deleted_at: null } },
+    },
+    select: { id: true, student_id: true, check_type: true, scheduled_at: true },
+  }));
+  {
+    const rows: ReminderCreateRow[] = [];
+    for (const cc of complianceChecks) {
+      if (!cc.scheduled_at) continue;
+      const label = String(cc.check_type).replace(/_/g, ' ').toLowerCase();
+      for (const offset of COMPLIANCE_OFFSETS_DAYS) {
+        const scheduledFor = scheduledForOffset(cc.scheduled_at, offset);
+        if (scheduledFor < now) {
+          result.skipped++;
+          continue;
+        }
+        result.attempted++;
+        rows.push({
+          tenant_id: tenantId,
+          student_id: cc.student_id,
+          enrollment_id: null,
+          type: 'COMPLIANCE_CHECK_DUE',
+          source_entity_type: 'compliance_check',
+          source_entity_id: cc.id,
+          title: `${label} due in ${offset} day${offset === 1 ? '' : 's'}`,
+          due_on: cc.scheduled_at,
+          scheduled_for: scheduledFor,
+          assigned_to_id: assignee,
+          status: 'PENDING',
+          metadata: { offset_days: offset, check_type: cc.check_type, href: `/students/${cc.student_id}?tab=records` },
           created_by_id: creatorId,
         });
       }

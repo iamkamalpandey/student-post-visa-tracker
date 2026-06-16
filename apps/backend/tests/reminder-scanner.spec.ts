@@ -56,6 +56,8 @@ function makeVisas(n: number) {
 
 const fixture = {
   visas: makeVisas(50),
+  // SVT-COMPLIANCE-REMINDERS-2026-06 — controllable per-test compliance checks.
+  complianceChecks: [] as Array<{ id: string; student_id: string; check_type: string; scheduled_at: Date }>,
 };
 
 const inMemoryReminders: Array<Record<string, unknown>> = [];
@@ -125,6 +127,12 @@ vi.mock('../src/config/db.js', () => {
       insuranceRecord: { findMany: emptyRead },
       document: { findMany: emptyRead },
       commissionClaim: { findMany: emptyRead },
+      complianceCheck: {
+        findMany: vi.fn(async () => {
+          counters.reads++;
+          return fixture.complianceChecks;
+        }),
+      },
       reminder: {
         createMany: reminderCreateMany,
         upsert: reminderUpsert,
@@ -149,6 +157,7 @@ beforeEach(() => {
   counters.setConfig = 0;
   counters.rowsBulkInserted = 0;
   inMemoryReminders.length = 0;
+  fixture.complianceChecks = [];
   _clearAdminCache();
 });
 
@@ -211,5 +220,22 @@ describe('scanForTenant — batched DB calls', () => {
     // We can't easily assert order across mocks, but counts must match.
     expect(counters.setConfig).toBe(counters.transactions);
     expect(counters.bulkCreates).toBe(counters.transactions);
+  });
+
+  it('chases not-yet-completed compliance-check deadlines (COMPLIANCE_CHECK_DUE)', async () => {
+    fixture.complianceChecks = [
+      {
+        id: 'cccccccc-cccc-7ccc-8ccc-000000000001',
+        student_id: 'ssssssss-ssss-7sss-8sss-000000000001',
+        check_type: 'POLICE_REGISTRATION',
+        scheduled_at: FUTURE,
+      },
+    ];
+    await scanForTenant(TENANT);
+    const cc = inMemoryReminders.filter((r) => r['type'] === 'COMPLIANCE_CHECK_DUE');
+    // 4 COMPLIANCE_OFFSETS_DAYS, all in the future (deadline +1y).
+    expect(cc.length).toBe(4);
+    expect(cc.every((r) => r['source_entity_type'] === 'compliance_check')).toBe(true);
+    expect(cc.every((r) => r['source_entity_id'] === fixture.complianceChecks[0]!.id)).toBe(true);
   });
 });
