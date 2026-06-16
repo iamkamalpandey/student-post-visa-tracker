@@ -155,6 +155,24 @@ vi.mock('../src/config/db.js', () => {
     travelRecord: mkChildModel(),
     accommodation: mkChildModel(),
     financeItem: mkChildModel(),
+    // SVT-DSAR-2026-06 — the Art.15 bundle now also pulls the CRM mirror estate
+    // (lead + children) when a converted student's lead exists. crmLead.findFirst
+    // returns null here, so the crm block is skipped; the children are present so
+    // a future fixture can exercise it.
+    crmLead: mkChildModel(),
+    crmGuardian: mkChildModel(),
+    crmPayment: mkChildModel(),
+    crmRemark: mkChildModel(),
+    crmCallHistory: mkChildModel(),
+    crmFollowUp: mkChildModel(),
+    crmVisit: mkChildModel(),
+    crmApplication: mkChildModel(),
+    crmLeadCourse: mkChildModel(),
+    crmLeadCourseHistory: mkChildModel(),
+    crmAssignment: mkChildModel(),
+    crmQualification: mkChildModel(),
+    crmLanguageTest: mkChildModel(),
+    crmLeadFee: mkChildModel(),
     accessTokenDenylist: { findUnique: vi.fn(async () => null) },
     auditLog: { create: vi.fn(async () => ({})), findFirst: vi.fn(async () => null) },
     refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },

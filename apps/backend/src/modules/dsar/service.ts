@@ -739,6 +739,52 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
     },
   }));
 
+  // SVT-DSAR-2026-06 — Art.15 must also cover the CRM mirror estate. A converted
+  // student's originating lead (crm_lead.student_id) and its children hold subject
+  // PII the native tables don't carry (guardians, payments, remarks, call/visit/
+  // follow-up history, education + test history). Include them when a lead exists.
+  const crmLead = await prisma.crmLead.findFirst({ where: { student_id: studentId, tenant_id: tenantId } });
+  let crm: Record<string, unknown> | null = null;
+  if (crmLead) {
+    const leadWhere = { lead_id: crmLead.id, tenant_id: tenantId };
+    const TAKE = 10_000; // bound per-child to avoid OOM on a heavily-mirrored lead.
+    const [
+      crmGuardians, crmPayments, crmRemarks, crmCalls, crmFollowUps, crmVisits,
+      crmApplications, crmLeadCourses, crmCourseHistory, crmAssignments,
+      crmQualifications, crmLanguageTests, crmFees,
+    ] = await Promise.all([
+      prisma.crmGuardian.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmPayment.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmRemark.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmCallHistory.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmFollowUp.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmVisit.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmApplication.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmLeadCourse.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmLeadCourseHistory.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmAssignment.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmQualification.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmLanguageTest.findMany({ where: leadWhere, take: TAKE }),
+      prisma.crmLeadFee.findMany({ where: leadWhere, take: TAKE }),
+    ]);
+    crm = {
+      lead: crmLead,
+      guardians: crmGuardians,
+      payments: crmPayments,
+      remarks: crmRemarks,
+      call_history: crmCalls,
+      follow_ups: crmFollowUps,
+      visits: crmVisits,
+      applications: crmApplications,
+      lead_courses: crmLeadCourses,
+      course_history: crmCourseHistory,
+      assignments: crmAssignments,
+      qualifications: crmQualifications,
+      language_tests: crmLanguageTests,
+      fees: crmFees,
+    };
+  }
+
   return {
     __subject_type__: 'student',
     __subject_id__: studentId,
@@ -768,6 +814,7 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
     notes,
     tags: entityTags,
     comms_messages: commsMessages,
+    crm,
   };
 }
 
