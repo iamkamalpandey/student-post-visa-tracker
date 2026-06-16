@@ -123,6 +123,17 @@ export type AuditEventLoose = {
  *   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
  * used by audit_logs_hash_chain() (migration 20991231235984b).
  *
+ * SVT-WAVE-AUDIT-FORENSIC-2026-06: this payload includes the forensic
+ * correlation hashes (actor_email_hash, ip_hash, ua_hash). The DB trigger's
+ * v2 canonical payload now ALSO covers them (migration
+ * 20991231235994_audit_chain_forensic_fields), so those fields are part of
+ * the tamper-evident chain — a DB-level rewrite of who/from-where is now
+ * detected by audit_logs_verify(). NOTE: the trigger is still the sole
+ * authoritative hash; this app-side value differs in framing (id, hex vs
+ * base64, '|' vs \x1f) and is overwritten on insert. It exists for a future
+ * offline replay verifier and to keep the protected field-set documented in
+ * one place.
+ *
  * Rationale: `Date.prototype.toISOString()` always emits UTC (`Z`), so it is
  * NOT directly affected by `process.env.TZ`. BUT it only emits millisecond
  * precision, while Postgres TIMESTAMPTZ holds microseconds. A future change

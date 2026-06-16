@@ -2213,6 +2213,12 @@ model AuditLog {
   request_id       String?
   prev_hash        String?  @db.Char(64)
   entry_hash       String   @db.Char(64)
+  // Canonical-payload version of the hash chain. DB-trigger managed: the
+  // audit_logs_hash_chain() trigger stamps 2 on insert (extended payload that
+  // also covers actor_email_hash/ip_hash/ua_hash); legacy rows stay 1. The app
+  // never writes this — DEFAULT 1 only applies if the trigger is bypassed.
+  // See migration 20991231235994_audit_chain_forensic_fields.
+  hash_version     Int      @default(1) @db.SmallInt
   created_at       DateTime @default(now()) @db.Timestamptz
 
   tenant Tenant? @relation(fields: [tenant_id], references: [id], onDelete: SetNull)
