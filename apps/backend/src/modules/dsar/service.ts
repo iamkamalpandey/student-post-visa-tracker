@@ -313,6 +313,34 @@ async function eraseStudent(
       data: { candidate_name: ERASED, candidate_email: ERASED },
     });
 
+    // 8f. CRM child tables — SVT-DSAR-2026-06. The parent crm_lead is redacted in
+    // 8c, but its children (linked by lead_id) carry their own subject PII: a
+    // guardian's contact details (a SECOND person's PII), payment bank refs/notes,
+    // and free-text remarks/call/visit/application notes. Resolve the lead id(s)
+    // for this student (incl. the one just soft-deleted in 8c → no deleted_at
+    // filter) and clear the directly-identifying fields. Required String columns →
+    // sentinel; nullable → null. CrmFollowUp carries no free-text PII; education
+    // grades / test scores on CrmQualification/CrmLanguageTest are the documented
+    // residual, untouched here. (Children link via lead_id, so the schema-driven
+    // completeness guard — keyed on student_id — does not enforce these; kept here
+    // deliberately as part of a complete Art.17 erasure.)
+    const erasedLeads = await tx.crmLead.findMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      select: { id: true },
+    });
+    if (erasedLeads.length > 0) {
+      const childWhere = { lead_id: { in: erasedLeads.map((l) => l.id) }, tenant_id: tenantId };
+      await tx.crmGuardian.updateMany({
+        where: childWhere,
+        data: { full_name: ERASED, phone: null, secondary_phone: null, email: null, address: null, occupation: null, notes: null },
+      });
+      await tx.crmPayment.updateMany({ where: childWhere, data: { bank_ref: null, notes: null } });
+      await tx.crmRemark.updateMany({ where: childWhere, data: { content: ERASED } });
+      await tx.crmCallHistory.updateMany({ where: childWhere, data: { notes: null } });
+      await tx.crmVisit.updateMany({ where: childWhere, data: { purpose: ERASED } });
+      await tx.crmApplication.updateMany({ where: childWhere, data: { notes: null } });
+    }
+
     // 9. Addresses. StudentAddress is the per-student link row; Address is a
     // SHARED catalog row (referenced by accommodations, contacts, sponsors,
     // employer_addresses, institutions, campuses — see schema relations). We

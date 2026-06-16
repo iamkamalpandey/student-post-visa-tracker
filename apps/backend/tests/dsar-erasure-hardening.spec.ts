@@ -190,6 +190,13 @@ const childDelegates = {
   spvLeadOverlay: mkChildModel(),
   // SVT-DSAR-2026-06 — mock-interview records carry candidate name/email PII.
   interviewAttempt: mkChildModel(),
+  // SVT-DSAR-2026-06 — crm child tables redacted on erasure (linked via lead_id).
+  crmGuardian: mkChildModel(),
+  crmPayment: mkChildModel(),
+  crmRemark: mkChildModel(),
+  crmCallHistory: mkChildModel(),
+  crmVisit: mkChildModel(),
+  crmApplication: mkChildModel(),
 };
 
 const prismaMock: Record<string, unknown> = {
@@ -411,12 +418,24 @@ describe('rank 5/11 — ERASURE completion erasure failure handling', () => {
   it('happy path: ERASURE→COMPLETED with a present subject resolves and audits dsar.erasure.executed', async () => {
     seedStudent();
     const row = seedDsar({ type: 'ERASURE', status: 'IN_PROGRESS' });
+    // SVT-DSAR-2026-06 — a linked CRM lead → its children must be redacted too.
+    const crmLeadModel = (childDelegates.crmLead as { findMany: ReturnType<typeof vi.fn> });
+    crmLeadModel.findMany.mockResolvedValueOnce([{ id: 'lead-x' }]);
 
     const res = await dsarService.update(
       adminReq as never,
       row.id,
       { status: 'COMPLETED' } as never,
     );
+
+    // CRM child PII redacted (guardian contact + free-text), scoped to the lead.
+    const guardian = (childDelegates.crmGuardian as { updateMany: ReturnType<typeof vi.fn> }).updateMany;
+    expect(guardian).toHaveBeenCalledTimes(1);
+    expect(guardian.mock.calls[0]![0]).toMatchObject({
+      where: { lead_id: { in: ['lead-x'] }, tenant_id: TENANT },
+      data: { full_name: '[ERASED]', email: null },
+    });
+    expect((childDelegates.crmRemark as { updateMany: ReturnType<typeof vi.fn> }).updateMany).toHaveBeenCalledTimes(1);
 
     // Resolves with the COMPLETED row.
     expect((res as { status: DSARStatus }).status).toBe('COMPLETED');
