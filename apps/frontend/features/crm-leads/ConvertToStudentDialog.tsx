@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import {
-  Alert, Autocomplete, Button, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, Stack, TextField, Typography,
+  Alert, AlertTitle, Autocomplete, Button, Dialog, DialogActions, DialogContent, DialogTitle, Link, MenuItem, Stack, TextField, Typography,
 } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
@@ -74,14 +74,19 @@ export default function ConvertToStudentDialog({
     email_primary: lead.email ?? '',
     phone_primary_e164: lead.phone_number?.startsWith('+') ? lead.phone_number : '',
   });
-  const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
+  // SVT-DEDUP-2026-06 — candidate matches returned by the convert 409 guard.
+  // Editing any identity field clears them (the match key changed).
+  const [dupes, setDupes] = useState<{ id: string; label: string }[] | null>(null);
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => {
+    if (dupes && (k === 'given_name' || k === 'family_name' || k === 'date_of_birth')) setDupes(null);
     setF((p) => ({ ...p, [k]: e.target.value }));
+  };
 
   const canSubmit =
     !!f.given_name.trim() && !!f.family_name.trim() && !!f.name_in_passport.trim() &&
     ISO_DATE.test(f.date_of_birth) && f.nationality_code.trim().length === 2;
 
-  function submit() {
+  function submit(acknowledgeDuplicate = false) {
     const payload: ConvertStudentPayload = {
       given_name: f.given_name.trim(),
       family_name: f.family_name.trim(),
@@ -93,17 +98,27 @@ export default function ConvertToStudentDialog({
       ...(f.email_primary.trim() ? { email_primary: f.email_primary.trim() } : {}),
       ...(f.phone_primary_e164.trim() ? { phone_primary_e164: f.phone_primary_e164.trim() } : {}),
       ...(programId ? { program_id: programId } : {}),
+      ...(acknowledgeDuplicate ? { acknowledge_duplicate: true } : {}),
     };
     convert.mutate(payload, {
       onSuccess: (r) => {
         const feeNote = r.fees_migrated ? ` · ${r.fees_migrated} fee(s) migrated` : '';
         const enrolNote = r.enrollment_created ? ' · enrolled' : '';
         enqueueSnackbar(`Created student ${r.student_code}${feeNote}${enrolNote}.`, { variant: 'success' });
+        setDupes(null);
         onConverted(r.student_id, r.student_code);
         onClose();
       },
-      onError: (err) =>
-        enqueueSnackbar(err instanceof ApiError ? err.detail || err.title : 'Conversion failed', { variant: 'error' }),
+      onError: (err) => {
+        // The dedup guard 409s with candidate matches — surface them inline so
+        // the admin can open the existing record or knowingly convert anyway,
+        // instead of a transient error toast.
+        if (err instanceof ApiError && err.code === 'duplicate_student_candidates') {
+          setDupes(err.errors.map((e) => ({ id: e.path, label: e.message })));
+          return;
+        }
+        enqueueSnackbar(err instanceof ApiError ? err.detail || err.title : 'Conversion failed', { variant: 'error' });
+      },
     });
   }
 
@@ -161,12 +176,32 @@ export default function ConvertToStudentDialog({
             Enter date of birth and a 2-letter nationality code to enable Convert.
           </Typography>
         ) : null}
+        {dupes && dupes.length > 0 ? (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            <AlertTitle>Possible duplicate student</AlertTitle>
+            A managed student with this name and date of birth already exists. Open it to check —
+            or, if this is genuinely a different person, convert anyway.
+            <Stack spacing={0.5} sx={{ mt: 1 }}>
+              {dupes.map((d) => (
+                <Link key={d.id} href={`/students/${d.id}`} target="_blank" rel="noopener" underline="hover">
+                  {d.label} ↗
+                </Link>
+              ))}
+            </Stack>
+          </Alert>
+        ) : null}
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} color="inherit">Cancel</Button>
-        <Button onClick={submit} variant="contained" disabled={!canSubmit || convert.isPending}>
-          {convert.isPending ? 'Converting…' : 'Convert'}
-        </Button>
+        {dupes && dupes.length > 0 ? (
+          <Button onClick={() => submit(true)} color="warning" variant="outlined" disabled={convert.isPending}>
+            {convert.isPending ? 'Converting…' : 'Convert anyway'}
+          </Button>
+        ) : (
+          <Button onClick={() => submit()} variant="contained" disabled={!canSubmit || convert.isPending}>
+            {convert.isPending ? 'Converting…' : 'Convert'}
+          </Button>
+        )}
       </DialogActions>
     </Dialog>
   );

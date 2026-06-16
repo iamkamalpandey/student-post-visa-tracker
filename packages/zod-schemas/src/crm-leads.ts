@@ -15,6 +15,12 @@ import { CreateStudentRequest } from './students.js';
 // course is matched/picked against the curated catalog, never fabricated).
 export const ConvertLeadToStudentRequest = CreateStudentRequest.extend({
   program_id: Uuid.optional(),
+  // SVT-DEDUP-2026-06 — convert 409s with candidate matches when a managed
+  // student with the same name + date of birth already exists (the classic
+  // CRM-convert-vs-manually-added double record). Set true to acknowledge the
+  // match and create a second student anyway (genuinely different person who
+  // shares a name and birthday).
+  acknowledge_duplicate: z.boolean().optional(),
 });
 export type ConvertLeadToStudentRequest = z.infer<typeof ConvertLeadToStudentRequest>;
 

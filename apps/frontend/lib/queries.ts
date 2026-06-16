@@ -703,6 +703,8 @@ export type ConvertStudentPayload = {
   phone_primary_e164?: string;
   /** Optional app-catalog Program to enrol the new student into (reconciliation). */
   program_id?: string;
+  /** Set true to bypass the duplicate-student guard after reviewing the matches. */
+  acknowledge_duplicate?: boolean;
 };
 export type ConvertLeadResult = { student_id: string; student_code: string; lead_id: string; fees_migrated: number; enrollment_created: boolean };
 

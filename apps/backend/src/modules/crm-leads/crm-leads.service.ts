@@ -9,7 +9,7 @@ import type {
   UpdateCrmLeadRequest,
 } from '@spv/zod-schemas';
 
-import { Conflict, NotFound, PreconditionFailed } from '../../shared/errors.js';
+import { Conflict, HttpError, NotFound, PreconditionFailed } from '../../shared/errors.js';
 import { logger } from '../../config/logger.js';
 import { writeAudit } from '../../shared/audit.js';
 import { runJob } from '../../jobs/runner.js';
@@ -364,8 +364,9 @@ export async function convertLeadToStudent(
 ): Promise<{ student_id: string; student_code: string; lead_id: string; fees_migrated: number; enrollment_created: boolean }> {
   const { db, tenantId, actorId } = ctx;
   // program_id is the optional reconciliation pick (app-catalog Program to enrol
-  // into); strip it before handing the rest to the students-create path.
-  const { program_id, ...studentInput } = input;
+  // into); acknowledge_duplicate is the dedup-guard override. Strip both before
+  // handing the rest to the students-create path.
+  const { program_id, acknowledge_duplicate, ...studentInput } = input;
 
   const lead = await db.crmLead.findFirst({
     where: { id: leadId, tenant_id: tenantId, deleted_at: null },
@@ -373,6 +374,42 @@ export async function convertLeadToStudent(
   });
   if (!lead) throw NotFound('Lead not found');
   if (lead.student_id) throw Conflict('Lead is already linked to a student');
+
+  // SVT-DEDUP-2026-06 — guard against silently creating a SECOND managed student
+  // for someone who already exists (CRM-converted vs manually-added duplicate →
+  // double fee schedules, split history). Match on the strong (family + given
+  // name, DOB) key — all plain, indexed columns (students_tenant_family_given
+  // idx). On a hit we 409 with the candidate matches so the admin can link to
+  // the existing record instead; acknowledge_duplicate bypasses it for the rare
+  // genuine namesake-with-same-birthday case.
+  if (!acknowledge_duplicate) {
+    const candidates = await db.student.findMany({
+      where: {
+        tenant_id: tenantId,
+        deleted_at: null,
+        given_name: { equals: studentInput.given_name, mode: 'insensitive' },
+        family_name: { equals: studentInput.family_name, mode: 'insensitive' },
+        date_of_birth: new Date(studentInput.date_of_birth),
+      },
+      select: { id: true, student_code: true, given_name: true, family_name: true },
+      take: 5,
+    });
+    if (candidates.length > 0) {
+      throw new HttpError({
+        status: 409,
+        title: 'Conflict',
+        code: 'duplicate_student_candidates',
+        detail: `A managed student with this name and date of birth already exists (${candidates
+          .map((c) => c.student_code)
+          .join(', ')}). Link to the existing record, or re-submit acknowledging the duplicate to convert anyway.`,
+        errors: candidates.map((c) => ({
+          path: c.id,
+          message: `${c.student_code} — ${c.given_name} ${c.family_name}`,
+          code: 'existing_student',
+        })),
+      });
+    }
+  }
 
   // Create the Student through the students service — identical path to a manual
   // create (passport-name encryption, SPV-code allocation, initial stage, audit).
