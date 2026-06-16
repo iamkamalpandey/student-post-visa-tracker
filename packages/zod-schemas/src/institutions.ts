@@ -158,7 +158,14 @@ export const CreateInstitutionIdentifierRequest = z
     valid_from: Iso8601Date.optional(),
     valid_to: Iso8601Date.optional(),
   })
-  .strict();
+  .strict()
+  // An identifier that expires before it was issued is nonsensical data —
+  // reject it at the edge rather than letting it poison validity displays.
+  // ISO-8601 date strings compare lexicographically == chronologically.
+  .refine((v) => !v.valid_from || !v.valid_to || v.valid_to >= v.valid_from, {
+    message: 'valid_to must be on or after valid_from',
+    path: ['valid_to'],
+  });
 export type CreateInstitutionIdentifierRequest = z.infer<
   typeof CreateInstitutionIdentifierRequest
 >;
@@ -171,7 +178,14 @@ export const CreateInstitutionAccreditationRequest = z
     expires_on: Iso8601Date.optional(),
     scope: z.string().max(2000).optional(),
   })
-  .strict();
+  .strict()
+  // An accreditation cannot expire before it was awarded; reject the inverted
+  // range so the institution's accreditation validity never renders backwards.
+  // ISO-8601 date strings compare lexicographically == chronologically.
+  .refine((v) => !v.awarded_on || !v.expires_on || v.expires_on >= v.awarded_on, {
+    message: 'expires_on must be on or after awarded_on',
+    path: ['expires_on'],
+  });
 export type CreateInstitutionAccreditationRequest = z.infer<
   typeof CreateInstitutionAccreditationRequest
 >;

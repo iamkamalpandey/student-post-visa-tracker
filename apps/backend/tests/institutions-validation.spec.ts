@@ -201,6 +201,40 @@ describe('CreateInstitutionIdentifierRequest', () => {
       CreateInstitutionIdentifierRequest.safeParse({ scheme: 'CRICOS', value: '' }).success,
     ).toBe(false);
   });
+
+  it('rejects valid_to before valid_from', () => {
+    expect(
+      CreateInstitutionIdentifierRequest.safeParse({
+        scheme: 'CRICOS',
+        value: '123',
+        valid_from: '2024-06-01',
+        valid_to: '2024-01-01',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts valid_to on/after valid_from (and either date alone)', () => {
+    expect(
+      CreateInstitutionIdentifierRequest.safeParse({
+        scheme: 'CRICOS',
+        value: '123',
+        valid_from: '2024-01-01',
+        valid_to: '2024-06-01',
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateInstitutionIdentifierRequest.safeParse({
+        scheme: 'CRICOS',
+        value: '123',
+        valid_from: '2024-01-01',
+        valid_to: '2024-01-01',
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateInstitutionIdentifierRequest.safeParse({ scheme: 'CRICOS', value: '123', valid_to: '2024-01-01' })
+        .success,
+    ).toBe(true);
+  });
 });
 
 describe('CreateInstitutionAccreditationRequest', () => {
@@ -216,6 +250,29 @@ describe('CreateInstitutionAccreditationRequest', () => {
       CreateInstitutionAccreditationRequest.safeParse({ body: 'QAA', awarded_on: '20240101' })
         .success,
     ).toBe(false);
+  });
+
+  it('rejects expires_on before awarded_on', () => {
+    expect(
+      CreateInstitutionAccreditationRequest.safeParse({
+        body: 'QAA',
+        awarded_on: '2024-06-01',
+        expires_on: '2020-01-01',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts expires_on on/after awarded_on (and either date alone)', () => {
+    expect(
+      CreateInstitutionAccreditationRequest.safeParse({
+        body: 'QAA',
+        awarded_on: '2024-01-01',
+        expires_on: '2029-01-01',
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateInstitutionAccreditationRequest.safeParse({ body: 'QAA', expires_on: '2029-01-01' }).success,
+    ).toBe(true);
   });
 });
 
