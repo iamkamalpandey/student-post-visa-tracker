@@ -68,7 +68,9 @@ export const StudentBase = z
     gender_self_described: z.string().min(1).max(120).optional(),
     nationality_code: CountryAlpha2,
     marital_status: MaritalStatusEnum.optional(),
-    primary_language: z.string().length(2),
+    // ISO 639-1 alpha-2 language code (e.g. en, ne, hi) — enforce 2 letters,
+    // not any 2 chars, so "12"/"n1" can't persist.
+    primary_language: z.string().length(2).regex(/^[A-Za-z]{2}$/, 'must be an ISO 639-1 alpha-2 language code'),
     // Self-declared identity fields. Free text by design — closed enums are culturally
     // fraught for these. Optional everywhere.
     religion: z.string().min(1).max(80).optional(),

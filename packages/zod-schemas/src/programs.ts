@@ -93,12 +93,22 @@ export const ProgramBase = z
     short_name: z.string().min(1).max(60).optional(),
     level: AcademicLevelEnum,
     field_of_study: z.string().min(1).max(160).optional(),
+    // ISCED-F 2013 (UNESCO) detailed codes are 4 digits whose first two encode
+    // one of the 11 broad fields (00 Generic … 10 Services). Enforce that
+    // structure rather than accepting any 4 digits.
     isced_code: z
       .string()
-      .regex(/^\d{4}$/, 'isced_code must be a 4-digit ISCED-F code')
+      .regex(/^(0\d|10)\d{2}$/, 'isced_code must be a valid 4-digit ISCED-F 2013 code (broad field 00–10)')
       .optional(),
     delivery_mode: DeliveryModeEnum.default('IN_PERSON'),
-    language_of_instruction: z.string().min(2).max(8).default('en'),
+    // BCP-47 language tag (primary subtag + optional script/region/variant),
+    // e.g. en, en-GB, zh-Hans, pt-BR. Replaces a bare min/max length check.
+    language_of_instruction: z
+      .string()
+      .min(2)
+      .max(35)
+      .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'must be a BCP-47 language tag (e.g. en, en-GB, zh-Hans)')
+      .default('en'),
     duration_months: z.number().int().min(1).max(120),
     credit_hours: z.number().int().min(0).max(10000).optional(),
     description: z.string().max(8000).optional(),

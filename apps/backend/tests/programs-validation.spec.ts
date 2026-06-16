@@ -64,6 +64,26 @@ describe('CreateProgramRequest', () => {
     ).toBe(true);
   });
 
+  it('enforces the ISCED-F 2013 broad-field prefix (00–10)', () => {
+    // Broad fields 11–99 do not exist in ISCED-F 2013.
+    for (const bad of ['1234', '1199', '9000']) {
+      expect(CreateProgramRequest.safeParse({ ...minimal, isced_code: bad }).success, bad).toBe(false);
+    }
+    // Generic (00), Health (09), Services (10) are valid broad fields.
+    for (const ok of ['0000', '0911', '1011']) {
+      expect(CreateProgramRequest.safeParse({ ...minimal, isced_code: ok }).success, ok).toBe(true);
+    }
+  });
+
+  it('validates language_of_instruction as a BCP-47 tag', () => {
+    for (const ok of ['en', 'en-GB', 'zh-Hans', 'pt-BR']) {
+      expect(CreateProgramRequest.safeParse({ ...minimal, language_of_instruction: ok }).success, ok).toBe(true);
+    }
+    for (const bad of ['e', 'en_GB', '123', 'english language']) {
+      expect(CreateProgramRequest.safeParse({ ...minimal, language_of_instruction: bad }).success, bad).toBe(false);
+    }
+  });
+
   it('clamps duration_months to [1, 120]', () => {
     expect(
       CreateProgramRequest.safeParse({ ...minimal, duration_months: 0 }).success,
