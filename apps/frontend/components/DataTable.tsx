@@ -165,6 +165,22 @@ export default function DataTable<R>({
                     key={id}
                     hover={clickable}
                     onClick={clickable ? () => handleRowClick(row) : undefined}
+                    // SVT-A11Y-2026-06 (WCAG 2.1.1) — a mouse-only clickable row
+                    // is unreachable by keyboard/AT users, blocking the primary
+                    // navigation path on list pages. Make it focusable + operable
+                    // with Enter/Space (mirrors NotificationsBell's cards).
+                    onKeyDown={
+                      clickable
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              handleRowClick(row);
+                            }
+                          }
+                        : undefined
+                    }
+                    tabIndex={clickable ? 0 : undefined}
+                    role={clickable ? 'button' : undefined}
                     sx={{
                       cursor: clickable ? 'pointer' : 'default',
                     }}
