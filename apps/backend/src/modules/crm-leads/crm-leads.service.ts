@@ -9,6 +9,7 @@ import type {
   UpdateCrmLeadRequest,
 } from '@spv/zod-schemas';
 
+import { prisma } from '../../config/db.js';
 import { Conflict, HttpError, NotFound, PreconditionFailed } from '../../shared/errors.js';
 import { logger } from '../../config/logger.js';
 import { writeAudit } from '../../shared/audit.js';
@@ -418,32 +419,39 @@ export async function convertLeadToStudent(
     student_code: string;
   };
 
-  // Link lead → student, guarded against a concurrent double-convert: only link
-  // if still unlinked. If another request won the race, surface a clean 409.
-  const linked = await db.crmLead.updateMany({
-    where: { id: leadId, tenant_id: tenantId, student_id: null },
-    data: { student_id: student.id, converted_at: new Date(), converted_by_id: actorId },
-  });
-  if (linked.count === 0) {
-    throw Conflict('Lead was just linked to a student by another request');
-  }
-
-  // Migrate the lead's fee schedule onto the student as FinanceItems so finances
-  // follow the person (fixes the orphaned-fee data loss). The source CrmLeadFees
-  // are soft-deleted to avoid double-counting across the lead + student summaries.
+  // SVT-REL-2026-06 — link the lead AND migrate its fee schedule onto the
+  // student ATOMICALLY. Previously the link, then each CrmLeadFee→FinanceItem
+  // move (+ source soft-delete), ran as independent statements with a per-fee
+  // try/catch, so a crash mid-loop left the lead linked but only SOME fees moved
+  // — and because the lead was now linked, the convert could never be retried to
+  // finish (unrecoverable, money-touching). All-or-nothing here: a failure rolls
+  // back the link + every fee, so a fresh retry (new idempotency key) re-runs
+  // cleanly (the just-created student surfaces via the dup guard). Raw prisma tx
+  // + manual set_config — the tenant-scoped client wraps each op in its own inner
+  // tx which would break atomicity (see students.service.create).
   // (Enrollment is intentionally NOT auto-created — a curated Program/Institution
   // is required; fabricating catalog rows from CRM free-text would corrupt it.)
   const feeStatusMap: Record<string, 'PENDING' | 'PAID' | 'OVERDUE' | 'WAIVED'> = {
     SCHEDULED: 'PENDING', DUE: 'PENDING', OVERDUE: 'OVERDUE', PAID: 'PAID', WAIVED: 'WAIVED',
   };
-  const leadFees = await db.crmLeadFee.findMany({
-    where: { lead_id: leadId, tenant_id: tenantId, deleted_at: null },
-    select: { id: true, session_label: true, amount_minor: true, currency: true, due_on: true, status: true, paid_at: true },
-  });
   let feesMigrated = 0;
-  for (const lf of leadFees) {
-    try {
-      await db.financeItem.create({
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+    // Link lead → student, guarded against a concurrent double-convert: only link
+    // if still unlinked. If another request won the race, the 409 rolls the tx back.
+    const linked = await tx.crmLead.updateMany({
+      where: { id: leadId, tenant_id: tenantId, student_id: null },
+      data: { student_id: student.id, converted_at: new Date(), converted_by_id: actorId },
+    });
+    if (linked.count === 0) {
+      throw Conflict('Lead was just linked to a student by another request');
+    }
+    const leadFees = await tx.crmLeadFee.findMany({
+      where: { lead_id: leadId, tenant_id: tenantId, deleted_at: null },
+      select: { id: true, session_label: true, amount_minor: true, currency: true, due_on: true, status: true, paid_at: true },
+    });
+    for (const lf of leadFees) {
+      await tx.financeItem.create({
         data: {
           tenant_id: tenantId,
           student_id: student.id,
@@ -456,15 +464,13 @@ export async function convertLeadToStudent(
           status: feeStatusMap[lf.status] ?? 'PENDING',
         },
       });
-      await db.crmLeadFee.update({
+      await tx.crmLeadFee.update({
         where: { id: lf.id },
         data: { deleted_at: new Date(), deleted_by_id: actorId },
       });
       feesMigrated += 1;
-    } catch (err) {
-      logger.warn({ err, leadId, feeId: lf.id }, 'convertLeadToStudent: fee migration failed (skipped)');
     }
-  }
+  });
 
   // Reconciliation: if the admin matched/picked an app-catalog Program, enrol the
   // new student into it (institution derived from the Program; createForStudent

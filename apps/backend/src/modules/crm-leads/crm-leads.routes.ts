@@ -13,6 +13,7 @@ import {
 } from '@spv/zod-schemas';
 
 import { requireRole } from '../../middlewares/auth.js';
+import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { validate } from '../../middlewares/validate.js';
 import { v2SyncLimiter } from '../../middlewares/rateLimit.js';
 import { BadRequest } from '../../shared/errors.js';
@@ -60,7 +61,11 @@ crmLeadsRouter.patch('/:id', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), 
 
 // Convert a lead → managed Student (ADMIN). Body = ConvertLeadToStudentRequest (admin
 // confirms a payload pre-filled from the lead on the client).
-crmLeadsRouter.post('/:id/convert', requireUuidId, requireRole('ADMIN'), validate(ConvertLeadToStudentRequest), ctl.convertHandler);
+// SVT-REL-2026-06 — convert mints a student + migrates fees (+ maybe an
+// enrollment): an irreversible money-mover, so require an Idempotency-Key like
+// every billing money-mover (a non-browser client double-firing the POST could
+// otherwise create duplicate students before the dup guard's read sees either).
+crmLeadsRouter.post('/:id/convert', requireUuidId, requireRole('ADMIN'), requireIdempotencyKey, validate(ConvertLeadToStudentRequest), ctl.convertHandler);
 
 crmLeadsRouter.post('/:id/fees', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), validate(CreateCrmLeadFeeRequest), ctl.createFeeHandler);
 crmLeadsRouter.patch('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), validate(UpdateCrmLeadFeeRequest), ctl.updateFeeHandler);
