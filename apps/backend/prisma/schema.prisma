@@ -3229,6 +3229,9 @@ model CrmApplication {
   @@index([course_id])
   @@index([state])
   @@index([deleted_at])
+  // SVT-PERF-2026-06 — listApplications constrains by the (v2_lead_id, v2_course_id)
+  // visa-accepted pairs; without this the OR-of-pairs filter seq-scans the table.
+  @@index([tenant_id, v2_lead_id, v2_course_id])
   @@map("crm_applications")
 }
 
@@ -3269,6 +3272,10 @@ model CrmLeadCourse {
   @@index([course_id])
   @@index([state_v2])
   @@index([deleted_at])
+  // SVT-PERF-2026-06 — the vaPairs resolver filters (tenant_id, state_v2,
+  // deleted_at) to find visa-accepted lead-courses; the single-col state_v2
+  // index is low-cardinality, this composite serves the actual predicate.
+  @@index([tenant_id, state_v2, deleted_at])
   @@map("crm_lead_courses")
 }
 
