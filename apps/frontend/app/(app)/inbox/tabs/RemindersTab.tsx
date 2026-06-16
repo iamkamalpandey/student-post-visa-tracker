@@ -618,6 +618,7 @@ export default function RemindersTab() {
               rows={rows as Reminder[]}
               rowCount={total}
               getRowId={(r) => r.id}
+              onRowClick={(r) => r.metadata?.href ?? undefined}
               page={pageIndex}
               pageSize={pageSize}
               rowsPerPageOptions={PAGE_SIZE_OPTIONS}

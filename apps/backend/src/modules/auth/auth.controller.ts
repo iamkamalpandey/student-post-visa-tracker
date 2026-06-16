@@ -87,7 +87,7 @@ export const authController = {
         res.status(401).end();
         return;
       }
-      const user = await authService.getMe(req.user.sub);
+      const user = await authService.getMe(req.user.sub, req.user.tid);
       res.status(200).json(user);
     } catch (err) {
       next(err);
@@ -103,8 +103,8 @@ export const authController = {
         return;
       }
       const body = req.body as UpdateMyPreferencesRequest;
-      const before = await authService.getMe(req.user.sub);
-      const after = await authService.updateMyPreferences(req.user.sub, body);
+      const before = await authService.getMe(req.user.sub, req.user.tid);
+      const after = await authService.updateMyPreferences(req.user.sub, body, req.user.tid);
       await writeAudit({
         tenantId: req.user.tid,
         actorId: req.user.sub,
@@ -127,7 +127,7 @@ export const authController = {
         return;
       }
       const body = req.body as ChangePasswordRequest;
-      await authService.changePassword(req.user.sub, body.current_password, body.new_password);
+      await authService.changePassword(req.user.sub, body.current_password, body.new_password, req.user.tid);
       res.status(204).end();
     } catch (err) {
       next(err);

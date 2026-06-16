@@ -29,7 +29,11 @@ export async function dryRun(mapped: MappedRow, ctx: DryRunCtx): Promise<DryRunR
     },
     select: { id: true },
   });
-  return { ok: true, willUpdate: !!existing };
+  return {
+    ok: true,
+    willUpdate: !!existing,
+    dedupKey: `${String(r.value.legal_name).toLowerCase()}|${String(r.value.country_code).toUpperCase()}`,
+  };
 }
 
 export async function applyRow(

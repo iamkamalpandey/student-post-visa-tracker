@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { prisma } from '../../config/db.js';
+import { getRedisClient } from '../../shared/redisClient.js';
 
 export const healthRouter: Router = Router();
 
@@ -10,7 +11,9 @@ healthRouter.get('/livez', (_req, res) => {
 healthRouter.get('/readyz', async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: 'ready', db: 'ok' });
+    const redis = await getRedisClient();
+    const redisStatus = redis ? 'connected' : (process.env.REDIS_URL ? 'unavailable' : 'not_configured');
+    res.json({ status: 'ready', db: 'ok', redis: redisStatus });
   } catch (err) {
     res.status(503).json({
       status: 'not_ready',

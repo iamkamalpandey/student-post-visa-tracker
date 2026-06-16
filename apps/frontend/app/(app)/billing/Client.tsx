@@ -176,14 +176,42 @@ export default function BillingAdminClient() {
   }
 
   // ----- KPI tiles --------------------------------------------------------
-  // Aged debt rows are scoped to a single currency at the query layer (the
-  // backend takes a `currency` filter); without it we get a mix. Surface the
-  // dominant currency in the response for the KPI; default to USD when we
-  // have no rows yet.
-  const debtCurrency =
-    agedDebt.data?.rows[0]?.currency ?? 'USD';
-
+  // SVT-FIN-2026-06: money KPIs are per-currency (never netted). Render the
+  // money tiles once per currency present; counts stay global. When >1
+  // currency is present the tile labels carry the currency code.
   const fin = summary.data;
+  const curRows = fin?.by_currency ?? [];
+  const multiCurrency = curRows.length > 1;
+  const moneyTiles =
+    curRows.length > 0
+      ? curRows.flatMap((row) => [
+          <KpiTile
+            key={`out-${row.currency}`}
+            icon={<AccountBalanceWalletOutlinedIcon />}
+            label={multiCurrency ? `Outstanding (${row.currency})` : 'Outstanding'}
+            value={fmt.money(row.total_outstanding_minor, row.currency)}
+            hint={summary.isFetching ? 'refreshing…' : undefined}
+          />,
+          <KpiTile
+            key={`col-${row.currency}`}
+            icon={<TrendingUpOutlinedIcon />}
+            label={multiCurrency ? `Collections 30d (${row.currency})` : 'Collections (30d)'}
+            value={fmt.money(row.collections_30d_minor, row.currency)}
+          />,
+          <KpiTile
+            key={`rr-${row.currency}`}
+            icon={<RequestQuoteOutlinedIcon />}
+            label={multiCurrency ? `Refund rate 30d (${row.currency})` : 'Refund rate (30d)'}
+            // refund_rate_30d is a 0-1 fraction with 4 decimals; render as percent.
+            value={fmt.percent(row.refund_rate_30d * 100, 1)}
+            intent={row.refund_rate_30d > 0.05 ? 'warning' : 'default'}
+          />,
+        ])
+      : [
+          <KpiTile key="out" icon={<AccountBalanceWalletOutlinedIcon />} label="Outstanding" value="—" />,
+          <KpiTile key="col" icon={<TrendingUpOutlinedIcon />} label="Collections (30d)" value="—" />,
+          <KpiTile key="rr" icon={<RequestQuoteOutlinedIcon />} label="Refund rate (30d)" value="—" />,
+        ];
   const kpis = (
     <Box
       sx={{
@@ -193,29 +221,12 @@ export default function BillingAdminClient() {
       }}
     >
       <KpiTile
-        icon={<AccountBalanceWalletOutlinedIcon />}
-        label="Outstanding"
-        value={fin ? fmt.money(fin.total_outstanding_minor, debtCurrency) : '—'}
-        hint={summary.isFetching ? 'refreshing…' : undefined}
-      />
-      <KpiTile
         icon={<WarningAmberOutlinedIcon />}
         label="Overdue installments"
         value={fin?.overdue_count ?? '—'}
         intent={fin && fin.overdue_count > 0 ? 'warning' : 'default'}
       />
-      <KpiTile
-        icon={<TrendingUpOutlinedIcon />}
-        label="Collections (30d)"
-        value={fin ? fmt.money(fin.collections_30d_minor, debtCurrency) : '—'}
-      />
-      <KpiTile
-        icon={<RequestQuoteOutlinedIcon />}
-        label="Refund rate (30d)"
-        // refund_rate_30d is a 0-1 fraction with 4 decimals; render as percent.
-        value={fin ? fmt.percent(fin.refund_rate_30d * 100, 1) : '—'}
-        intent={fin && fin.refund_rate_30d > 0.05 ? 'warning' : 'default'}
-      />
+      {moneyTiles}
     </Box>
   );
 

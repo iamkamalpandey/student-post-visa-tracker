@@ -15,6 +15,7 @@ import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
 import CategoryOutlinedIcon from '@mui/icons-material/CategoryOutlined';
 import OutboxOutlinedIcon from '@mui/icons-material/OutboxOutlined';
 import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
+import QuizOutlinedIcon from '@mui/icons-material/QuizOutlined';
 import { useAuth } from '@/lib/auth';
 import { api } from '@/lib/api';
 import { useEffect, type ReactNode } from 'react';
@@ -42,6 +43,7 @@ const ADMIN_LINKS: AdminLink[] = [
   // administers, with a help dialog pointing at the onboarding script for new
   // tenants (no auth-less creation surface).
   { href: '/admin/tenants', label: 'Tenants', description: 'Your tenant + settings; onboarding command for new tenants', icon: <ApartmentOutlinedIcon /> },
+  { href: '/interview-questions', label: 'Interview prep', description: 'Question bank for visa interview mock tests + attempt tracking', icon: <QuizOutlinedIcon /> },
 ];
 
 // SVT-WAVE11-OUTBOX-HEALTH-2026-05 — compact health card surfaced above the

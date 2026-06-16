@@ -9,9 +9,11 @@ const withNextIntl = createNextIntlPlugin('./i18n/request.ts');
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // Standalone output is required by apps/frontend/Dockerfile, which copies
-  // .next/standalone into the runtime image.
-  output: 'standalone',
+  // Standalone output is required by apps/frontend/Dockerfile (copies
+  // .next/standalone into the runtime image). Gated behind NEXT_OUTPUT so a
+  // local `next build` works on Windows — standalone's symlink step throws
+  // EPERM there. The Dockerfile sets NEXT_OUTPUT=standalone for the image build.
+  output: process.env.NEXT_OUTPUT === 'standalone' ? 'standalone' : undefined,
   transpilePackages: ['@spv/api-types', '@spv/zod-schemas', '@spv/utils'],
   experimental: {
     optimizePackageImports: ['@mui/material', '@mui/icons-material'],

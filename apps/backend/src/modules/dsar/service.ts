@@ -254,6 +254,55 @@ async function eraseStudent(
       data: { notes: null },
     });
 
+    // 8b. FinanceItem — SVT-SYNC-2026-06. The free-text `description` can carry
+    // the subject's name/notes (e.g. fees migrated from a converted lead). Redact
+    // it; amount/currency/dates are retained financial records (independent
+    // retention basis) and the row stays for the audit skeleton. Was previously
+    // skipped → a completed erasure left subject text in finance line-items.
+    await tx.financeItem.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: { description: ERASED },
+    });
+
+    // 8c. CrmLead — SVT-SYNC-2026-06. The SPVT-owned mirror of the originating
+    // V2 lead, linked at conversion (student_id). Redact identity PII + soft-
+    // delete it; the V2 ingest now SKIPS soft-deleted leads (deleted_at is set
+    // ONLY here), so the next sync will NOT re-populate the cleared fields.
+    // Required columns → sentinel; nullable PII → null. (Granular education
+    // grades/years + test scores are a smaller known residual; identity,
+    // contact, DOB, address + institution names — the directly-identifying
+    // fields — are cleared here.)
+    await tx.crmLead.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId, deleted_at: null },
+      data: {
+        first_name: ERASED,
+        last_name: ERASED,
+        phone_number: ERASED,
+        secondary_number: null,
+        gender: null,
+        address: null,
+        dob: null,
+        email: null,
+        city: null,
+        slc_institution_name: null,
+        highschool_institution_name: null,
+        bachelors_institution_name: null,
+        masters_institution_name: null,
+        deleted_at: now,
+      },
+    });
+
+    // 8d. SpvLeadOverlay — SVT-SYNC-2026-06. SPVT-owned annotation island
+    // (status / free-text spv_notes / assignment) keyed to the lead+student.
+    // Reserved/unwired today (federation #17) so it holds no rows yet, but it
+    // carries a free-text PII field + a student_id link — redact + soft-delete
+    // so erasure is already complete the moment it is activated. (Enforced by
+    // the schema-driven completeness guard in dsar-erasure-hardening.spec.ts.)
+    await tx.spvLeadOverlay.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId, deleted_at: null },
+      data: { spv_notes: null, deleted_at: now, deleted_by_id: actorId ?? null },
+    });
+
     // 9. Addresses. StudentAddress is the per-student link row; Address is a
     // SHARED catalog row (referenced by accommodations, contacts, sponsors,
     // employer_addresses, institutions, campuses — see schema relations). We
@@ -660,6 +709,8 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
   if (commsThreads.length > 0) {
     const rows = await prisma.commsMessage.findMany({
       where: { thread_id: { in: commsThreads.map((t) => t.id) } },
+      take: 50_000, // SVT-SYNC-2026-06: bound DSAR export to prevent OOM on large tenants.
+      orderBy: { created_at: 'asc' },
     });
     commsMessages = rows as Array<Record<string, unknown>>;
   }

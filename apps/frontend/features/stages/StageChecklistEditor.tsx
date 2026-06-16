@@ -125,7 +125,26 @@ export default function StageChecklistEditor({ stageId }: Props) {
 
   return (
     <Stack spacing={1.5}>
-      {items.length === 0 && !itemsQuery.isLoading ? (
+      {/* SVT-SYNC-2026-06 — B3: show error + retry when fetch fails, not "No tasks yet". */}
+      {itemsQuery.isError ? (
+        <Stack spacing={0.5}>
+          <Typography variant="caption" color="error.main">
+            {itemsQuery.error instanceof ApiError
+              ? (itemsQuery.error.detail || itemsQuery.error.title)
+              : 'Failed to load checklist tasks.'}
+          </Typography>
+          <Box>
+            <Button
+              size="small"
+              variant="text"
+              onClick={() => void itemsQuery.refetch()}
+              disabled={itemsQuery.isFetching}
+            >
+              {itemsQuery.isFetching ? 'Retrying…' : 'Retry'}
+            </Button>
+          </Box>
+        </Stack>
+      ) : items.length === 0 && !itemsQuery.isLoading ? (
         <Typography variant="caption" color="text.secondary">
           No tasks yet. Add the first one below.
         </Typography>

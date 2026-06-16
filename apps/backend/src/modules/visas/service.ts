@@ -4,14 +4,47 @@ import { prisma } from '../../config/db.js';
 import { NotFound, PreconditionFailed } from '../../shared/errors.js';
 import { encryptField } from '../../shared/encryption.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
+import { completeness as computeCompleteness } from '../students/students.service.js';
 import type {
   CreateVisaRequest,
   UpdateVisaRequest,
   VisaListQuery,
 } from '@spv/zod-schemas';
 
+// SVT-SYNC-2026-06 — A6: best-effort recompute of parent student's completeness_pct.
+// Visa is a completeness key — going 0→1 bumps score ~11%.
+async function recomputeCompleteness(client: DB, tenantId: string, studentId: string): Promise<void> {
+  try {
+    await computeCompleteness({ db: client as never, tenantId }, studentId);
+  } catch (err) {
+    logger.warn({ err, studentId }, 'visa.recomputeCompleteness: best-effort failed');
+  }
+}
+
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
+
+// SVT-SYNC-2026-06 — A7: dismiss stale "visa expiry" reminders when a visa is
+// deleted or deactivated (superseded). Best-effort.
+async function dismissVisaReminders(client: DB, tenantId: string, visaId: string): Promise<void> {
+  try {
+    const result = await (client as PrismaClient).reminder.updateMany({
+      where: {
+        tenant_id: tenantId,
+        source_entity_type: 'student_visa',
+        source_entity_id: visaId,
+        status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+      },
+      data: { status: 'DISMISSED' },
+    });
+    if (result.count > 0) {
+      logger.info({ tenantId, visaId, dismissed: result.count }, 'auto-dismissed visa expiry reminders');
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId, visaId }, 'dismissVisaReminders: best-effort failed');
+  }
+}
 
 // ---------------------------------------------------------------------------
 // SVT-FSM-2026-05: Active-visa mutex helper. When a row is being flipped to
@@ -136,7 +169,11 @@ export const visaService = {
         entityId: oldId,
         after: { reason: 'new_active_visa', new_visa_id: created.id, student_id: studentId },
       });
+      // SVT-SYNC-2026-06 — A7: deactivated visa → dismiss its expiry reminders.
+      await dismissVisaReminders(db(req), req.user!.tid, oldId);
     }
+    // SVT-SYNC-2026-06 — A6: recompute completeness (visa is a key).
+    await recomputeCompleteness(db(req), tenantId, studentId);
     return created;
   },
   async list(req: { db?: DB; user?: { tid: string } }, studentId: string, q: VisaListQuery) {
@@ -242,6 +279,8 @@ export const visaService = {
           student_id: (after as { student_id: string }).student_id,
         },
       });
+      // SVT-SYNC-2026-06 — A7: deactivated visa → dismiss its expiry reminders.
+      await dismissVisaReminders(db(req), req.user!.tid, oldId);
     }
     return after;
   },
@@ -252,6 +291,10 @@ export const visaService = {
       where: { id, tenant_id: req.user!.tid },
     });
     if (r.count !== 1) throw NotFound('Visa not found');
+    // SVT-SYNC-2026-06 — A7: deleted visa → dismiss its expiry reminders.
+    await dismissVisaReminders(db(req), req.user!.tid, id);
+    // SVT-SYNC-2026-06 — A6: recompute completeness (deleting last visa drops ~11%).
+    await recomputeCompleteness(db(req), req.user!.tid, (before as { student_id: string }).student_id);
     await writeAudit(req as never, {
       action: 'student.visa.deleted',
       entityType: 'student_visa',

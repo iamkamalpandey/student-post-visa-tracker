@@ -96,7 +96,11 @@ export async function runJob(
 ): Promise<string | null> {
   const attempts = opts.attempts ?? 3;
 
-  return await withJobLock(jobName, opts.ttlSec, async () => {
+  // The locked body: insert RUNNING, run under retry, persist outcome. Extracted
+  // so the entire withJobLock(...) call can sit inside a try/catch below — see
+  // the catch for why that matters (lock-acquisition is fail-CLOSED and throws
+  // BEFORE this body runs).
+  const locked = async (): Promise<string | null> => {
     const startedAt = new Date();
     let runId: string | null = null;
     try {
@@ -184,29 +188,57 @@ export async function runJob(
       );
       return runId;
     }
-  }).then(async (result) => {
-    if (result === null) {
-      // Lock was already held — record a SKIPPED_LOCKED row so observers can
-      // see that the trigger fired but yielded to another replica.
-      try {
-        const skipped = await prisma.jobRun.create({
-          data: {
-            job_name: jobName,
-            started_at: new Date(),
-            finished_at: new Date(),
-            status: 'SKIPPED_LOCKED',
-          },
-          select: { id: true },
-        });
-        logger.debug({ jobName, runId: skipped.id }, 'job: skipped (lock held by another replica)');
-        return skipped.id;
-      } catch (err) {
-        logger.warn({ err, jobName }, 'runJob: failed to record SKIPPED_LOCKED row');
-        return null;
+  };
+
+  try {
+    return await withJobLock(jobName, opts.ttlSec, locked).then(async (result) => {
+      if (result === null) {
+        // Lock was already held — record a SKIPPED_LOCKED row so observers can
+        // see that the trigger fired but yielded to another replica.
+        try {
+          const skipped = await prisma.jobRun.create({
+            data: {
+              job_name: jobName,
+              started_at: new Date(),
+              finished_at: new Date(),
+              status: 'SKIPPED_LOCKED',
+            },
+            select: { id: true },
+          });
+          logger.debug({ jobName, runId: skipped.id }, 'job: skipped (lock held by another replica)');
+          return skipped.id;
+        } catch (err) {
+          logger.warn({ err, jobName }, 'runJob: failed to record SKIPPED_LOCKED row');
+          return null;
+        }
       }
+      return result;
+    });
+  } catch (err) {
+    // SVT-REL-2026-06 — Lock acquisition itself failed. withJobLock is
+    // fail-CLOSED: it throws here BEFORE the job fn runs (e.g. Postgres
+    // unreachable), so the inner try/catch never sees it. Absorb it: the
+    // scheduler invokes runJob as `void runJob()`, and a rejected promise there
+    // hits server.ts's process.on('unhandledRejection') → process.exit(1),
+    // crash-looping the whole API on a transient DB blip. Skip this cycle and
+    // let the next trigger retry.
+    logger.error({ err, jobName }, 'runJob: lock acquisition failed — run skipped this cycle');
+    captureJobException(err, { job: jobName }, { phase: 'lock-acquire' });
+    try {
+      await prisma.jobRun.create({
+        data: {
+          job_name: jobName,
+          started_at: new Date(),
+          finished_at: new Date(),
+          status: 'FAILED',
+          error_message: errorMessage(err).slice(0, 4000),
+        },
+      });
+    } catch {
+      // DB likely unreachable too — nothing we can persist. Already logged above.
     }
-    return result;
-  });
+    return null;
+  }
 }
 
 function errorMessage(err: unknown): string {

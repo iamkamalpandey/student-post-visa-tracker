@@ -36,6 +36,7 @@ import OutboxOutlinedIcon from '@mui/icons-material/OutboxOutlined';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import HourglassEmptyOutlinedIcon from '@mui/icons-material/HourglassEmptyOutlined';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import KpiTile from '@/components/KpiTile';
@@ -267,6 +268,7 @@ export default function OutboxClient() {
   });
   const bulkScope: 'terminal' | 'retrying' | 'failed' | null =
     status === 'TERMINAL' ? 'terminal' : status === 'FAILED' ? 'retrying' : null;
+  const [confirmBulk, setConfirmBulk] = useState(false);
 
   if (!isAdmin) {
     return (
@@ -345,7 +347,7 @@ export default function OutboxClient() {
                 variant="outlined"
                 color="warning"
                 startIcon={<ReplayOutlinedIcon />}
-                onClick={() => bulkRequeue.mutate(bulkScope)}
+                onClick={() => setConfirmBulk(true)}
                 disabled={bulkRequeue.isPending}
               >
                 Requeue all
@@ -353,6 +355,18 @@ export default function OutboxClient() {
             </span>
           </Tooltip>
         )}
+        {bulkScope ? (
+          <ConfirmDialog
+            open={confirmBulk}
+            title="Requeue all in this view?"
+            description={`Flip every ${bulkScope.toUpperCase()} message (${rows.length} shown) back to QUEUED and reset attempts. They will be re-sent on the next dispatch — recipients may receive previously-failed messages.`}
+            confirmText="Requeue all"
+            destructive
+            loading={bulkRequeue.isPending}
+            onConfirm={() => { setConfirmBulk(false); bulkRequeue.mutate(bulkScope); }}
+            onClose={() => setConfirmBulk(false)}
+          />
+        ) : null}
         <Tooltip title="Refresh">
           <IconButton onClick={() => void qc.invalidateQueries({ queryKey: ['admin', 'outbox'] })} size="small">
             <RefreshOutlinedIcon />

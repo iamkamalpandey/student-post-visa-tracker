@@ -18,6 +18,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { Conflict, NotFound, PreconditionFailed, Unauthorized } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
 import { notifyStatusTransition } from '../../shared/transitionNotify.js';
+import { logger } from '../../config/logger.js';
 // SVT-FSM-2026-05: the canonical commission state-machine lives in
 // `./fsm-def.ts` (consumed by the /api/v1/fsm/commission/options FE
 // endpoint). Inline per-action guards below are preserved because each
@@ -63,6 +64,27 @@ const fullInclude: Prisma.CommissionClaimInclude = {
     },
   },
 };
+
+// SVT-SYNC-2026-06 — A7: dismiss PENDING/SENT/SNOOZED "commission due"
+// reminders when the claim reaches a terminal state (PAID/WAIVED).
+async function dismissClaimReminders(req: { db?: DB }, tenantId: string, claimId: string): Promise<void> {
+  try {
+    const result = await db(req).reminder.updateMany({
+      where: {
+        tenant_id: tenantId,
+        source_entity_type: 'commission_claim',
+        source_entity_id: claimId,
+        status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+      },
+      data: { status: 'DISMISSED' },
+    });
+    if (result.count > 0) {
+      logger.info({ tenantId, claimId, dismissed: result.count }, 'auto-dismissed commission claim reminders');
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId, claimId }, 'dismissClaimReminders: best-effort failed');
+  }
+}
 
 // ---------------------------------------------------------------------------
 // list / get
@@ -296,6 +318,8 @@ export async function markPaid(req: Request, id: string, body: MarkPaidRequest) 
     actorId: sub,
     source: 'commission',
   });
+  // SVT-SYNC-2026-06 — A7: PAID is terminal — dismiss "commission due" reminders.
+  await dismissClaimReminders(req, tid, id);
   return after;
 }
 
@@ -427,6 +451,8 @@ export async function waive(req: Request, id: string) {
     before: { status: before.status },
     after: { status: after.status },
   });
+  // SVT-SYNC-2026-06 — A7: WAIVED is terminal — dismiss "commission due" reminders.
+  await dismissClaimReminders(req, tid, id);
   return after;
 }
 

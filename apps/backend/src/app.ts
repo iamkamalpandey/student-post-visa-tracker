@@ -71,6 +71,12 @@ import { publicDsarRouter } from './modules/dsar-public/routes.js';
 import { publicStatusRouter } from './modules/status-public/routes.js';
 import { breachRouter } from './modules/breach/routes.js';
 import { billingRouter } from './modules/billing/billing.routes.js';
+import { crmLeadsRouter } from './modules/crm-leads/crm-leads.routes.js';
+import {
+  interviewQuestionsRouter,
+  interviewAttemptsRouter,
+  publicInterviewPrepRouter,
+} from './modules/interview-prep/routes.js';
 import { subProcessorRouter } from './modules/sub-processors/routes.js';
 import { ropaRouter } from './modules/admin/ropa.routes.js';
 // SVT-WAVE-BILLING-SEC-P1-F8 — operator sweeper for stuck idempotency rows.
@@ -178,6 +184,7 @@ export function createApp(): Express {
   // feed. Mounted under the same /api/v1/public mount as DSAR intake so both
   // run before the global authenticate middleware.
   app.use('/api/v1/public', publicStatusRouter);
+  app.use('/api/v1/public', publicInterviewPrepRouter);
   // SVT-SEC-P2-FE3-2026-05 — public CSP violation report sink. Browsers never
   // send credentials with report-uri requests so this MUST run before any auth
   // middleware. Self-rate-limited (10/min/IP); see csp-report.routes.ts.
@@ -213,6 +220,8 @@ export function createApp(): Express {
   // v6: Per-(country × visa-type) admin catalogue. Mounted as its own root so the
   // parameterised /:id PATCH/DELETE doesn't collide with student modules.
   app.use('/api/v1/visa-types', authenticate, tenantContext, visaTypesRouter);
+  app.use('/api/v1/interview-questions', authenticate, tenantContext, interviewQuestionsRouter);
+  app.use('/api/v1/interview-attempts', authenticate, tenantContext, interviewAttemptsRouter);
   // Documents: mounted both as a student-nested resource (uploads + listing)
   // and as a flat id-keyed resource (download / verify / delete). The
   // student-nested mount runs *before* the flat /api/v1/documents mount so
@@ -313,6 +322,8 @@ export function createApp(): Express {
   app.use('/api/v1/breach-incidents', breachRouter);
   // SVT-WAVE-BILLING-2026-05 — gated by Tenant.billing_enabled (404 when off).
   app.use('/api/v1/billing', billingRouter);
+  // SVT-V2-CRM-MIRROR-2026-06 — CRM-lead mirror (V2 MIS ingest + session fees).
+  app.use('/api/v1/leads', authenticate, tenantContext, crmLeadsRouter);
   app.use('/api/v1/sub-processors', subProcessorRouter);
   // SVT-GDPR-2026-05 — Art. 30 Records of Processing Activities (admin).
   app.use('/api/v1/admin', ropaRouter);

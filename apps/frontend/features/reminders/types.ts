@@ -40,6 +40,8 @@ export type Reminder = {
   acknowledged_at?: string | null;
   snooze_until?: string | null;
   created_at: string;
+  // SVT-V2-CRM-MIRROR-2026-06 — deep-link target set by the reminder scanner.
+  metadata?: { href?: string | null } | null;
 
   // Embedded display joins — optional because the underlying API may omit them.
   student?: ReminderStudentRef | null;

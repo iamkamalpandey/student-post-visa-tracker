@@ -174,29 +174,55 @@ dashboardRouter.get('/finance-summary', async (req, res, next) => {
       };
     }
 
-    const [outAgg, overdueCount, collectionsAgg, refundAgg, plansCount] = await Promise.all([
-      db.feeInstallment.aggregate({ where: installWhere as never, _sum: { balance_minor: true } }),
+    const [outRows, overdueCount, payRows, refundRows, plansCount] = await Promise.all([
+      db.feeInstallment.groupBy({ by: ['currency'], where: installWhere as never, _sum: { balance_minor: true } }),
       db.feeInstallment.count({ where: overdueWhere as never }),
-      db.payment.aggregate({ where: paymentWhere as never, _sum: { gross_minor: true } }),
-      db.refund.aggregate({ where: refundWhere as never, _sum: { amount_minor: true } }),
+      db.payment.groupBy({ by: ['currency'], where: paymentWhere as never, _sum: { gross_minor: true } }),
+      // Refund has no own currency column — it inherits its payment's currency.
+      db.refund.findMany({ where: refundWhere as never, select: { amount_minor: true, payment: { select: { currency: true } } } }),
       db.feePlan.count({ where: planWhere as never }),
     ]);
 
-    const outstanding = outAgg._sum.balance_minor ?? 0n;
-    const collected = collectionsAgg._sum.gross_minor ?? 0n;
-    const refunded = refundAgg._sum.amount_minor ?? 0n;
-    const denom = collected + refunded;
-    const refundRate = denom > 0n
-      ? Math.round((Number(refunded) / Number(denom)) * 10_000) / 10_000
-      : 0;
+    // SVT-FIN-2026-06: NEVER net across currencies. Aggregate money per ISO
+    // currency; counts (overdue, active plans) are currency-agnostic and stay
+    // global. Returns a per-currency array the client renders one tile-set each.
+    type Acc = { currency: string; outstanding: bigint; collections: bigint; refunds: bigint };
+    const byCur = new Map<string, Acc>();
+    const ensure = (c: string): Acc => {
+      let r = byCur.get(c);
+      if (!r) { r = { currency: c, outstanding: 0n, collections: 0n, refunds: 0n }; byCur.set(c, r); }
+      return r;
+    };
+    for (const r of outRows as Array<{ currency: string; _sum: { balance_minor: bigint | null } }>) {
+      ensure(r.currency).outstanding += r._sum.balance_minor ?? 0n;
+    }
+    for (const r of payRows as Array<{ currency: string; _sum: { gross_minor: bigint | null } }>) {
+      ensure(r.currency).collections += r._sum.gross_minor ?? 0n;
+    }
+    for (const r of refundRows as Array<{ amount_minor: bigint; payment: { currency: string } | null }>) {
+      ensure(r.payment?.currency ?? 'XXX').refunds += r.amount_minor;
+    }
+
+    const by_currency = [...byCur.values()]
+      .sort((a, b) => a.currency.localeCompare(b.currency))
+      .map((r) => {
+        const denom = r.collections + r.refunds;
+        const refund_rate_30d = denom > 0n
+          ? Math.round((Number(r.refunds) / Number(denom)) * 10_000) / 10_000
+          : 0;
+        return {
+          currency: r.currency,
+          total_outstanding_minor: r.outstanding.toString(),
+          collections_30d_minor: r.collections.toString(),
+          refunds_30d_minor: r.refunds.toString(),
+          refund_rate_30d,
+        };
+      });
 
     res.json({
       data: {
-        total_outstanding_minor: outstanding.toString(),
+        by_currency,
         overdue_count: overdueCount,
-        collections_30d_minor: collected.toString(),
-        refunds_30d_minor: refunded.toString(),
-        refund_rate_30d: refundRate,
         active_plans_count: plansCount,
       },
     });
@@ -225,8 +251,9 @@ dashboardRouter.get('/expiries', async (req, res, next) => {
 // A student is "SLA-breached" when the elapsed time in its current stage
 // exceeds `LifecycleStage.sla_hours`. Stages without `sla_hours` are exempt,
 // as are stages flagged `show_on_dashboard=false` (mirrors /summary's stage
-// filter — hidden stages aren't operational workload). Terminal statuses
-// (WITHDRAWN, COMPLETED) are also excluded.
+// filter — hidden stages aren't operational workload). Only ACTIVE students
+// count: a paused/terminal student (ON_HOLD, ON_LEAVE, DEFERRED, WITHDRAWN,
+// COMPLETED) has a stopped clock and must not show as a false SLA breach.
 //
 // Returns a row per breached student with `hours_over_sla` for sorting. Limit
 // is hard-capped at 200; the FE widget surfaces the worst breaches first.
@@ -260,12 +287,13 @@ dashboardRouter.get('/sla-breaches', async (req, res, next) => {
     }
     const stageMap = new Map(stages.map((s) => [s.id, s]));
 
-    // Students currently sitting in one of those stages and not in a terminal status.
+    // Students ACTIVE in one of those stages. Only ACTIVE has a running SLA clock
+    // — ON_HOLD/ON_LEAVE/DEFERRED are intentional pauses; WITHDRAWN/COMPLETED terminal.
     const students = await db.student.findMany({
       where: {
         tenant_id: tenantId,
         deleted_at: null,
-        status: { notIn: ['WITHDRAWN', 'COMPLETED'] },
+        status: 'ACTIVE',
         current_stage_id: { in: stages.map((s) => s.id) },
       },
       orderBy: { stage_entered_at: 'asc' },

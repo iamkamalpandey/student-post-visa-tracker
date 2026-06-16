@@ -44,17 +44,17 @@ export async function findUpcomingExpiries(opts: {
 
   const [visas, passports, insurances, docs] = await Promise.all([
     client.studentVisa.findMany({
-      where: { ...tenantWhere, is_active: true, expires_on: { gte: today, lte: horizon } },
+      where: { ...tenantWhere, is_active: true, expires_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, expires_on: true },
       orderBy: { expires_on: 'asc' },
     }),
     client.studentIdentification.findMany({
-      where: { ...tenantWhere, type: 'PASSPORT', expires_on: { gte: today, lte: horizon } },
+      where: { ...tenantWhere, type: 'PASSPORT', expires_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, expires_on: true },
       orderBy: { expires_on: 'asc' },
     }),
     client.insuranceRecord.findMany({
-      where: { ...tenantWhere, ends_on: { gte: today, lte: horizon } },
+      where: { ...tenantWhere, ends_on: { gte: today, lte: horizon }, student: { is: { deleted_at: null } } },
       select: { id: true, student_id: true, ends_on: true },
       orderBy: { ends_on: 'asc' },
     }),

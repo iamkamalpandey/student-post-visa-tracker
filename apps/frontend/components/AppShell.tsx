@@ -32,6 +32,7 @@ import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined';
 import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
 import SchoolOutlinedIcon from '@mui/icons-material/SchoolOutlined';
+import HowToRegOutlinedIcon from '@mui/icons-material/HowToRegOutlined';
 import ClassOutlinedIcon from '@mui/icons-material/ClassOutlined';
 import UploadFileOutlinedIcon from '@mui/icons-material/UploadFileOutlined';
 import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
@@ -70,6 +71,7 @@ type NavKey =
   | 'billing'
   | 'dashboard'
   | 'students'
+  | 'leads'
   | 'calendar'
   | 'inbox'
   | 'institutions'
@@ -106,6 +108,7 @@ type NavItem = {
 const PRIMARY_NAV: NavItem[] = [
   { labelKey: 'dashboard', href: '/', icon: <DashboardOutlinedIcon /> },
   { labelKey: 'students', href: '/students', icon: <GroupsOutlinedIcon /> },
+  { labelKey: 'leads', href: '/leads', icon: <HowToRegOutlinedIcon /> },
   { labelKey: 'inbox', href: '/inbox', icon: <MoveToInboxOutlinedIcon /> },
   { labelKey: 'calendar', href: '/calendar', icon: <CalendarMonthOutlinedIcon /> },
   { labelKey: 'institutions', href: '/institutions', icon: <SchoolOutlinedIcon /> },

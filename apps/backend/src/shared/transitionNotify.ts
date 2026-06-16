@@ -73,7 +73,11 @@ export type TransitionNotifyArgs = {
     // SVT-WAVE-BILLING-2026-05 — billing FSM transitions (Wave 2+).
     | 'fee_plan'
     | 'payment'
-    | 'refund';
+    | 'refund'
+    // SVT-SYNC-2026-06 — student-level status changes (ACTIVE→ON_HOLD/WITHDRAWN/
+    // COMPLETED/…) surface a bell ping for the assigned counsellor, matching the
+    // existing enrollment-status notification.
+    | 'student';
 };
 
 // SVT-WAVE12-NOTIFY-DEDUP-2026-05 — when several rapid-fire transitions hit

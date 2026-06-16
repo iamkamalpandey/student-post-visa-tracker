@@ -39,6 +39,8 @@ type Reminder = {
   status?: string | null;
   due_on?: string | null;
   due_at?: string | null;
+  // SVT-V2-CRM-MIRROR-2026-06 — deep-link target set by the reminder scanner.
+  metadata?: { href?: string | null } | null;
 };
 
 // SVT-WAVE7-INBOX-2026-05 — IN_APP message rows fed by the transition-notify
@@ -206,6 +208,14 @@ export default function NotificationsBell() {
     } else {
       markRead.mutate(m.id);
     }
+  };
+
+  // SVT-V2-CRM-MIRROR-2026-06 — reminders deep-link to their concern (e.g.
+  // /leads/:id). Navigating does NOT auto-acknowledge — that stays an explicit
+  // action so a viewed-but-unresolved task isn't silently cleared.
+  const openReminder = (href: string) => {
+    setOpen(false);
+    router.push(href);
   };
 
   const acknowledge = useMutation({
@@ -393,15 +403,28 @@ export default function NotificationsBell() {
               const due = dueIso(r);
               const ackBusy =
                 acknowledge.isPending && acknowledge.variables === r.id;
+              const href = r.metadata?.href ?? null;
               return (
                 <Box
                   key={r.id}
+                  onClick={() => href && openReminder(href)}
+                  role={href ? 'button' : undefined}
+                  tabIndex={href ? 0 : undefined}
+                  onKeyDown={(e) => {
+                    if (!href) return;
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openReminder(href);
+                    }
+                  }}
                   sx={{
                     border: 1,
                     borderColor: 'divider',
                     borderRadius: 1.5,
                     p: 1.5,
                     bgcolor: 'background.paper',
+                    cursor: href ? 'pointer' : 'default',
+                    '&:hover': href ? { borderColor: 'primary.main' } : undefined,
                   }}
                 >
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.75 }}>
@@ -426,7 +449,10 @@ export default function NotificationsBell() {
                     component="button"
                     type="button"
                     variant="caption"
-                    onClick={() => acknowledge.mutate(r.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      acknowledge.mutate(r.id);
+                    }}
                     disabled={ackBusy}
                     sx={{ cursor: 'pointer' }}
                   >

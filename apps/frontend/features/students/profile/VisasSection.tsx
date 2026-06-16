@@ -108,6 +108,8 @@ export default function VisasSection({ studentId }: VisasSectionProps) {
     onSuccess: () => {
       enqueueSnackbar('Visa deleted', { variant: 'success' });
       qc.invalidateQueries({ queryKey });
+      // SVT-SYNC-2026-06: visa is a completeness key — refresh parent student detail.
+      qc.invalidateQueries({ queryKey: ['student', studentId] });
       deleteDlg.close();
     },
     onError: (err) => enqueueSnackbar(err.detail || err.title, { variant: 'error' }),
@@ -136,7 +138,11 @@ export default function VisasSection({ studentId }: VisasSectionProps) {
         editing={dlg.editing}
         studentId={studentId}
         onClose={dlg.close}
-        onSaved={() => qc.invalidateQueries({ queryKey })}
+        onSaved={() => {
+          qc.invalidateQueries({ queryKey });
+          // SVT-SYNC-2026-06: visa is a completeness key — refresh parent student detail.
+          qc.invalidateQueries({ queryKey: ['student', studentId] });
+        }}
       />
       <ConfirmDialog
         open={deleteDlg.open}

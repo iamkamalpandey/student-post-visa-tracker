@@ -20,6 +20,8 @@ ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME
 COPY packages packages
 COPY apps/frontend apps/frontend
 RUN pnpm --filter @spv/tsconfig --filter @spv/eslint-config --filter @spv/utils --filter @spv/zod-schemas --filter @spv/api-types build
+# Emit .next/standalone for the runtime image (gated in next.config.mjs).
+ENV NEXT_OUTPUT=standalone
 RUN pnpm --filter frontend build
 
 FROM node:20-bookworm-slim AS runtime

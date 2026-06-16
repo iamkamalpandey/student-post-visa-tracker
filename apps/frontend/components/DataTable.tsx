@@ -110,7 +110,9 @@ export default function DataTable<R>({
                   color: 'text.secondary',
                   borderTop: (t) => `1px solid ${t.palette.divider}`,
                   borderBottom: (t) => `1px solid ${t.palette.divider}`,
-                  bgcolor: (t) => t.palette.action.hover,
+                  // OPAQUE bg: a sticky header over a translucent color (action.hover)
+                  // lets scrolled rows bleed through it. Solid grey fixes that.
+                  bgcolor: (t) => (t.palette.mode === 'light' ? t.palette.grey[100] : t.palette.grey[900]),
                 },
               }}
             >

@@ -13,6 +13,7 @@ import { Conflict, Forbidden, NotFound, PreconditionFailed, UnprocessableEntity 
 // v6: outcome side-effects (commission recalc on success, reminder on failure).
 import { upsertClaimForEnrollment } from '../commissions/recalculator.js';
 import { writeAudit as writeAuditDirect, type AuditEventLoose } from '../../shared/audit.js';
+import { notifyStatusTransition } from '../../shared/transitionNotify.js';
 import { logger as outcomeLogger } from '../../config/logger.js';
 import { assertOrThrow, dynamicAssertTransition } from '../../shared/fsm.js';
 import { studentFsm, type StudentStatusValue } from './fsm-def.js';
@@ -69,9 +70,9 @@ export async function list(
 
   // SVT-WAVE39-STUDENT-SLA-FILTER-2026-05 — translate the boolean flag into
   // a set of per-stage thresholds. We compute (now - sla_hours) for every
-  // stage that has an SLA and is dashboard-visible, then OR-join. Terminal
-  // statuses (WITHDRAWN/COMPLETED) are excluded because they are not active
-  // workload.
+  // stage that has an SLA and is dashboard-visible, then OR-join. Only ACTIVE
+  // students count — ON_HOLD/ON_LEAVE/DEFERRED are intentional pauses (stopped
+  // clock) and WITHDRAWN/COMPLETED are terminal, so none are real SLA breaches.
   if (q.sla_breached) {
     const stagesWithSla = await db.lifecycleStage.findMany({
       where: { tenant_id: tenantId, sla_hours: { not: null }, show_on_dashboard: true },
@@ -89,9 +90,10 @@ export async function list(
           stage_entered_at: { lt: new Date(now - (s.sla_hours ?? 0) * HOUR_MS) },
         })),
       });
-      // Only override status when caller didn't pin one. Respecting an
-      // explicit q.status keeps "ACTIVE breaches in stage X" queries honest.
-      if (!q.status) where.status = { notIn: ['WITHDRAWN', 'COMPLETED'] };
+      // Only override status when caller didn't pin one. Default to ACTIVE-only
+      // (the only status with a running SLA clock); an explicit q.status still
+      // wins so "ON_HOLD students in stage X" stays an honest deliberate query.
+      if (!q.status) where.status = 'ACTIVE';
     }
   }
   if (q.search) {
@@ -371,6 +373,39 @@ export async function update(
     data: data as unknown as Prisma.StudentUpdateManyMutationInput,
   });
   if (result.count === 0) throw Conflict('Concurrent update detected; retry with the latest version');
+
+  // SVT-SYNC-2026-06: a student status change (ACTIVE→ON_HOLD/WITHDRAWN/COMPLETED/…)
+  // now pings the assigned counsellor's bell — matching the enrollment-status
+  // notification, so a student-level state change isn't silently invisible.
+  // Best-effort (never throws). Prefer the (possibly just-changed) assignee.
+  if (input.status !== undefined && input.status !== current.status) {
+    void notifyStatusTransition({
+      tenantId,
+      entityId: id,
+      title: `Student ${current.status} → ${input.status}`,
+      body: input.notes ? `Reason: ${input.notes}` : undefined,
+      href: `/students/${id}`,
+      preferUserId: input.assigned_to_id ?? current.assigned_to_id ?? null,
+      actorId,
+      source: 'student',
+    });
+  }
+
+  // SVT-SYNC-2026-06 — A6: recompute completeness when student-level completeness
+  // keys changed (name_in_passport, date_of_birth, nationality_code, contact fields).
+  const completenessRelevant =
+    input.name_in_passport !== undefined ||
+    input.date_of_birth !== undefined ||
+    input.nationality_code !== undefined ||
+    input.email_primary !== undefined ||
+    input.phone_primary_e164 !== undefined;
+  if (completenessRelevant) {
+    try {
+      await completeness({ db, tenantId }, id);
+    } catch (err) {
+      outcomeLogger.warn({ err, studentId: id }, 'student.update: completeness recompute best-effort failed');
+    }
+  }
 
   return getById({ db, tenantId }, id);
 }
@@ -965,7 +1000,7 @@ export async function completeness(
     db.studentVisa.count({ where: { student_id: id, tenant_id: tenantId } }),
     db.studentIdentification.count({ where: { student_id: id, tenant_id: tenantId, type: 'PASSPORT' } }),
     db.studentContact.count({ where: { student_id: id, tenant_id: tenantId, is_emergency_contact: true } }),
-    db.enrollment.count({ where: { student_id: id, tenant_id: tenantId } }),
+    db.enrollment.count({ where: { student_id: id, tenant_id: tenantId, deleted_at: null } }),
     db.travelRecord.count({ where: { student_id: id, tenant_id: tenantId } }),
   ]);
 

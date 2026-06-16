@@ -72,6 +72,29 @@ export default function TenantSettingsSection() {
   // Non-admins never see this card.
   if (!isAdmin) return null;
 
+  // SVT-SYNC-2026-06 — on a /tenants/me fetch FAILURE, isPending is false but
+  // q.data is undefined; without this branch the skeleton below renders forever
+  // with no error or retry. Surface the failure + a retry instead.
+  if (q.isError) {
+    return (
+      <Card variant="outlined">
+        <CardContent>
+          <Stack spacing={1.5}>
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>Tenant settings</Typography>
+            <Typography variant="body2" color="error.main">
+              {q.error instanceof ApiError ? (q.error.detail || q.error.title) : 'Failed to load tenant settings.'}
+            </Typography>
+            <Box>
+              <Button variant="outlined" size="small" onClick={() => void q.refetch()} disabled={q.isFetching}>
+                {q.isFetching ? 'Retrying…' : 'Retry'}
+              </Button>
+            </Box>
+          </Stack>
+        </CardContent>
+      </Card>
+    );
+  }
+
   // SVT-AUDIT-FE-POLISH-2026-05 — render a skeleton while /tenants/me is in
   // flight so admins don't see the section silently appear; this card sits
   // mid-page and surprise-rendering pushes everything below it down.

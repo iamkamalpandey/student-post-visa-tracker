@@ -4,14 +4,47 @@ import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { encryptField } from '../../shared/encryption.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
+import { completeness as computeCompleteness } from '../students/students.service.js';
 import type {
   CreateIdentificationRequest,
   UpdateIdentificationRequest,
   IdentificationListQuery,
 } from '@spv/zod-schemas';
 
+// SVT-SYNC-2026-06 — A6: best-effort recompute of parent student's completeness_pct.
+// passport_identification is a completeness key — going 0→1 bumps score ~11%.
+async function recomputeCompleteness(client: DB, tenantId: string, studentId: string): Promise<void> {
+  try {
+    await computeCompleteness({ db: client as never, tenantId }, studentId);
+  } catch (err) {
+    logger.warn({ err, studentId }, 'identification.recomputeCompleteness: best-effort failed');
+  }
+}
+
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
+
+// SVT-SYNC-2026-06 — A7: dismiss stale "passport expiry" reminders when
+// an identification record is deleted. Best-effort.
+async function dismissIdReminders(client: DB, tenantId: string, idRecordId: string): Promise<void> {
+  try {
+    const result = await (client as PrismaClient).reminder.updateMany({
+      where: {
+        tenant_id: tenantId,
+        source_entity_type: 'student_identification',
+        source_entity_id: idRecordId,
+        status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+      },
+      data: { status: 'DISMISSED' },
+    });
+    if (result.count > 0) {
+      logger.info({ tenantId, idRecordId, dismissed: result.count }, 'auto-dismissed identification expiry reminders');
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId, idRecordId }, 'dismissIdReminders: best-effort failed');
+  }
+}
 
 // Strip encrypted columns from audit payloads to avoid double-encryption.
 function stripEnc<T extends Record<string, unknown>>(row: T | null | undefined): Omit<T, 'document_number_enc'> | null {
@@ -63,6 +96,8 @@ export const identificationService = {
       entityId: created.id,
       after: stripEnc(created as Record<string, unknown>),
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (passport_identification is a key).
+    await recomputeCompleteness(db(req), req.user!.tid, studentId);
     return created;
   },
   async list(req: { db?: DB; user?: { tid: string } }, studentId: string, q: IdentificationListQuery) {
@@ -113,6 +148,8 @@ export const identificationService = {
       before: stripEnc(before as Record<string, unknown>),
       after: stripEnc(after as Record<string, unknown>),
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (update can flip type PASSPORT↔OTHER).
+    await recomputeCompleteness(db(req), req.user!.tid, (after as { student_id: string }).student_id);
     return after;
   },
   async remove(req: { db?: DB; user?: { tid: string } }, id: string) {
@@ -122,6 +159,10 @@ export const identificationService = {
       where: { id, tenant_id: req.user!.tid },
     });
     if (r.count !== 1) throw NotFound('Identification not found');
+    // SVT-SYNC-2026-06 — A7: deleted identification → dismiss its expiry reminders.
+    await dismissIdReminders(db(req), req.user!.tid, id);
+    // SVT-SYNC-2026-06 — A6: recompute completeness (deleting last passport drops ~11%).
+    await recomputeCompleteness(db(req), req.user!.tid, (before as { student_id: string }).student_id);
     await writeAudit(req as never, {
       action: 'student.identification.deleted',
       entityType: 'student_identification',

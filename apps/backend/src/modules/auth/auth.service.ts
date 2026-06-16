@@ -419,7 +419,7 @@ class AuthService {
     // a stolen token. Burn the entire chain so any active session derived from this
     // family is invalidated.
     if (row.revoked_at) {
-      await this.revokeChain(row.id);
+      await this.revokeChain(row.id, row.tenant_id);
       await writeAudit({
         action: 'auth.refresh.theft',
         entity_type: 'refresh_token',
@@ -466,7 +466,8 @@ class AuthService {
       throw Unauthorized('Invalid refresh token');
     }
 
-    const user = await prisma.user.findUnique({ where: { id: row.user_id } });
+    // SVT-SYNC-2026-06: defense-in-depth — scope to tenant from the refresh token.
+    const user = await prisma.user.findFirst({ where: { id: row.user_id, tenant_id: row.tenant_id } });
     if (!user || !user.is_active || user.deleted_at) {
       // The token was valid but the account is no longer eligible.
       await prisma.refreshToken.update({
@@ -656,8 +657,11 @@ class AuthService {
    * Verify the current password, hash the new one, persist, and revoke ALL refresh
    * tokens for the user so other devices are forced to re-authenticate.
    */
-  async changePassword(userId: string, current: string, next: string): Promise<void> {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+  async changePassword(userId: string, current: string, next: string, tenantId?: string): Promise<void> {
+    // SVT-SYNC-2026-06: defense-in-depth — scope to tenant when available.
+    const user = await prisma.user.findFirst({
+      where: { id: userId, ...(tenantId ? { tenant_id: tenantId } : {}) },
+    });
     if (!user || !user.is_active || user.deleted_at) {
       throw Unauthorized('Invalid session');
     }
@@ -705,8 +709,11 @@ class AuthService {
   }
 
   /** Look the user up fresh from the DB so deactivation since token issue is honoured. */
-  async getMe(userId: string): Promise<AuthUserResponse> {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+  async getMe(userId: string, tenantId?: string): Promise<AuthUserResponse> {
+    // SVT-SYNC-2026-06: defense-in-depth — scope to tenant when available.
+    const user = await prisma.user.findFirst({
+      where: { id: userId, ...(tenantId ? { tenant_id: tenantId } : {}) },
+    });
     if (!user || !user.is_active || user.deleted_at) {
       throw Unauthorized('Invalid session');
     }
@@ -739,6 +746,7 @@ class AuthService {
       notifications_email_enabled?: boolean;
       notifications_digest?: 'PER_EVENT' | 'DAILY' | 'OFF';
     },
+    tenantId?: string,
   ): Promise<AuthUserResponse> {
     const data: Record<string, unknown> = {};
     if (input.display_name !== undefined) data['display_name'] = input.display_name;
@@ -752,10 +760,15 @@ class AuthService {
     }
     if (Object.keys(data).length === 0) {
       // No changes; return current state without bumping updated_at.
-      return this.getMe(userId);
+      return this.getMe(userId, tenantId);
     }
-    await prisma.user.update({ where: { id: userId }, data });
-    return this.getMe(userId);
+    // SVT-SYNC-2026-06: defense-in-depth — scope update to tenant.
+    if (tenantId) {
+      await prisma.user.updateMany({ where: { id: userId, tenant_id: tenantId }, data });
+    } else {
+      await prisma.user.update({ where: { id: userId }, data });
+    }
+    return this.getMe(userId, tenantId);
   }
 
   // ----- internal helpers ---------------------------------------------------
@@ -821,7 +834,7 @@ class AuthService {
    * row encountered. Used when reuse of a revoked token is detected — we don't know
    * which segment of the family the attacker may have grabbed, so revoke them all.
    */
-  private async revokeChain(startId: string): Promise<void> {
+  private async revokeChain(startId: string, tenantId: string): Promise<void> {
     const seen = new Set<string>();
     const queue: string[] = [startId];
 
@@ -830,7 +843,8 @@ class AuthService {
       if (seen.has(id)) continue;
       seen.add(id);
 
-      const row = await prisma.refreshToken.findUnique({ where: { id } });
+      // SVT-SYNC-2026-06: defense-in-depth — scope chain walk to tenant.
+      const row = await prisma.refreshToken.findFirst({ where: { id, tenant_id: tenantId } });
       if (!row) continue;
 
       // Walk forward.
@@ -839,7 +853,7 @@ class AuthService {
       }
       // Walk backward: rows whose replaced_by_id points at this row.
       const predecessors = await prisma.refreshToken.findMany({
-        where: { replaced_by_id: id },
+        where: { replaced_by_id: id, tenant_id: tenantId },
         select: { id: true },
       });
       for (const p of predecessors) {
@@ -849,7 +863,7 @@ class AuthService {
 
     if (seen.size > 0) {
       await prisma.refreshToken.updateMany({
-        where: { id: { in: Array.from(seen) }, revoked_at: null },
+        where: { id: { in: Array.from(seen) }, tenant_id: tenantId, revoked_at: null },
         data: { revoked_at: new Date() },
       });
     }

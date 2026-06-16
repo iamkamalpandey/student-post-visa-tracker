@@ -6,9 +6,29 @@ import type {
   AuthUserResponse,
   ProblemDetail,
   Role,
+  CrmLeadListItem,
+  CrmLeadFeeResponse,
+  CrmNextFeeDue,
+  CrmLeadStatus,
+  CrmFeeStatus,
+  CrmLeadCourseState,
+  CrmLeadListQuery,
+  CrmApplicationListItem,
+  CrmApplicationListQuery,
 } from '@spv/zod-schemas';
 
 export type { LoginRequest, TokenResponse, AuthUserResponse, ProblemDetail, Role };
+export type {
+  CrmLeadListItem,
+  CrmLeadFeeResponse,
+  CrmNextFeeDue,
+  CrmLeadStatus,
+  CrmFeeStatus,
+  CrmLeadCourseState,
+  CrmLeadListQuery,
+  CrmApplicationListItem,
+  CrmApplicationListQuery,
+};
 
 export type ApiResponse<T> = { data: T };
 export type ApiErrorResponse = ProblemDetail;

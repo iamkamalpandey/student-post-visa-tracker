@@ -2,6 +2,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { disconnectDb } from './config/db.js';
+import { disconnectV2Pool } from './integrations/v2-mis/pool.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { initSentry, captureException } from './config/sentry.js';
 
@@ -95,6 +96,11 @@ async function shutdown(signal: string) {
       await disconnectDb();
     } catch (err) {
       logger.error({ err }, 'disconnectDb threw during shutdown');
+    }
+    try {
+      await disconnectV2Pool();
+    } catch (err) {
+      logger.error({ err }, 'disconnectV2Pool threw during shutdown');
     }
     process.exit(0);
   });

@@ -174,3 +174,19 @@ export const dsarLimiter = rateLimit({
   legacyHeaders: false,
   message: tooManyBody('DSAR rate limit exceeded (20/min); try again later.'),
 });
+
+// SVT-V2-SYNC-LIMITER-2026-06 — on-demand V2 ingest is heavy (full read of the
+// external CRM + many upserts). Cap admin-triggered syncs so a button-masher or
+// a runaway client can't queue overlapping passes. withJobLock already prevents
+// a double RUN; this caps the request rate. Per-tenant keyed (mount after auth).
+export const v2SyncLimiter = rateLimit({
+  windowMs: 5 * 60_000,
+  limit: 3,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const tid = (req as { user?: { tid?: string } }).user?.tid;
+    return tid ?? req.ip ?? 'unknown';
+  },
+  message: tooManyBody('Sync rate limit exceeded (3 per 5 min); data refreshes in the background.'),
+});

@@ -37,6 +37,7 @@ import ErrorState from '@/components/ErrorState';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import CompletenessRing from '@/components/CompletenessRing';
+import SectionErrorBoundary from '@/components/SectionErrorBoundary';
 import AdvanceStageDialog from '@/features/students/AdvanceStageDialog';
 import EditCoreProfileDialog from '@/features/students/EditCoreProfileDialog';
 import AssignCounsellorDialog from '@/features/students/AssignCounsellorDialog';
@@ -533,7 +534,10 @@ function SectionAnchor({
 }) {
   return (
     <Box id={`section-${id}`} sx={{ mt, scrollMarginTop: { xs: 72, md: 88 } }}>
-      {children}
+      {/* SVT-SYNC-2026-06: isolate each section so a crash doesn't take down the page. */}
+      <SectionErrorBoundary section={id}>
+        {children}
+      </SectionErrorBoundary>
     </Box>
   );
 }

@@ -29,6 +29,10 @@ import { logger } from '../config/logger.js';
 const INTAKE_OFFSETS_DAYS = [30, 14, 7];
 const PAYMENT_OFFSETS_DAYS = [14, 7, 3];
 const EXPIRY_OFFSETS_DAYS = [60, 30, 14];
+// Commission claims have no per-institution payment-terms column in the schema
+// (the concept lives on SuperAgent, not Institution), so we chase on a flat
+// default window until a real override is modelled.
+const DEFAULT_COMMISSION_TERMS_DAYS = 30;
 
 type DB = PrismaClient;
 
@@ -153,13 +157,28 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // for tenants with no users yet.
   const creatorId = assignee ?? '00000000-0000-0000-0000-000000000000';
 
+  // SVT-V2-TRACKER-2026-06 — section isolation. A single source query that
+  // throws (e.g. the old commission-claim schema drift) must not abort the
+  // whole scan and silently kill every later section's reminders. Each
+  // section's read runs through this: on failure we log + yield [] so the
+  // remaining sections still run. (bulkInsertReminders already self-contains
+  // its own write failures.)
+  async function safeFind<T>(section: string, run: () => Promise<T[]>): Promise<T[]> {
+    try {
+      return await run();
+    } catch (err) {
+      logger.error({ err, tenantId, section }, 'reminder scan: source query failed; section skipped');
+      return [];
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 1. Intake start — Enrollment.program_intake.classes_start_on
   // -------------------------------------------------------------------------
   // Background workers run as the unscoped client, so we filter explicitly by
   // tenant_id and the relevant statuses. We need the intake row for the date
   // and label, so we include program_intake in the select.
-  const enrollments = await db.enrollment.findMany({
+  const enrollments = await safeFind('intake', () => db.enrollment.findMany({
     where: {
       tenant_id: tenantId,
       deleted_at: null,
@@ -173,7 +192,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         select: { id: true, intake_label: true, classes_start_on: true },
       },
     },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const enr of enrollments) {
@@ -198,7 +217,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, intake_label: intake.intake_label },
+          metadata: { offset_days: offset, intake_label: intake.intake_label, href: `/students/${enr.student_id}?tab=studies` },
           created_by_id: creatorId,
         });
       }
@@ -209,11 +228,13 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // -------------------------------------------------------------------------
   // 2. Tuition / payment due — FinanceItem.due_on (status PENDING)
   // -------------------------------------------------------------------------
-  const items = await db.financeItem.findMany({
+  const items = await safeFind('finance_item', () => db.financeItem.findMany({
     where: {
       tenant_id: tenantId,
       status: 'PENDING',
       due_on: { not: null },
+      // SVT-SYNC-2026-06: never remind on behalf of a soft-deleted student.
+      student: { is: { deleted_at: null } },
     },
     select: {
       id: true,
@@ -225,7 +246,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
       description: true,
       category: true,
     },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const fi of items) {
@@ -250,7 +271,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, category: fi.category },
+          metadata: { offset_days: offset, category: fi.category, href: `/students/${fi.student_id}?tab=finance` },
           created_by_id: creatorId,
         });
       }
@@ -261,10 +282,10 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // -------------------------------------------------------------------------
   // 3. Visa expiry — StudentVisa (is_active = true)
   // -------------------------------------------------------------------------
-  const visas = await db.studentVisa.findMany({
-    where: { tenant_id: tenantId, is_active: true },
+  const visas = await safeFind('student_visa', () => db.studentVisa.findMany({
+    where: { tenant_id: tenantId, is_active: true, student: { is: { deleted_at: null } } },
     select: { id: true, student_id: true, expires_on: true, destination_country: true },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const v of visas) {
@@ -287,7 +308,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, destination_country: v.destination_country },
+          metadata: { offset_days: offset, destination_country: v.destination_country, href: `/students/${v.student_id}` },
           created_by_id: creatorId,
         });
       }
@@ -298,14 +319,15 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // -------------------------------------------------------------------------
   // 4. Passport expiry — StudentIdentification type=PASSPORT
   // -------------------------------------------------------------------------
-  const passports = await db.studentIdentification.findMany({
+  const passports = await safeFind('passport', () => db.studentIdentification.findMany({
     where: {
       tenant_id: tenantId,
       type: 'PASSPORT',
       expires_on: { not: null },
+      student: { is: { deleted_at: null } },
     },
     select: { id: true, student_id: true, expires_on: true, issuing_country: true },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const p of passports) {
@@ -329,7 +351,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, issuing_country: p.issuing_country },
+          metadata: { offset_days: offset, issuing_country: p.issuing_country, href: `/students/${p.student_id}` },
           created_by_id: creatorId,
         });
       }
@@ -340,10 +362,10 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // -------------------------------------------------------------------------
   // 5. Insurance expiry — InsuranceRecord.ends_on
   // -------------------------------------------------------------------------
-  const insurances = await db.insuranceRecord.findMany({
-    where: { tenant_id: tenantId },
+  const insurances = await safeFind('insurance', () => db.insuranceRecord.findMany({
+    where: { tenant_id: tenantId, student: { is: { deleted_at: null } } },
     select: { id: true, student_id: true, ends_on: true, provider: true },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const ins of insurances) {
@@ -366,7 +388,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, provider: ins.provider },
+          metadata: { offset_days: offset, provider: ins.provider, href: `/students/${ins.student_id}` },
           created_by_id: creatorId,
         });
       }
@@ -377,7 +399,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // -------------------------------------------------------------------------
   // 6. Document expiry — Document.expires_on (active rows)
   // -------------------------------------------------------------------------
-  const docs = await db.document.findMany({
+  const docs = await safeFind('document', () => db.document.findMany({
     where: {
       tenant_id: tenantId,
       deleted_at: null,
@@ -390,7 +412,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
       file_name: true,
       document_type: { select: { label: true } },
     },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const doc of docs) {
@@ -415,7 +437,67 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset, document_type: doc.document_type?.label ?? null },
+          metadata: { offset_days: offset, document_type: doc.document_type?.label ?? null, href: `/students/${doc.student_id}` },
+          created_by_id: creatorId,
+        });
+      }
+    }
+    result.inserted += await bulkInsertReminders(tenantId, rows);
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b. Tracked-student session fees — TrackedStudentFee.due_on
+  //    (SVT-V2-TRACKER-2026-06). Post-visa fee schedule ingested/seeded from
+  //    the external V2 MIS and edited in SPV. Same PAYMENT_DUE staircase as
+  //    finance items, but the reminder has NO `students` row — tracked students
+  //    live in their own lightweight table — so student_id stays null and the
+  //    dispatcher special-cases source_entity_type='tracked_student_fee'.
+  //    Placed before the commission/enrollment scans so a failure in those
+  //    (each section commits in its own tx) can't prevent fee reminders.
+  // -------------------------------------------------------------------------
+  const crmFees = await safeFind('crm_lead_fee', () => db.crmLeadFee.findMany({
+    where: {
+      tenant_id: tenantId,
+      deleted_at: null,
+      status: { in: ['SCHEDULED', 'DUE'] },
+    },
+    select: {
+      id: true,
+      lead_id: true,
+      amount_minor: true,
+      currency: true,
+      due_on: true,
+      session_label: true,
+      lead: {
+        select: { first_name: true, last_name: true, assigned_to_id: true },
+      },
+    },
+  }));
+  {
+    const rows: ReminderCreateRow[] = [];
+    for (const fee of crmFees) {
+      const leadName = `${fee.lead?.first_name ?? ''} ${fee.lead?.last_name ?? ''}`.trim() || 'lead';
+      for (const offset of PAYMENT_OFFSETS_DAYS) {
+        const scheduledFor = scheduledForOffset(fee.due_on, offset);
+        if (scheduledFor < now) {
+          result.skipped++;
+          continue;
+        }
+        result.attempted++;
+        rows.push({
+          tenant_id: tenantId,
+          student_id: null,
+          enrollment_id: null,
+          type: 'PAYMENT_DUE',
+          source_entity_type: 'crm_lead_fee',
+          source_entity_id: fee.id,
+          title: `Session fee due in ${offset} days — ${leadName} · ${fee.session_label} · ${formatMoneyMinor(fee.amount_minor, fee.currency)}`,
+          due_on: fee.due_on,
+          scheduled_for: scheduledFor,
+          assigned_to_id: fee.lead?.assigned_to_id ?? assignee,
+          status: 'PENDING',
+          // Deep-link target for the bell/inbox → the lead's CRM record.
+          metadata: { offset_days: offset, session_label: fee.session_label, crm_lead_fee: true, href: `/leads/${fee.lead_id}` },
           created_by_id: creatorId,
         });
       }
@@ -431,16 +513,14 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // standard PAYMENT_OFFSETS_DAYS staircase so admin chases proactively rather
   // than via month-end reconciliation.
   // -------------------------------------------------------------------------
-  // SVT-SCHEMA-DRIFT-2026-05 — `payment_terms_days` lives on `SuperAgent` in
-  // the current schema, not on `Institution`, so the generated Prisma type
-  // rejects it inside `InstitutionSelect`. The runtime contract this code
-  // expects (an Institution-level payment terms override) hasn't been added to
-  // the schema yet. Until a follow-up migration introduces it on Institution,
-  // we keep the request shape (so swapping the migration in is a one-line
-  // revert) and cast the typed argument + the row shape so typecheck passes.
-  // The defensive `?? 30` fallback at the call site means a missing column at
-  // runtime degrades to the default rather than crashing.
-  const claims = (await db.commissionClaim.findMany({
+  // SVT-SCHEMA-DRIFT-2026-05 (fixed SVT-V2-TRACKER-2026-06) — the previous
+  // `select` asked for `Institution.payment_terms_days`, a column that does NOT
+  // exist (the concept lives on SuperAgent). Prisma threw at runtime, aborting
+  // scanForTenant before sections 7 + 8 ever ran, so commission-claim and
+  // enrollment-decision reminders were silently never generated. We now select
+  // only real columns and chase on DEFAULT_COMMISSION_TERMS_DAYS; a true
+  // per-institution override needs a schema migration first.
+  const claims = await safeFind('commission_claim', () => db.commissionClaim.findMany({
     where: {
       tenant_id: tenantId,
       deleted_at: null,
@@ -458,24 +538,15 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
       invoiced_on: true,
       amount_minor: true,
       currency: true,
-      institution: { select: { id: true, display_name: true, payment_terms_days: true } as never },
+      institution: { select: { id: true, display_name: true } },
     },
-  })) as unknown as Array<{
-    id: string;
-    student_id: string;
-    enrollment_id: string;
-    claimed_on: Date | null;
-    invoiced_on: Date | null;
-    amount_minor: bigint;
-    currency: string;
-    institution: { id: string; display_name: string; payment_terms_days: number | null } | null;
-  }>;
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const cl of claims) {
       const anchor = cl.invoiced_on ?? cl.claimed_on;
       if (!anchor) continue;
-      const terms = cl.institution?.payment_terms_days ?? 30;
+      const terms = DEFAULT_COMMISSION_TERMS_DAYS;
       const due = new Date(anchor);
       due.setDate(due.getDate() + terms);
       for (const offset of PAYMENT_OFFSETS_DAYS) {
@@ -501,6 +572,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
             offset_days: offset,
             institution_id: cl.institution?.id ?? null,
             terms_days: terms,
+            href: '/commissions',
           },
           created_by_id: creatorId,
         });
@@ -517,7 +589,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
   // start_date as the deadline anchor since program_intake.decision_date is
   // optional (and most consultancies use start_date as the practical deadline).
   // -------------------------------------------------------------------------
-  const offered = await db.enrollment.findMany({
+  const offered = await safeFind('enrollment_decision', () => db.enrollment.findMany({
     where: {
       tenant_id: tenantId,
       deleted_at: null,
@@ -530,7 +602,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
       start_date: true,
       institution: { select: { display_name: true } },
     },
-  });
+  }));
   {
     const rows: ReminderCreateRow[] = [];
     for (const enr of offered) {
@@ -554,7 +626,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
           scheduled_for: scheduledFor,
           assigned_to_id: assignee,
           status: 'PENDING',
-          metadata: { offset_days: offset },
+          metadata: { offset_days: offset, href: `/students/${enr.student_id}?tab=studies` },
           created_by_id: creatorId,
         });
       }

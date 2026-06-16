@@ -103,6 +103,8 @@ vi.mock('../src/config/db.js', () => {
         return (
           store.users.find(
             (u) =>
+              (where['id'] === undefined || u.id === where['id']) &&
+              (where['tenant_id'] === undefined || u.tenant_id === where['tenant_id']) &&
               (where['email'] === undefined || u.email === where['email']) &&
               (where['deleted_at'] === undefined || u.deleted_at === null),
           ) ?? null
@@ -144,6 +146,16 @@ vi.mock('../src/config/db.js', () => {
           if (where.token_hash)
             return store.refreshTokens.find((r) => r.token_hash === where.token_hash) ?? null;
           return null;
+        },
+      ),
+      findFirst: vi.fn(
+        async ({ where }: { where: Record<string, unknown> }) => {
+          return store.refreshTokens.find((r) => {
+            if (where['id'] && r.id !== where['id']) return false;
+            if (where['tenant_id'] && r.tenant_id !== where['tenant_id']) return false;
+            if (where['token_hash'] && r.token_hash !== where['token_hash']) return false;
+            return true;
+          }) ?? null;
         },
       ),
       findMany: vi.fn(async ({ where }: { where: Record<string, unknown> }) => {

@@ -518,3 +518,386 @@ export function useUpdateTenantSettings(): UseMutationResult<
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// CRM leads (V2 mirror) — SVT-V2-CRM-MIRROR-2026-06.
+// Lead identity + child records are ingested read-only from V2; only
+// spv_status/assignee/notes and the fee schedule are editable. Money minor
+// units arrive as STRINGS (global BigInt serializer) — format only, no math.
+// ---------------------------------------------------------------------------
+
+export type CrmFeeStatus = 'SCHEDULED' | 'DUE' | 'PAID' | 'WAIVED' | 'OVERDUE';
+export type CrmLeadStatus = 'ACTIVE' | 'COMPLETED' | 'WITHDRAWN' | 'ON_HOLD';
+
+export type CrmFeeRow = {
+  id: string;
+  lead_id: string;
+  application_id: string | null;
+  session_label: string;
+  amount_minor: string;
+  currency: string;
+  due_on: string;
+  status: CrmFeeStatus;
+  paid_at: string | null;
+  paid_amount_minor: string | null;
+  notes: string | null;
+  seeded_from_v2: boolean;
+  version: number;
+  created_at: string;
+};
+
+export type CrmNextFee = {
+  fee_id: string;
+  session_label: string;
+  due_on: string;
+  amount_minor: string;
+  currency: string;
+  status: CrmFeeStatus;
+} | null;
+
+export type CrmLeadListItem = {
+  id: string;
+  v2_lead_id: number;
+  full_name: string;
+  email: string | null;
+  phone_number: string;
+  course_name: string | null;
+  institution_name: string | null;
+  funnel_state: string | null;
+  intake_key: string | null;
+  visa_accepted_at: string | null;
+  spv_status: CrmLeadStatus;
+  assigned_to_id: string | null;
+  next_fee_due?: CrmNextFee;
+};
+
+export type CrmLeadListResponse = {
+  data: CrmLeadListItem[];
+  page: { hasMore: boolean; nextCursor: string | null; total?: number };
+};
+
+type CrmCourseLite = { id?: string; name?: string | null; institution?: { name?: string | null } | null } | null;
+
+// Lead detail — scalar lead fields (subset the UI renders) + nested collections.
+export type CrmLeadDetail = {
+  id: string;
+  v2_lead_id: number;
+  full_name: string;
+  first_name: string;
+  last_name: string;
+  email: string | null;
+  phone_number: string;
+  secondary_number: string | null;
+  gender: string | null;
+  dob: string | null;
+  address: string | null;
+  city: string | null;
+  source: string | null;
+  intake_month: string | null;
+  field_of_study: string | null;
+  is_archived: boolean;
+  priority: string | null;
+  tags: string[];
+  spv_status: CrmLeadStatus;
+  assigned_to_id: string | null;
+  spv_notes: string | null;
+  synced_at: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  applications: Array<{ id: string; intake_key: string; state: string; started_at: string | null; completed_at: string | null; course: CrmCourseLite }>;
+  lead_courses: Array<{ id: string; state: string | null; state_v2: string | null; sub_state: string | null; start_date: string | null; end_date: string | null; course: CrmCourseLite }>;
+  course_history: Array<{ id: string; from_state: string | null; to_state: string; changed_at: string }>;
+  payments: Array<{ id: string; amount_minor: string; currency: string; method: string; received_at: string; receipt_no: string | null; notes: string | null }>;
+  remarks: Array<{ id: string; content: string; v2_created_at: string | null }>;
+  follow_ups: Array<{ id: string; date: string; status: string | null }>;
+  calls: Array<{ id: string; status: string; notes: string | null; v2_created_at: string | null }>;
+  visits: Array<{ id: string; date: string; purpose: string; outcome: string | null; v2_created_at: string | null }>;
+  assignments: Array<{ id: string; kind: string; v2_user_id: string; is_active: boolean }>;
+  qualifications: Array<{ id: string; level: string; institution_name: string | null; grade: string | null; grade_scale: string | null; end_year: number | null }>;
+  language_tests: Array<{ id: string; test_type: string; overall_score: string | null; test_date: string | null }>;
+  guardians: Array<{ id: string; full_name: string; relationship_type: string; phone: string | null; email: string | null }>;
+  fees: CrmFeeRow[];
+  student_id: string | null;
+  converted_at: string | null;
+  student: { id: string; student_code: string; given_name: string; family_name: string } | null;
+};
+
+export type CrmLeadFilters = {
+  search?: string;
+  status?: string;
+  intake_key?: string;
+  assigned_to_id?: string;
+  has_upcoming_fee?: boolean;
+  limit?: number;
+  cursor?: string;
+};
+
+function buildLeadParams(f: CrmLeadFilters): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  if (f.limit) out['limit'] = f.limit;
+  if (f.cursor) out['cursor'] = f.cursor;
+  if (f.search && f.search.trim()) out['search'] = f.search.trim();
+  if (f.status && f.status !== 'all') out['status'] = f.status;
+  if (f.intake_key && f.intake_key.trim()) out['intake_key'] = f.intake_key.trim();
+  if (f.assigned_to_id) out['assigned_to_id'] = f.assigned_to_id;
+  if (f.has_upcoming_fee) out['has_upcoming_fee'] = true;
+  return out;
+}
+
+export function useLeads(filters: CrmLeadFilters = {}): UseQueryResult<CrmLeadListResponse> {
+  return useQuery({
+    queryKey: ['leads', filters],
+    queryFn: async () => {
+      const res = await api.get('/leads', { params: buildLeadParams(filters) });
+      const payload = res.data as CrmLeadListResponse | { data: CrmLeadListItem[] };
+      if ('page' in (payload as Record<string, unknown>)) return payload as CrmLeadListResponse;
+      const arr = (payload as { data: CrmLeadListItem[] }).data ?? [];
+      return { data: arr, page: { hasMore: false, nextCursor: null, total: arr.length } };
+    },
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useLead(id: string): UseQueryResult<CrmLeadDetail> {
+  return useQuery({
+    queryKey: ['leads', id],
+    enabled: Boolean(id),
+    queryFn: async () => (await api.get<CrmLeadDetail>(`/leads/${id}`)).data,
+  });
+}
+
+function useLeadsInvalidate(id?: string) {
+  const qc = useQueryClient();
+  return () => {
+    void qc.invalidateQueries({ queryKey: ['leads'] });
+    if (id) void qc.invalidateQueries({ queryKey: ['leads', id] });
+  };
+}
+
+export function useUpdateLead(id: string): UseMutationResult<
+  CrmLeadDetail,
+  unknown,
+  { version: number; patch: { spv_status?: string; assigned_to_id?: string | null; spv_notes?: string | null } }
+> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async ({ version, patch }) => (await api.patch<CrmLeadDetail>(`/leads/${id}`, patch, { headers: { 'If-Match': `"${version}"` } })).data,
+    onSuccess: invalidate,
+  });
+}
+
+// Convert a lead → managed Student. Payload is a CreateStudentRequest subset
+// (admin confirms a form pre-filled from the lead). On success the lead detail
+// refetches and shows the linked student.
+export type ConvertStudentPayload = {
+  given_name: string;
+  family_name: string;
+  middle_name?: string;
+  name_in_passport: string;
+  date_of_birth: string;
+  gender: string;
+  nationality_code: string;
+  primary_language: string;
+  email_primary?: string;
+  phone_primary_e164?: string;
+  /** Optional app-catalog Program to enrol the new student into (reconciliation). */
+  program_id?: string;
+};
+export type ConvertLeadResult = { student_id: string; student_code: string; lead_id: string; fees_migrated: number; enrollment_created: boolean };
+
+export function useConvertLead(id: string): UseMutationResult<ConvertLeadResult, unknown, ConvertStudentPayload> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async (payload) => (await api.post<ConvertLeadResult>(`/leads/${id}/convert`, payload)).data,
+    onSuccess: invalidate,
+  });
+}
+
+export function useCreateLeadFee(id: string): UseMutationResult<
+  CrmFeeRow,
+  unknown,
+  { session_label: string; amount_minor: string; currency: string; due_on: string; notes?: string }
+> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async (body) => (await api.post<CrmFeeRow>(`/leads/${id}/fees`, body)).data,
+    onSuccess: invalidate,
+  });
+}
+
+export function useMarkLeadFeePaid(id: string): UseMutationResult<CrmFeeRow, unknown, { feeId: string; paid_on: string; paid_amount_minor?: string }> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async ({ feeId, ...body }) => (await api.post<CrmFeeRow>(`/leads/${id}/fees/${feeId}/pay`, body)).data,
+    onSuccess: invalidate,
+  });
+}
+
+export function useWaiveLeadFee(id: string): UseMutationResult<CrmFeeRow, unknown, { feeId: string }> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async ({ feeId }) => (await api.post<CrmFeeRow>(`/leads/${id}/fees/${feeId}/waive`, {})).data,
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteLeadFee(id: string): UseMutationResult<void, unknown, { feeId: string }> {
+  const invalidate = useLeadsInvalidate(id);
+  return useMutation({
+    mutationFn: async ({ feeId }) => { await api.delete(`/leads/${id}/fees/${feeId}`); },
+    onSuccess: invalidate,
+  });
+}
+
+export type SyncLeadsResult = { job_run_id: string | null; status: string; rows_processed: number; fees_seeded: number };
+
+export function useSyncLeads(): UseMutationResult<SyncLeadsResult, unknown, void> {
+  const invalidate = useLeadsInvalidate();
+  return useMutation({
+    mutationFn: async () => (await api.post<SyncLeadsResult>('/leads/sync', {})).data,
+    onSuccess: invalidate,
+  });
+}
+
+// Sync-health: read recent JobRun rows (ADMIN-only endpoint) so the UI can show
+// "last synced <when> · <status> · <rows>" and poll a running sync to completion.
+export type JobRunDto = {
+  id: string;
+  job_name: string;
+  started_at: string;
+  finished_at: string | null;
+  status: 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'PARTIAL' | 'SKIPPED_LOCKED';
+  rows_processed: number;
+  rows_failed: number;
+  error_message: string | null;
+  metadata: unknown;
+};
+
+export function useJobRuns(
+  jobName: string,
+  opts?: { limit?: number; enabled?: boolean; refetchMs?: number | false },
+): UseQueryResult<JobRunDto[]> {
+  return useQuery({
+    queryKey: ['jobs', 'recent', jobName, opts?.limit ?? 10],
+    queryFn: async () => {
+      const res = await api.get<{ data: JobRunDto[] }>('/jobs/recent', {
+        params: { job_name: jobName, limit: opts?.limit ?? 10 },
+      });
+      return res.data.data ?? [];
+    },
+    enabled: opts?.enabled ?? true,
+    refetchInterval: opts?.refetchMs ?? false,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export type CurrencyAmount = { currency: string; amount_minor: string };
+export type LeadsFinanceSummary = {
+  outstanding: CurrencyAmount[];
+  collected: CurrencyAmount[];
+  payments: CurrencyAmount[];
+  lead_count: number;
+};
+
+// Institutions report — read-only CRM aggregate (institutions of visa-accepted leads).
+export type InstitutionReportRow = {
+  institution_id: string | null;
+  name: string;
+  country_name: string | null;
+  visa_accepted: number;
+  leads: number;
+};
+
+export function useInstitutionsReport(): UseQueryResult<InstitutionReportRow[]> {
+  return useQuery({
+    queryKey: ['leads', 'institutions-report'],
+    queryFn: async () => (await api.get<{ data: InstitutionReportRow[] }>('/leads/institutions-report')).data.data ?? [],
+    placeholderData: (prev) => prev,
+  });
+}
+
+export type CourseReportRow = {
+  course_name: string;
+  institution_name: string | null;
+  country_name: string | null;
+  visa_accepted: number;
+  leads: number;
+};
+
+export function useCoursesReport(): UseQueryResult<CourseReportRow[]> {
+  return useQuery({
+    queryKey: ['leads', 'courses-report'],
+    queryFn: async () => (await api.get<{ data: CourseReportRow[] }>('/leads/courses-report')).data.data ?? [],
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useLeadsFinanceSummary(): UseQueryResult<LeadsFinanceSummary> {
+  return useQuery({
+    queryKey: ['leads', 'finance-summary'],
+    queryFn: async () => (await api.get<LeadsFinanceSummary>('/leads/finance-summary')).data,
+    placeholderData: (prev) => prev,
+  });
+}
+
+// Applications pipeline — one row per application (a lead with N apps appears N
+// times, each with its own funnel stage). The accurate unit of work.
+export type CrmApplicationRow = {
+  id: string;
+  lead_id: string;
+  applicant_name: string;
+  phone_number: string;
+  country_name: string | null;
+  course_name: string | null;
+  institution_name: string | null;
+  intake_key: string;
+  stage: string | null;
+  stage_raw: string | null;
+  application_state: string;
+  spv_status: CrmLeadStatus;
+  assigned_to_id: string | null;
+  created_at: string;
+  next_fee_due?: CrmNextFee;
+};
+
+export type CrmApplicationListResponse = {
+  data: CrmApplicationRow[];
+  page: { hasMore: boolean; nextCursor: string | null; total?: number };
+};
+
+export type CrmApplicationFilters = {
+  search?: string;
+  stage?: string;
+  intake_key?: string;
+  assigned_to_id?: string;
+  has_upcoming_fee?: boolean;
+  limit?: number;
+  offset?: number;
+};
+
+function buildApplicationParams(f: CrmApplicationFilters): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  if (f.limit) out['limit'] = f.limit;
+  if (f.offset) out['offset'] = f.offset;
+  if (f.search && f.search.trim()) out['search'] = f.search.trim();
+  if (f.stage && f.stage !== 'all') out['stage'] = f.stage;
+  if (f.intake_key && f.intake_key.trim()) out['intake_key'] = f.intake_key.trim();
+  if (f.assigned_to_id) out['assigned_to_id'] = f.assigned_to_id;
+  if (f.has_upcoming_fee) out['has_upcoming_fee'] = true;
+  return out;
+}
+
+export function useApplications(filters: CrmApplicationFilters = {}): UseQueryResult<CrmApplicationListResponse> {
+  return useQuery({
+    queryKey: ['applications', filters],
+    queryFn: async () => {
+      const res = await api.get('/leads/applications', { params: buildApplicationParams(filters) });
+      const payload = res.data as CrmApplicationListResponse | { data: CrmApplicationRow[] };
+      if ('page' in (payload as Record<string, unknown>)) return payload as CrmApplicationListResponse;
+      const arr = (payload as { data: CrmApplicationRow[] }).data ?? [];
+      return { data: arr, page: { hasMore: false, nextCursor: null, total: arr.length } };
+    },
+    placeholderData: (prev) => prev,
+  });
+}

@@ -4,11 +4,25 @@ import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { encryptField } from '../../shared/encryption.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
+import { completeness as computeCompleteness } from '../students/students.service.js';
 import type {
   CreateContactRequest,
   UpdateContactRequest,
   ContactListQuery,
 } from '@spv/zod-schemas';
+
+// SVT-SYNC-2026-06 — A6: best-effort recompute of parent student's completeness_pct.
+// emergency_contact is a completeness key — going 0→1 emergency contacts bumps ~11%.
+// We recompute on every contact create/delete (cheap) rather than checking
+// is_emergency_contact to avoid missing edge cases (e.g. update flips the flag).
+async function recomputeCompleteness(client: DB, tenantId: string, studentId: string): Promise<void> {
+  try {
+    await computeCompleteness({ db: client as never, tenantId }, studentId);
+  } catch (err) {
+    logger.warn({ err, studentId }, 'contact.recomputeCompleteness: best-effort failed');
+  }
+}
 
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
@@ -66,6 +80,8 @@ export const contactService = {
       entityId: created.id,
       after: stripEnc(created as Record<string, unknown>),
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (emergency_contact is a key).
+    await recomputeCompleteness(db(req), req.user!.tid, studentId);
     return created;
   },
   async list(req: { db?: DB; user?: { tid: string } }, studentId: string, q: ContactListQuery) {
@@ -112,6 +128,8 @@ export const contactService = {
       before: stripEnc(before as Record<string, unknown>),
       after: stripEnc(after as Record<string, unknown>),
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (update can flip is_emergency_contact).
+    await recomputeCompleteness(db(req), req.user!.tid, (after as { student_id: string }).student_id);
     return after;
   },
   async remove(req: { db?: DB; user?: { tid: string } }, id: string) {
@@ -127,5 +145,7 @@ export const contactService = {
       entityId: id,
       before: stripEnc(before as Record<string, unknown>),
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (deleting last emergency contact drops ~11%).
+    await recomputeCompleteness(db(req), req.user!.tid, (before as { student_id: string }).student_id);
   },
 };

@@ -4,6 +4,7 @@ import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { encryptField } from '../../shared/encryption.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
 import type {
   CreateInsuranceRequest,
   UpdateInsuranceRequest,
@@ -12,6 +13,27 @@ import type {
 
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
+
+// SVT-SYNC-2026-06 — A7: dismiss stale "insurance expiry" reminders when
+// an insurance record is deleted. Best-effort.
+async function dismissInsuranceReminders(client: DB, tenantId: string, recordId: string): Promise<void> {
+  try {
+    const result = await (client as PrismaClient).reminder.updateMany({
+      where: {
+        tenant_id: tenantId,
+        source_entity_type: 'insurance_record',
+        source_entity_id: recordId,
+        status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+      },
+      data: { status: 'DISMISSED' },
+    });
+    if (result.count > 0) {
+      logger.info({ tenantId, recordId, dismissed: result.count }, 'auto-dismissed insurance expiry reminders');
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId, recordId }, 'dismissInsuranceReminders: best-effort failed');
+  }
+}
 
 // Strip encrypted columns from audit payloads to avoid double-encryption.
 function stripEnc<T extends Record<string, unknown>>(row: T | null | undefined): Omit<T, 'policy_number_enc'> | null {
@@ -122,6 +144,8 @@ export const insuranceService = {
       where: { id, tenant_id: req.user!.tid },
     });
     if (r.count !== 1) throw NotFound('Insurance record not found');
+    // SVT-SYNC-2026-06 — A7: deleted insurance → dismiss its expiry reminders.
+    await dismissInsuranceReminders(db(req), req.user!.tid, id);
     await writeAudit(req as never, {
       action: 'student.insurance.deleted',
       entityType: 'insurance_record',

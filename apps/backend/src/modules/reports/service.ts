@@ -163,6 +163,7 @@ async function commissionRevenue(
 // 4. /reports/refund-rate
 interface RefundRateRow {
   month: string;
+  currency: string;
   payments_minor: string;
   refunds_minor: string;
   refund_rate: number;
@@ -174,41 +175,49 @@ async function refundRate(
   tenantId: string,
   filters: RefundRateFilters,
 ): Promise<ReportResult<RefundRateRow, RefundRateFilters>> {
+  // SVT-FIN-2026-06: group by currency too — payments/refunds of different
+  // currencies must never be summed or divided together. Refunds carry no own
+  // currency column, so inherit it from the parent payment via the join.
   const raw = await db.$queryRaw<Array<{
-    month: Date; payments_minor: bigint | null; refunds_minor: bigint | null; refund_rate: string | null;
+    month: Date; currency: string; payments_minor: bigint | null; refunds_minor: bigint | null; refund_rate: string | null;
   }>>`
     WITH p AS (
       SELECT date_trunc('month', received_on)::date AS month,
+             currency,
              SUM(gross_minor)                       AS payments_minor
         FROM payments
        WHERE tenant_id   = ${tenantId}::uuid
          AND deleted_at IS NULL
          AND status      = 'RECEIVED'
          AND received_on BETWEEN ${filters.from}::date AND ${filters.to}::date
-       GROUP BY 1
+       GROUP BY 1, currency
     ),
     r AS (
-      SELECT date_trunc('month', refunded_on)::date AS month,
-             SUM(amount_minor)                      AS refunds_minor
-        FROM refunds
-       WHERE tenant_id   = ${tenantId}::uuid
-         AND status      = 'COMPLETED'
-         AND refunded_on BETWEEN ${filters.from}::date AND ${filters.to}::date
-       GROUP BY 1
+      SELECT date_trunc('month', rf.refunded_on)::date AS month,
+             pay.currency                              AS currency,
+             SUM(rf.amount_minor)                      AS refunds_minor
+        FROM refunds rf
+        JOIN payments pay ON pay.id = rf.payment_id
+       WHERE rf.tenant_id   = ${tenantId}::uuid
+         AND rf.status      = 'COMPLETED'
+         AND rf.refunded_on BETWEEN ${filters.from}::date AND ${filters.to}::date
+       GROUP BY 1, pay.currency
     )
     SELECT COALESCE(p.month, r.month)                                       AS month,
+           COALESCE(p.currency, r.currency)                                 AS currency,
            COALESCE(p.payments_minor, 0)                                    AS payments_minor,
            COALESCE(r.refunds_minor, 0)                                     AS refunds_minor,
            CASE WHEN COALESCE(p.payments_minor, 0) = 0 THEN NULL
                 ELSE ROUND(COALESCE(r.refunds_minor, 0)::numeric
                            / p.payments_minor::numeric, 4)
            END                                                              AS refund_rate
-      FROM p FULL OUTER JOIN r ON r.month = p.month
-     ORDER BY month ASC
+      FROM p FULL OUTER JOIN r ON r.month = p.month AND r.currency = p.currency
+     ORDER BY month ASC, currency ASC
   `;
   return {
     rows: raw.map((r) => ({
       month: r.month.toISOString().slice(0, 10),
+      currency: r.currency,
       payments_minor: (r.payments_minor ?? 0n).toString(),
       refunds_minor: (r.refunds_minor ?? 0n).toString(),
       refund_rate: r.refund_rate == null ? 0 : Number(r.refund_rate),

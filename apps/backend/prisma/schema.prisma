@@ -80,6 +80,26 @@ model Tenant {
   student_credits    StudentCredit[]
   password_reset_tokens PasswordResetToken[]
   audit_anchors         AuditAnchor[]
+  // SVT-V2-CRM-MIRROR-2026-06 — CRM mirror tables (read-mostly from V2 MIS).
+  crm_countries         CrmCountry[]
+  crm_institutions      CrmInstitution[]
+  crm_courses           CrmCourse[]
+  crm_leads             CrmLead[]
+  crm_applications      CrmApplication[]
+  crm_lead_courses      CrmLeadCourse[]
+  crm_lead_course_history CrmLeadCourseHistory[]
+  crm_payments          CrmPayment[]
+  crm_remarks           CrmRemark[]
+  crm_follow_ups        CrmFollowUp[]
+  crm_call_history      CrmCallHistory[]
+  crm_visits            CrmVisit[]
+  crm_assignments       CrmAssignment[]
+  crm_qualifications    CrmQualification[]
+  crm_language_tests    CrmLanguageTest[]
+  crm_guardians         CrmGuardian[]
+  crm_lead_fees         CrmLeadFee[]
+  interview_questions   InterviewQuestion[]
+  interview_attempts    InterviewAttempt[]
 
   @@map("tenants")
 }
@@ -160,6 +180,8 @@ model User {
   assigned_students Student[]      @relation("AssignedCounsellor")
   assigned_reminders Reminder[]    @relation("ReminderAssignee")
   inbox_messages    CommsMessage[] @relation("CommsRecipient")
+  // SVT-V2-CRM-MIRROR-2026-06 — CRM leads this user owns.
+  crm_assigned_leads CrmLead[] @relation("CrmLeadAssignee")
 
   // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
   //   * users_tenant_created_at_active_idx — partial (deleted_at IS NULL) on
@@ -356,6 +378,8 @@ model Country {
   institutions            Institution[]
   visa_categories         VisaCategory[]
   airports                AirportIATA[]
+  interview_questions     InterviewQuestion[]
+  interview_attempts      InterviewAttempt[]
 
   @@map("countries")
 }
@@ -700,6 +724,7 @@ model Student {
   finance_items    FinanceItem[]
   sponsorships     StudentSponsorship[]
   documents        Document[]
+  crm_lead         CrmLead?               @relation("CrmLeadStudent")
   lifecycle_events StudentLifecycleEvent[]
   comms_threads    CommsThread[]
   reminders        Reminder[]
@@ -709,6 +734,7 @@ model Student {
   // student scope (a student may have multiple enrolments over time).
   payments         Payment[]
   student_credits  StudentCredit[]
+  interview_attempts InterviewAttempt[]
 
   // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
   //   * students_tenant_stage_active_idx       — partial(deleted_at IS NULL) on (tenant_id, current_stage_id) for dashboard groupBy.
@@ -1192,6 +1218,8 @@ model Institution {
   commission_claims CommissionClaim[]
   super_agent_links InstitutionSuperAgent[]
   super_agent_commission_rules SuperAgentCommissionRule[]
+  interview_questions          InterviewQuestion[]
+  interview_attempts           InterviewAttempt[]
 
   // Perf indexes (see migrations/20991231235960_perf_indexes/migration.sql):
   //   * institutions_tenant_created_at_active_idx — partial(deleted_at IS NULL) on (tenant_id, created_at DESC, id DESC).
@@ -2808,4 +2836,995 @@ model StudentCredit {
   @@index([tenant_id, student_id])
   @@index([tenant_id, enrollment_id])
   @@map("student_credits")
+}
+
+// ============================================================================
+// 30. CRM mirror (SVT-V2-CRM-MIRROR-2026-06)
+//
+// SPVT mirrors the external "V2 MIS" (TheNextMis) CRM relational model so the
+// two are schema-compatible. Each table has three zones:
+//   * V2 SOURCE      — faithful field copies, REFRESHED every sync.
+//   * V2 EXTERNAL KEY — v2_*_id (Int) + source_system + synced_at; the dedup key.
+//   * SPVT-OWNED      — local workflow + audit sextet; NEVER overwritten by sync.
+// Internal relations use SPVT uuid FKs (not V2 ints); v2_*_id exists only for
+// dedup + ingest FK resolution. Enums mirror V2 1:1 (Crm-prefixed). Money is
+// BigInt minor + Char(3). V2 String dates are kept String (faithful, no parse).
+// Replaces the earlier lightweight TrackedStudent/TrackedStudentFee tables.
+// ============================================================================
+
+enum CrmLeadCourseState {
+  documents_collection
+  application_form
+  offer_received_unconditional
+  offer_received_conditional
+  offer_accepted
+  offer_rejected
+  visa_lodgement
+  visa_accepted
+  visa_refused
+}
+
+enum CrmLeadProfileStatus {
+  complete
+  incomplete
+}
+
+enum CrmLeadPriority {
+  LOW
+  NORMAL
+  HIGH
+  VIP
+}
+
+enum CrmPaymentMethodKind {
+  CASH
+  ONLINE
+  BANK
+  SPLIT
+}
+
+enum CrmVisitOutcome {
+  REGISTERED
+  COUNSELLED
+  FOLLOW_UP_NEEDED
+  NO_SHOW
+  LOST
+}
+
+enum CrmQualificationLevel {
+  SLC
+  HIGHSCHOOL
+  BACHELORS
+  MASTERS
+  PHD
+  DIPLOMA
+  CERTIFICATE
+  PROFESSIONAL
+}
+
+enum CrmGradeScale {
+  PERCENT
+  CGPA_4
+  CGPA_10
+  DIVISION
+  LETTER
+}
+
+enum CrmQualificationDivision {
+  FIRST
+  SECOND
+  THIRD
+  PASS
+}
+
+enum CrmLanguageTestType {
+  IELTS
+  PTE
+  TOEFL
+  SAT
+  DUOLINGO
+  OET
+  CAMBRIDGE
+  GRE
+  GMAT
+  OTHER
+}
+
+enum CrmGuardianRelationshipType {
+  FATHER
+  MOTHER
+  SPOUSE
+  SIBLING
+  GUARDIAN
+  SPONSOR
+  EMERGENCY_CONTACT
+  OTHER
+}
+
+enum CrmAssignmentKind {
+  ASSIGNEE
+  FOLLOWER
+}
+
+// SPVT-side lifecycle for a mirrored lead (post-visa workflow); not from V2.
+enum CrmLeadStatus {
+  ACTIVE
+  COMPLETED
+  WITHDRAWN
+  ON_HOLD
+}
+
+// SPVT-owned session fee schedule status (post-visa); not from V2.
+enum CrmFeeStatus {
+  SCHEDULED
+  DUE
+  PAID
+  WAIVED
+  OVERDUE
+}
+
+model CrmCountry {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  name          String
+  signature     String
+  currency_code String?
+  // ── V2 EXTERNAL KEY ──
+  v2_country_id Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant       Tenant           @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  institutions CrmInstitution[]
+
+  @@unique([tenant_id, v2_country_id], name: "crm_country_v2_dedup")
+  @@index([tenant_id, name])
+  @@index([deleted_at])
+  @@map("crm_countries")
+}
+
+model CrmInstitution {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenant_id         String   @db.Uuid
+  // ── V2 SOURCE ──
+  name              String
+  email             String?
+  phone             String?
+  street            String?
+  city              String?
+  state             String?
+  post_code         String?
+  currency_code     String?
+  category          String?
+  logo              String?
+  is_active         Boolean? @default(true)
+  // ── V2 EXTERNAL KEY ──
+  v2_institution_id Int
+  v2_country_id     Int
+  source_system     String   @default("v2_mis")
+  synced_at         DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  country_id        String?   @db.Uuid
+  version           Int       @default(1)
+  created_at        DateTime  @default(now()) @db.Timestamptz
+  created_by_id     String?   @db.Uuid
+  updated_at        DateTime  @updatedAt @db.Timestamptz
+  updated_by_id     String?   @db.Uuid
+  deleted_at        DateTime? @db.Timestamptz
+  deleted_by_id     String?   @db.Uuid
+
+  tenant  Tenant      @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  country CrmCountry? @relation(fields: [country_id], references: [id], onDelete: SetNull)
+  courses CrmCourse[]
+
+  @@unique([tenant_id, v2_institution_id], name: "crm_institution_v2_dedup")
+  @@index([tenant_id, name])
+  @@index([country_id])
+  @@index([deleted_at])
+  @@map("crm_institutions")
+}
+
+model CrmCourse {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenant_id         String   @db.Uuid
+  // ── V2 SOURCE ──
+  name              String
+  description       String?
+  type              String?
+  category          String?
+  start_date        String?
+  end_date          String?
+  fee_legacy        String?
+  fee_amount_minor  BigInt?
+  fee_currency      String?  @db.Char(3)
+  // ── V2 EXTERNAL KEY ──
+  v2_course_id      Int
+  v2_institution_id Int?
+  source_system     String   @default("v2_mis")
+  synced_at         DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  institution_id    String?   @db.Uuid
+  version           Int       @default(1)
+  created_at        DateTime  @default(now()) @db.Timestamptz
+  created_by_id     String?   @db.Uuid
+  updated_at        DateTime  @updatedAt @db.Timestamptz
+  updated_by_id     String?   @db.Uuid
+  deleted_at        DateTime? @db.Timestamptz
+  deleted_by_id     String?   @db.Uuid
+
+  tenant       Tenant          @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  institution  CrmInstitution? @relation(fields: [institution_id], references: [id], onDelete: SetNull)
+  lead_courses CrmLeadCourse[]
+  applications CrmApplication[]
+
+  @@unique([tenant_id, v2_course_id], name: "crm_course_v2_dedup")
+  @@index([tenant_id, name])
+  @@index([institution_id])
+  @@index([deleted_at])
+  @@map("crm_courses")
+}
+
+model CrmLead {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenant_id           String   @db.Uuid
+  // ── V2 SOURCE (identity + profile) ──
+  first_name          String
+  last_name           String
+  phone_number        String
+  secondary_number    String?
+  gender              String?
+  address             String?
+  dob                 String?
+  email               String?
+  city                String?
+  source              String?
+  type                String?
+  interested_course   String?
+  field_of_study      String?
+  intake_month        String?  @db.VarChar(7)
+  application_status  String?
+  profile_status      String?
+  profile_state       CrmLeadProfileStatus?
+  counsellor_status   Boolean? @default(false)
+  is_archived         Boolean  @default(false)
+  dropout             Boolean? @default(false)
+  priority            CrmLeadPriority @default(NORMAL)
+  tags                String[] @default([])
+  // education history (V2 flat strings)
+  slc_institution_name        String?
+  slc_grade                   String?
+  slc_year                    String?
+  highschool_institution_name String?
+  highschool_grade            String?
+  highschool_year             String?
+  bachelors_institution_name  String?
+  bachelors_grade             String?
+  bachelors_year              String?
+  masters_institution_name    String?
+  masters_grade               String?
+  masters_year                String?
+  // test scores (V2 flat strings)
+  ielts_overall_score   String?
+  ielts_listening_score String?
+  ielts_reading_score   String?
+  ielts_writing_score   String?
+  ielts_speaking_score  String?
+  ielts_date            String?
+  pte_overall_score     String?
+  pte_listening_score   String?
+  pte_reading_score     String?
+  pte_writing_score     String?
+  pte_speaking_score    String?
+  pte_date              String?
+  sat_overall_score     String?
+  sat_math_score        String?
+  sat_reading_score     String?
+  sat_writing_and_language_score String?
+  sat_date              String?
+  // marketing attribution
+  utm_source          String?
+  utm_medium          String?
+  utm_campaign        String?
+  utm_term            String?
+  utm_content         String?
+  landing_page        String?
+  referrer            String?
+  first_touched_at    DateTime? @db.Timestamptz
+  v2_created_at       DateTime? @db.Timestamptz
+  v2_updated_at       DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_lead_id          Int
+  source_system       String    @default("v2_mis")
+  synced_at           DateTime  @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED (never clobbered) ──
+  assigned_to_id      String?   @db.Uuid
+  spv_status          CrmLeadStatus @default(ACTIVE)
+  spv_notes           String?
+  // Conversion link: a visa-accepted lead promoted to a managed Student (1:1).
+  student_id          String?   @unique @db.Uuid
+  converted_at        DateTime? @db.Timestamptz
+  converted_by_id     String?   @db.Uuid
+  version             Int       @default(1)
+  created_at          DateTime  @default(now()) @db.Timestamptz
+  created_by_id       String?   @db.Uuid
+  updated_at          DateTime  @updatedAt @db.Timestamptz
+  updated_by_id       String?   @db.Uuid
+  deleted_at          DateTime? @db.Timestamptz
+  deleted_by_id       String?   @db.Uuid
+
+  tenant         Tenant                 @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  assigned_to    User?                  @relation("CrmLeadAssignee", fields: [assigned_to_id], references: [id], onDelete: SetNull)
+  student        Student?               @relation("CrmLeadStudent", fields: [student_id], references: [id], onDelete: SetNull)
+  applications   CrmApplication[]
+  lead_courses   CrmLeadCourse[]
+  course_history CrmLeadCourseHistory[]
+  payments       CrmPayment[]
+  remarks        CrmRemark[]
+  follow_ups     CrmFollowUp[]
+  calls          CrmCallHistory[]
+  visits         CrmVisit[]
+  assignments    CrmAssignment[]
+  qualifications CrmQualification[]
+  language_tests CrmLanguageTest[]
+  guardians      CrmGuardian[]
+  fees           CrmLeadFee[]
+
+  @@unique([tenant_id, v2_lead_id], name: "crm_lead_v2_dedup")
+  @@unique([tenant_id, phone_number], name: "crm_lead_phone_uq")
+  @@index([tenant_id, is_archived])
+  @@index([tenant_id, assigned_to_id])
+  @@index([tenant_id, last_name, first_name])
+  @@index([phone_number])
+  @@index([email])
+  @@index([deleted_at])
+  @@map("crm_leads")
+}
+
+model CrmApplication {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  intake_key    String
+  state         String    @default("draft")
+  notes         String?
+  started_at    DateTime? @db.Timestamptz
+  completed_at  DateTime? @db.Timestamptz
+  v2_created_at DateTime? @db.Timestamptz
+  v2_updated_at DateTime? @db.Timestamptz
+  v2_deleted_at DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_application_id Int
+  v2_lead_id        Int
+  v2_course_id      Int
+  source_system     String   @default("v2_mis")
+  synced_at         DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  course_id     String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead      @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+  course CrmCourse    @relation(fields: [course_id], references: [id], onDelete: Restrict)
+  fees   CrmLeadFee[]
+
+  @@unique([tenant_id, v2_application_id], name: "crm_application_v2_dedup")
+  @@unique([tenant_id, lead_id, course_id, intake_key], name: "crm_application_business_uq")
+  @@index([lead_id])
+  @@index([course_id])
+  @@index([state])
+  @@index([deleted_at])
+  @@map("crm_applications")
+}
+
+model CrmLeadCourse {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  state         String?
+  state_v2      CrmLeadCourseState?
+  sub_state     String?
+  start_date    DateTime? @db.Timestamptz
+  end_date      DateTime? @db.Timestamptz
+  is_deleted    Boolean   @default(false)
+  v2_created_at DateTime? @db.Timestamptz
+  v2_updated_at DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY (composite source identity) ──
+  v2_lead_id    Int
+  v2_course_id  Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  course_id     String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant    @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead   @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+  course CrmCourse @relation(fields: [course_id], references: [id], onDelete: Restrict)
+
+  @@unique([tenant_id, v2_lead_id, v2_course_id], name: "crm_lead_course_v2_dedup")
+  @@index([lead_id])
+  @@index([course_id])
+  @@index([state_v2])
+  @@index([deleted_at])
+  @@map("crm_lead_courses")
+}
+
+model CrmLeadCourseHistory {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  from_state    String?
+  to_state      String
+  changed_by    String?
+  changed_at    DateTime @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_history_id Int
+  v2_lead_id    Int
+  v2_course_id  Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED (append-only: no soft-delete) ──
+  lead_id       String   @db.Uuid
+  course_id     String?  @db.Uuid
+  version       Int      @default(1)
+  created_at    DateTime @default(now()) @db.Timestamptz
+  created_by_id String?  @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_history_id], name: "crm_lead_course_history_v2_dedup")
+  @@index([lead_id, course_id])
+  @@index([to_state, changed_at])
+  @@map("crm_lead_course_history")
+}
+
+model CrmPayment {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenant_id           String   @db.Uuid
+  // ── V2 SOURCE ──
+  amount_minor        BigInt
+  currency            String   @default("NPR") @db.Char(3)
+  method              CrmPaymentMethodKind
+  cash_amount_minor   BigInt?
+  online_amount_minor BigInt?
+  bank_ref            String?
+  voucher_no          String?
+  receipt_no          String?
+  received_by         String?
+  received_at         DateTime @db.Timestamptz
+  notes               String?
+  // ── V2 EXTERNAL KEY ──
+  v2_payment_id Int
+  v2_student_id Int
+  v2_lead_id    Int
+  v2_class_id   Int?
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_payment_id], name: "crm_payment_v2_dedup")
+  @@index([lead_id])
+  @@index([tenant_id, received_at])
+  @@index([deleted_at])
+  @@map("crm_payments")
+}
+
+model CrmRemark {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  content       String
+  v2_user_id    String?
+  v2_created_at DateTime? @db.Timestamptz
+  v2_updated_at DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_remark_id  Int
+  v2_lead_id    Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_remark_id], name: "crm_remark_v2_dedup")
+  @@index([lead_id, v2_created_at])
+  @@index([deleted_at])
+  @@map("crm_remarks")
+}
+
+model CrmFollowUp {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenant_id       String   @db.Uuid
+  // ── V2 SOURCE ──
+  date            DateTime @db.Timestamptz
+  status          String?  @default("incomplete")
+  v2_user_id      String?
+  v2_created_at   DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_follow_up_id Int
+  v2_lead_id      Int
+  source_system   String   @default("v2_mis")
+  synced_at       DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_follow_up_id], name: "crm_follow_up_v2_dedup")
+  @@index([lead_id, date])
+  @@index([status])
+  @@index([deleted_at])
+  @@map("crm_follow_ups")
+}
+
+model CrmCallHistory {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE ──
+  status        String
+  notes         String?
+  v2_user_id    String?
+  v2_created_at DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_call_id    Int
+  v2_lead_id    Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_call_id], name: "crm_call_v2_dedup")
+  @@index([lead_id, v2_created_at])
+  @@index([status])
+  @@index([deleted_at])
+  @@map("crm_call_history")
+}
+
+model CrmVisit {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenant_id      String   @db.Uuid
+  // ── V2 SOURCE ──
+  date           String
+  purpose        String
+  outcome        CrmVisitOutcome?
+  v2_user_id     String?
+  v2_actor_id    String?
+  v2_branch_id   Int?
+  v2_campaign_id Int?
+  v2_created_at  DateTime? @db.Timestamptz
+  v2_updated_at  DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_visit_id   Int
+  v2_lead_id    Int
+  source_system String   @default("v2_mis")
+  synced_at     DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_visit_id], name: "crm_visit_v2_dedup")
+  @@index([lead_id, v2_created_at])
+  @@index([outcome])
+  @@index([deleted_at])
+  @@map("crm_visits")
+}
+
+model CrmAssignment {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenant_id     String   @db.Uuid
+  // ── V2 SOURCE (unifies V2 AssignedUser + Follower via `kind`) ──
+  kind          CrmAssignmentKind
+  v2_user_id    String
+  is_active     Boolean  @default(false)
+  v2_created_at DateTime? @db.Timestamptz
+  v2_updated_at DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_assignment_id Int
+  v2_lead_id       Int
+  source_system    String   @default("v2_mis")
+  synced_at        DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, kind, v2_assignment_id], name: "crm_assignment_v2_dedup")
+  @@index([lead_id, kind, is_active])
+  @@index([deleted_at])
+  @@map("crm_assignments")
+}
+
+model CrmQualification {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenant_id           String   @db.Uuid
+  // ── V2 SOURCE ──
+  level               CrmQualificationLevel
+  institution_name    String?
+  board_or_university String?
+  stream_or_major     String?
+  grade               String?
+  grade_scale         CrmGradeScale?
+  start_year          Int?
+  end_year            Int?
+  is_ongoing          Boolean  @default(false)
+  division            CrmQualificationDivision?
+  notes               String?
+  v2_created_at       DateTime? @db.Timestamptz
+  v2_updated_at       DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_qualification_id Int
+  v2_lead_id          Int
+  source_system       String   @default("v2_mis")
+  synced_at           DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_qualification_id], name: "crm_qualification_v2_dedup")
+  @@index([lead_id, level])
+  @@index([deleted_at])
+  @@map("crm_qualifications")
+}
+
+model CrmLanguageTest {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenant_id        String   @db.Uuid
+  // ── V2 SOURCE ──
+  test_type        CrmLanguageTestType
+  custom_test_name String?
+  test_date        DateTime? @db.Timestamptz
+  overall_score    Decimal?  @db.Decimal(7, 2)
+  listening_score  Decimal?  @db.Decimal(7, 2)
+  reading_score    Decimal?  @db.Decimal(7, 2)
+  writing_score    Decimal?  @db.Decimal(7, 2)
+  speaking_score   Decimal?  @db.Decimal(7, 2)
+  extra_scores     Json?
+  test_center      String?
+  reference_no     String?
+  is_official      Boolean  @default(true)
+  notes            String?
+  v2_created_at    DateTime? @db.Timestamptz
+  v2_updated_at    DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_language_test_id Int
+  v2_lead_id          Int
+  source_system       String   @default("v2_mis")
+  synced_at           DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_language_test_id], name: "crm_language_test_v2_dedup")
+  @@index([lead_id, test_type])
+  @@index([deleted_at])
+  @@map("crm_language_tests")
+}
+
+model CrmGuardian {
+  id                        String   @id @default(uuid()) @db.Uuid
+  tenant_id                 String   @db.Uuid
+  // ── V2 SOURCE ──
+  full_name                 String
+  relationship_type         CrmGuardianRelationshipType
+  custom_relationship_label String?
+  phone                     String?
+  secondary_phone           String?
+  email                     String?
+  address                   String?
+  occupation                String?
+  notes                     String?
+  v2_created_at             DateTime? @db.Timestamptz
+  v2_updated_at             DateTime? @db.Timestamptz
+  // ── V2 EXTERNAL KEY ──
+  v2_guardian_id Int
+  v2_lead_id     Int
+  source_system  String   @default("v2_mis")
+  synced_at      DateTime @default(now()) @db.Timestamptz
+  // ── SPVT-OWNED ──
+  lead_id       String    @db.Uuid
+  version       Int       @default(1)
+  created_at    DateTime  @default(now()) @db.Timestamptz
+  created_by_id String?   @db.Uuid
+  updated_at    DateTime  @updatedAt @db.Timestamptz
+  updated_by_id String?   @db.Uuid
+  deleted_at    DateTime? @db.Timestamptz
+  deleted_by_id String?   @db.Uuid
+
+  tenant Tenant  @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead   CrmLead @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+
+  @@unique([tenant_id, v2_guardian_id], name: "crm_guardian_v2_dedup")
+  @@index([lead_id, relationship_type])
+  @@index([deleted_at])
+  @@map("crm_guardians")
+}
+
+// SPVT-owned post-visa session fee schedule (NOT in V2). Replaces TrackedStudentFee.
+model CrmLeadFee {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenant_id         String    @db.Uuid
+  lead_id           String    @db.Uuid
+  application_id    String?   @db.Uuid
+  session_label     String
+  amount_minor      BigInt
+  currency          String    @db.Char(3)
+  due_on            DateTime  @db.Date
+  status            CrmFeeStatus @default(SCHEDULED)
+  paid_at           DateTime? @db.Timestamptz
+  paid_amount_minor BigInt?
+  notes             String?
+  seeded_from_v2    Boolean   @default(false)
+  version           Int       @default(1)
+  created_at        DateTime  @default(now()) @db.Timestamptz
+  created_by_id     String?   @db.Uuid
+  updated_at        DateTime  @updatedAt @db.Timestamptz
+  updated_by_id     String?   @db.Uuid
+  deleted_at        DateTime? @db.Timestamptz
+  deleted_by_id     String?   @db.Uuid
+
+  tenant      Tenant          @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  lead        CrmLead         @relation(fields: [lead_id], references: [id], onDelete: Cascade)
+  application CrmApplication? @relation(fields: [application_id], references: [id], onDelete: SetNull)
+
+  @@index([tenant_id, status, due_on])
+  @@index([tenant_id, lead_id])
+  @@index([deleted_at])
+  @@map("crm_lead_fees")
+}
+
+// SVT-FEDERATION-2026-06 — SPVT-owned overlay keyed by V2's lead id, INDEPENDENT
+// of the crm_* mirror. This is the home for SPVT data when reading V2 LIVE
+// (SPV_READ_MODE=live): no crm_leads row exists then, so the SPVT-owned fields
+// (status/assignee/notes/student-link) + fees must hang off the V2 id directly.
+// Island tables (scalar FK cols; real FKs + RLS in the migration) to keep them
+// usable with or without the mirror.
+model SpvLeadOverlay {
+  id              String        @id @default(uuid()) @db.Uuid
+  tenant_id       String        @db.Uuid
+  v2_lead_id      Int
+  spv_status      CrmLeadStatus @default(ACTIVE)
+  assigned_to_id  String?       @db.Uuid
+  spv_notes       String?
+  student_id      String?       @unique @db.Uuid
+  converted_at    DateTime?     @db.Timestamptz
+  converted_by_id String?       @db.Uuid
+  version         Int           @default(1)
+  created_at      DateTime      @default(now()) @db.Timestamptz
+  created_by_id   String?       @db.Uuid
+  updated_at      DateTime      @updatedAt @db.Timestamptz
+  updated_by_id   String?       @db.Uuid
+  deleted_at      DateTime?     @db.Timestamptz
+  deleted_by_id   String?       @db.Uuid
+
+  @@unique([tenant_id, v2_lead_id], name: "spv_lead_overlay_v2_uq")
+  @@index([tenant_id, assigned_to_id])
+  @@index([deleted_at])
+  @@map("spv_lead_overlay")
+}
+
+model SpvLeadFee {
+  id                String       @id @default(uuid()) @db.Uuid
+  tenant_id         String       @db.Uuid
+  v2_lead_id        Int
+  v2_application_id Int?
+  session_label     String
+  amount_minor      BigInt
+  currency          String       @db.Char(3)
+  due_on            DateTime     @db.Date
+  status            CrmFeeStatus @default(SCHEDULED)
+  paid_at           DateTime?    @db.Timestamptz
+  paid_amount_minor BigInt?
+  notes             String?
+  seeded_from_v2    Boolean      @default(false)
+  version           Int          @default(1)
+  created_at        DateTime     @default(now()) @db.Timestamptz
+  created_by_id     String?      @db.Uuid
+  updated_at        DateTime     @updatedAt @db.Timestamptz
+  updated_by_id     String?      @db.Uuid
+  deleted_at        DateTime?    @db.Timestamptz
+  deleted_by_id     String?      @db.Uuid
+
+  @@index([tenant_id, status, due_on])
+  @@index([tenant_id, v2_lead_id])
+  @@index([deleted_at])
+  @@map("spv_lead_fees")
+}
+
+// ---------------------------------------------------------------------------
+// Visa Interview Prep — mock interview practice for students
+// ---------------------------------------------------------------------------
+
+enum InterviewQuestionCategory {
+  GENERAL
+  ACADEMIC
+  FINANCIAL
+  TIES_TO_HOME
+  FUTURE_PLANS
+  PERSONAL
+  I20_ANALYSIS
+  DOCUMENT
+}
+
+enum InterviewAttemptStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+model InterviewQuestion {
+  id             String                      @id @default(uuid()) @db.Uuid
+  tenant_id      String                      @db.Uuid
+  country_code   String                      @db.Char(2)
+  academic_level AcademicLevel?
+  institution_id String?                     @db.Uuid
+  category       InterviewQuestionCategory
+  question_text  String
+  model_answer   String?
+  tips           String?
+  sort_order     Int                         @default(0)
+  is_active      Boolean                     @default(true)
+  version        Int                         @default(1)
+  created_at     DateTime                    @default(now()) @db.Timestamptz
+  created_by_id  String?                     @db.Uuid
+  updated_at     DateTime                    @updatedAt @db.Timestamptz
+  updated_by_id  String?                     @db.Uuid
+  deleted_at     DateTime?                   @db.Timestamptz
+  deleted_by_id  String?                     @db.Uuid
+
+  tenant      Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  country     Country      @relation(fields: [country_code], references: [code_alpha2])
+  institution Institution? @relation(fields: [institution_id], references: [id])
+  answers     InterviewAnswer[]
+
+  @@index([tenant_id, country_code, is_active])
+  @@index([tenant_id, institution_id])
+  @@index([deleted_at])
+  @@map("interview_questions")
+}
+
+model InterviewAttempt {
+  id               String                   @id @default(uuid()) @db.Uuid
+  tenant_id        String                   @db.Uuid
+  student_id       String?                  @db.Uuid
+  candidate_name   String
+  candidate_email  String
+  country_code     String                   @db.Char(2)
+  institution_name String
+  institution_id   String?                  @db.Uuid
+  course_name      String
+  academic_level   AcademicLevel
+  intake_label     String
+  has_i20          Boolean                  @default(false)
+  question_count   Int                      @default(0)
+  answered_count   Int                      @default(0)
+  status           InterviewAttemptStatus   @default(IN_PROGRESS)
+  started_at       DateTime                 @default(now()) @db.Timestamptz
+  completed_at     DateTime?                @db.Timestamptz
+  version          Int                      @default(1)
+  created_at       DateTime                 @default(now()) @db.Timestamptz
+  updated_at       DateTime                 @updatedAt @db.Timestamptz
+
+  tenant      Tenant       @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  student     Student?     @relation(fields: [student_id], references: [id])
+  institution Institution? @relation(fields: [institution_id], references: [id])
+  country     Country      @relation(fields: [country_code], references: [code_alpha2])
+  answers     InterviewAnswer[]
+
+  @@index([tenant_id, status])
+  @@index([tenant_id, candidate_email])
+  @@index([student_id])
+  @@map("interview_attempts")
+}
+
+model InterviewAnswer {
+  id                 String   @id @default(uuid()) @db.Uuid
+  attempt_id         String   @db.Uuid
+  question_id        String   @db.Uuid
+  answer_text        String
+  answered_at        DateTime @default(now()) @db.Timestamptz
+  time_spent_seconds Int?
+
+  attempt  InterviewAttempt  @relation(fields: [attempt_id], references: [id], onDelete: Cascade)
+  question InterviewQuestion @relation(fields: [question_id], references: [id])
+
+  @@unique([attempt_id, question_id])
+  @@index([attempt_id])
+  @@map("interview_answers")
 }

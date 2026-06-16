@@ -28,6 +28,7 @@
 // no-op (we track whether the timers were already registered).
 
 import { prisma } from '../config/db.js';
+import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import { captureJobException, withTenantScope } from '../config/sentry.js';
 
@@ -42,6 +43,7 @@ import { runRetentionErasure } from './retentionErasure.js';
 import { runIdempotencyCleanup } from './idempotencyCleanup.js';
 import { runBillingDaily } from './billingDaily.js';
 import { runDsarSlaWatch } from './dsarSlaWatch.js';
+import { runV2IngestPass } from './v2Ingest.js';
 import { runJob, type JobOutcome } from './runner.js';
 
 const DISPATCH_EVERY_MS = 30 * 60 * 1000;
@@ -55,6 +57,32 @@ let dispatchHandle: NodeJS.Timeout | null = null;
 let scanHandle: NodeJS.Timeout | null = null;
 let commsHandle: NodeJS.Timeout | null = null;
 const dailyHandles: Array<NodeJS.Timeout> = [];
+
+// SVT-REL-2026-06 — never let a runJob promise reject into a timer/boot
+// callback. runJob already absorbs all errors internally, but this is the last
+// line of defence: a rejected callback hits server.ts's unhandledRejection
+// handler → process.exit(1), which would crash-loop the API on a DB blip.
+function fireAndForget(p: Promise<unknown>): void {
+  void p.catch((err) =>
+    logger.error({ err }, 'scheduler: job promise rejected unexpectedly (absorbed)'),
+  );
+}
+
+// One-shot DB reachability probe. If the database is down at boot we skip the
+// immediate passes (the intervals stay armed and self-skip until the DB
+// returns) so a cold start during an outage doesn't spam FAILED job rows.
+async function dbReachable(): Promise<boolean> {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return true;
+  } catch (err) {
+    logger.error(
+      { err },
+      'scheduler: database unreachable at boot — initial passes skipped (intervals armed)',
+    );
+    return false;
+  }
+}
 
 // Helper: load active tenants and run `fn` for each, isolating failures so one
 // bad tenant doesn't prevent the others from running.
@@ -306,7 +334,7 @@ function msUntilUtcHour(hourUtc: number): number {
 // Schedule `fn` to fire at HH:00 UTC daily. Returns the active handle so
 // stop() can clear it.
 function scheduleDaily(hourUtc: number, jobName: string, fn: () => Promise<JobOutcome>) {
-  const fire = () => void runJob(jobName, { ttlSec: 6 * 60 * 60 }, fn);
+  const fire = () => fireAndForget(runJob(jobName, { ttlSec: 6 * 60 * 60 }, fn));
   const initial = setTimeout(() => {
     fire();
     const interval = setInterval(fire, DAY_MS);
@@ -329,32 +357,34 @@ export function startScheduler(): { stop: () => void } {
     return { stop };
   }
 
-  // Kick a first dispatch + scan pass on the next tick so boot logs include
-  // real activity. Each pass swallows its own errors (runJob never throws).
-  setImmediate(() => {
-    void runJob('reminder.dispatcher', { ttlSec: 30 * 60 }, runDispatchPass);
-  });
-  setImmediate(() => {
-    void runJob('reminder.scanner', { ttlSec: 6 * 60 * 60 }, runScanPass);
-  });
+  // Kick first dispatch + scan + comms passes on the next tick so boot logs
+  // include real activity — but only when the DB is reachable, so a DB-down
+  // boot doesn't spam FAILED rows. runJob absorbs its own errors; fireAndForget
+  // is the last guard so nothing rejects into the event loop.
+  fireAndForget(
+    (async () => {
+      if (!(await dbReachable())) return;
+      fireAndForget(runJob('reminder.dispatcher', { ttlSec: 30 * 60 }, runDispatchPass));
+      fireAndForget(runJob('reminder.scanner', { ttlSec: 6 * 60 * 60 }, runScanPass));
+      fireAndForget(runJob('comms.dispatcher', { ttlSec: 10 * 60 }, runCommsDispatchPass));
+    })(),
+  );
 
   dispatchHandle = setInterval(() => {
-    void runJob('reminder.dispatcher', { ttlSec: 30 * 60 }, runDispatchPass);
+    fireAndForget(runJob('reminder.dispatcher', { ttlSec: 30 * 60 }, runDispatchPass));
   }, DISPATCH_EVERY_MS);
   // unref() so the timer doesn't keep the process alive on shutdown.
   dispatchHandle.unref();
 
   scanHandle = setInterval(() => {
-    void runJob('reminder.scanner', { ttlSec: 6 * 60 * 60 }, runScanPass);
+    fireAndForget(runJob('reminder.scanner', { ttlSec: 6 * 60 * 60 }, runScanPass));
   }, SCAN_EVERY_MS);
   scanHandle.unref();
 
   // SVT-WAVE8-OUTBOX-2026-05 — drain the comms outbox (EMAIL via Resend etc).
-  setImmediate(() => {
-    void runJob('comms.dispatcher', { ttlSec: 10 * 60 }, runCommsDispatchPass);
-  });
+  // First pass is kicked in the DB-gated boot block above.
   commsHandle = setInterval(() => {
-    void runJob('comms.dispatcher', { ttlSec: 10 * 60 }, runCommsDispatchPass);
+    fireAndForget(runJob('comms.dispatcher', { ttlSec: 10 * 60 }, runCommsDispatchPass));
   }, COMMS_DISPATCH_EVERY_MS);
   commsHandle.unref();
 
@@ -386,6 +416,14 @@ export function startScheduler(): { stop: () => void } {
   // SVT-WAVE14-DIGEST-2026-05 — collapse per-user queued EMAIL into 1 daily
   // summary at 08:00 UTC. After cleanup so we don't digest rows about to die.
   scheduleDaily(8, 'comms.digest', runCommsDigestPass);
+  // SVT-V2-TRACKER-2026-06 — pull visa-accepted leads from the external V2 MIS
+  // at 09:00 UTC into a single configured tenant. Only armed when the ingest is
+  // switched on; otherwise the timer never fires (no V2 connection to read).
+  if (env.V2_INGEST_ENABLED && env.V2_INGEST_TENANT_ID) {
+    scheduleDaily(9, 'v2.ingest', runV2IngestPass);
+  } else {
+    logger.info('scheduler: v2.ingest not armed (V2_INGEST_ENABLED=false or no tenant)');
+  }
 
   logger.info(
     { dispatchEveryMs: DISPATCH_EVERY_MS, scanEveryMs: SCAN_EVERY_MS },

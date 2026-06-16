@@ -3,6 +3,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
 import type {
   CreateFinanceRequest,
   UpdateFinanceRequest,
@@ -26,6 +27,27 @@ function toData(input: Partial<CreateFinanceRequest>) {
     ...(due_on !== undefined ? { due_on: toDate(due_on) } : {}),
     ...(paid_on !== undefined ? { paid_on: toDate(paid_on) } : {}),
   };
+}
+
+// SVT-SYNC-2026-06 — A7: auto-dismiss PENDING/SENT/SNOOZED reminders that
+// reference this finance item. Fires when the item transitions to a terminal
+// payment state (PAID/WAIVED) or is deleted — prevents "payment due" staircase
+// from firing for a settled item.
+const DISMISSABLE_STATUSES = ['PAID', 'WAIVED', 'CANCELLED', 'REFUNDED'];
+
+async function dismissRemindersForFinanceItem(client: DB, tenantId: string, itemId: string): Promise<void> {
+  const result = await (client as PrismaClient).reminder.updateMany({
+    where: {
+      tenant_id: tenantId,
+      source_entity_type: 'finance_item',
+      source_entity_id: itemId,
+      status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+    },
+    data: { status: 'DISMISSED' },
+  });
+  if (result.count > 0) {
+    logger.info({ tenantId, entityType: 'finance_item', entityId: itemId, dismissed: result.count }, 'auto-dismissed stale finance reminders');
+  }
 }
 
 export const financeService = {
@@ -77,6 +99,12 @@ export const financeService = {
       before,
       after,
     });
+    // SVT-SYNC-2026-06 — A7: if status transitioned to a terminal payment state,
+    // dismiss any stale "payment due" reminders referencing this item.
+    const afterStatus = (after as { status?: string }).status;
+    if (afterStatus && DISMISSABLE_STATUSES.includes(afterStatus)) {
+      await dismissRemindersForFinanceItem(db(req), req.user!.tid, id);
+    }
     return after;
   },
   async remove(req: { db?: DB; user?: { tid: string } }, id: string) {
@@ -86,6 +114,8 @@ export const financeService = {
       where: { id, tenant_id: req.user!.tid },
     });
     if (r.count !== 1) throw NotFound('Finance item not found');
+    // SVT-SYNC-2026-06 — A7: deleted → dismiss its reminders.
+    await dismissRemindersForFinanceItem(db(req), req.user!.tid, id);
     await writeAudit(req as never, {
       action: 'student.finance.deleted',
       entityType: 'finance_item',

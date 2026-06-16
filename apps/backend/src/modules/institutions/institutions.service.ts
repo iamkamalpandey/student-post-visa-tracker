@@ -15,6 +15,7 @@ import type {
 } from '@spv/zod-schemas';
 
 import { Conflict, NotFound, PreconditionFailed } from '../../shared/errors.js';
+import { writeAudit } from '../../shared/audit.js';
 import {
   decodeCursor,
   encodeCursor,
@@ -148,7 +149,25 @@ export async function create(ctx: Ctx, input: CreateInstitutionRequest): Promise
     updated_by_id: actorId,
   };
 
-  return db.institution.create({ data });
+  const created = await db.institution.create({ data });
+  // SVT-WAVE-AUDIT-CATALOG-2026-06 (W2.10) — institution creation is a
+  // catalog-mutation that downstream programs/fees/commission math depend on.
+  // Record an append-only audit row with the identifying shape of the new row.
+  await writeAudit({
+    action: 'institution.created',
+    entityType: 'institution',
+    entityId: created.id,
+    actorId,
+    tenantId,
+    after: {
+      legal_name: created.legal_name,
+      display_name: created.display_name,
+      country_code: created.country_code,
+      type: created.type,
+      is_partner: created.is_partner,
+    },
+  } as never);
+  return created;
 }
 
 export async function update(
@@ -166,7 +185,18 @@ export async function update(
 
   const current = await db.institution.findFirst({
     where: { id, tenant_id: tenantId, deleted_at: null },
-    select: { id: true, version: true },
+    select: {
+      id: true,
+      version: true,
+      // SVT-WAVE-AUDIT-CATALOG-2026-06 (W2.10) — capture the pre-update identifying
+      // fields for the audit `before`. Widened beyond {id,version} purely for the
+      // audit snapshot; the version/If-Match guard below is unchanged.
+      legal_name: true,
+      display_name: true,
+      country_code: true,
+      is_partner: true,
+      commission_pct: true,
+    },
   });
   if (!current) throw NotFound('Institution not found');
   if (current.version !== expected) {
@@ -206,16 +236,64 @@ export async function update(
   });
   if (result.count === 0) throw Conflict('Concurrent update detected; retry with the latest version');
 
+  // SVT-WAVE-AUDIT-CATALOG-2026-06 (W2.10) — record the change. before holds the
+  // pre-update identifying fields (snapshotted above); after reflects the
+  // effective post-update value (input.X when supplied, else the prior value).
+  // commission_pct is included because it feeds downstream commission math.
+  await writeAudit({
+    action: 'institution.updated',
+    entityType: 'institution',
+    entityId: id,
+    actorId,
+    tenantId,
+    before: {
+      legal_name: current.legal_name,
+      display_name: current.display_name,
+      country_code: current.country_code,
+      is_partner: current.is_partner,
+      commission_pct: current.commission_pct,
+    },
+    after: {
+      legal_name: input.legal_name ?? current.legal_name,
+      display_name: input.display_name ?? current.display_name,
+      country_code: input.country_code ?? current.country_code,
+      is_partner: input.is_partner ?? current.is_partner,
+      commission_pct:
+        input.commission_pct !== undefined ? input.commission_pct : current.commission_pct,
+    },
+  } as never);
+
   return getById({ db, tenantId }, id);
 }
 
 export async function softDelete(ctx: Ctx, id: string): Promise<void> {
-  const { db, tenantId } = ctx;
+  const { db, tenantId, actorId } = ctx;
+  // SVT-WAVE-AUDIT-CATALOG-2026-06 (W2.10) — capture identifying fields before the
+  // soft-delete so the audit `before` reports what was removed. Returns the row
+  // (or null) so we keep the existing NotFound semantics via result.count below.
+  const existing = await db.institution.findFirst({
+    where: { id, tenant_id: tenantId, deleted_at: null },
+    select: { id: true, legal_name: true, display_name: true, country_code: true },
+  });
   const result = await db.institution.updateMany({
     where: { id, tenant_id: tenantId, deleted_at: null },
     data: { deleted_at: new Date() },
   });
   if (result.count === 0) throw NotFound('Institution not found');
+  await writeAudit({
+    action: 'institution.deleted',
+    entityType: 'institution',
+    entityId: id,
+    actorId,
+    tenantId,
+    before: {
+      id,
+      legal_name: existing?.legal_name,
+      display_name: existing?.display_name,
+      country_code: existing?.country_code,
+    },
+    after: { deleted: true },
+  } as never);
 }
 
 // -----------------------------------------------------------------------------
@@ -252,7 +330,7 @@ export async function createIdentifier(
   input: CreateInstitutionIdentifierRequest,
 ): Promise<unknown> {
   await assertOwnsInstitution(ctx.db, ctx.tenantId, institutionId);
-  return ctx.db.institutionIdentifier.create({
+  const created = await ctx.db.institutionIdentifier.create({
     data: {
       institution_id: institutionId,
       scheme: input.scheme,
@@ -262,16 +340,34 @@ export async function createIdentifier(
       valid_to: input.valid_to ? new Date(input.valid_to) : null,
     },
   });
+  await writeAudit({
+    action: 'institution.identifier.created',
+    entityType: 'institution_identifier',
+    entityId: created.id,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    after: { institution_id: institutionId, scheme: created.scheme, value: created.value },
+  } as never);
+  return created;
 }
 
 export async function deleteIdentifier(ctx: Ctx, identifierId: string): Promise<void> {
   // Tenant scoping happens via the institution relationship. We re-check it here.
   const row = await ctx.db.institutionIdentifier.findFirst({
     where: { id: identifierId, institution: { tenant_id: ctx.tenantId, deleted_at: null } },
-    select: { id: true },
+    select: { id: true, institution_id: true, scheme: true, value: true },
   });
   if (!row) throw NotFound('Identifier not found');
   await ctx.db.institutionIdentifier.delete({ where: { id: identifierId } });
+  await writeAudit({
+    action: 'institution.identifier.deleted',
+    entityType: 'institution_identifier',
+    entityId: identifierId,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    before: { id: identifierId, institution_id: row.institution_id, scheme: row.scheme, value: row.value },
+    after: { deleted: true },
+  } as never);
 }
 
 // -----------------------------------------------------------------------------
@@ -295,7 +391,7 @@ export async function createAccreditation(
   input: CreateInstitutionAccreditationRequest,
 ): Promise<unknown> {
   await assertOwnsInstitution(ctx.db, ctx.tenantId, institutionId);
-  return ctx.db.institutionAccreditation.create({
+  const created = await ctx.db.institutionAccreditation.create({
     data: {
       institution_id: institutionId,
       body: input.body,
@@ -305,15 +401,33 @@ export async function createAccreditation(
       scope: input.scope ?? null,
     },
   });
+  await writeAudit({
+    action: 'institution.accreditation.created',
+    entityType: 'institution_accreditation',
+    entityId: created.id,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    after: { institution_id: institutionId, body: created.body, accreditation_no: created.accreditation_no },
+  } as never);
+  return created;
 }
 
 export async function deleteAccreditation(ctx: Ctx, accreditationId: string): Promise<void> {
   const row = await ctx.db.institutionAccreditation.findFirst({
     where: { id: accreditationId, institution: { tenant_id: ctx.tenantId, deleted_at: null } },
-    select: { id: true },
+    select: { id: true, institution_id: true, body: true, accreditation_no: true },
   });
   if (!row) throw NotFound('Accreditation not found');
   await ctx.db.institutionAccreditation.delete({ where: { id: accreditationId } });
+  await writeAudit({
+    action: 'institution.accreditation.deleted',
+    entityType: 'institution_accreditation',
+    entityId: accreditationId,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    before: { id: accreditationId, institution_id: row.institution_id, body: row.body, accreditation_no: row.accreditation_no },
+    after: { deleted: true },
+  } as never);
 }
 
 // -----------------------------------------------------------------------------
@@ -334,7 +448,7 @@ export async function createContact(
   input: CreateInstitutionContactRequest,
 ): Promise<unknown> {
   await assertOwnsInstitution(ctx.db, ctx.tenantId, institutionId);
-  return ctx.db.institutionContact.create({
+  const created = await ctx.db.institutionContact.create({
     data: {
       institution_id: institutionId,
       full_name: input.full_name,
@@ -346,15 +460,33 @@ export async function createContact(
       notes: input.notes ?? null,
     },
   });
+  await writeAudit({
+    action: 'institution.contact.created',
+    entityType: 'institution_contact',
+    entityId: created.id,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    after: { institution_id: institutionId, full_name: created.full_name, is_primary: created.is_primary },
+  } as never);
+  return created;
 }
 
 export async function deleteContact(ctx: Ctx, contactId: string): Promise<void> {
   const row = await ctx.db.institutionContact.findFirst({
     where: { id: contactId, institution: { tenant_id: ctx.tenantId, deleted_at: null } },
-    select: { id: true },
+    select: { id: true, institution_id: true, full_name: true, is_primary: true },
   });
   if (!row) throw NotFound('Contact not found');
   await ctx.db.institutionContact.delete({ where: { id: contactId } });
+  await writeAudit({
+    action: 'institution.contact.deleted',
+    entityType: 'institution_contact',
+    entityId: contactId,
+    actorId: ctx.actorId,
+    tenantId: ctx.tenantId,
+    before: { id: contactId, institution_id: row.institution_id, full_name: row.full_name, is_primary: row.is_primary },
+    after: { deleted: true },
+  } as never);
 }
 
 // -----------------------------------------------------------------------------

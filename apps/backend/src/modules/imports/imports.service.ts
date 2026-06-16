@@ -306,6 +306,13 @@ async function doApply(
   const rows = await parseByExt(buf, ext);
   const mapping = body.mapping_json;
 
+  // Empty-file guard: refuse to flip a 0-row upload to COMPLETED (silent no-op).
+  // Status is still DRY_RUN_READY here (the APPLYING flip is below), so the
+  // operator can re-upload the correct file. Mirrors the dry-run report check.
+  if (rows.length === 0) {
+    throw BadRequest('Import file has no data rows. Check the file, delimiter, and encoding.');
+  }
+
   // Defence-in-depth: pin update to (id, tenant_id) via updateMany.
   {
     const r = await prisma.importJob.updateMany({

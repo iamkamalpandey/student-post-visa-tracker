@@ -12,6 +12,7 @@ import { writeAudit } from '../../shared/audit.js';
 import { notifyStatusTransition } from '../../shared/transitionNotify.js';
 import { upsertClaimForEnrollment } from '../commissions/recalculator.js';
 import { maybeSeedFeePlan, maybePauseOnLeave, maybeResumeFromLeave, maybeCancelOnWithdraw } from '../billing/enrollment-hook.js';
+import { completeness as computeCompleteness } from '../students/students.service.js';
 import { assertTransitionAllowed } from './fsm.js';
 import type { Db } from './enrollments.types.js';
 
@@ -312,6 +313,11 @@ export async function createForStudent(
   });
   // Commission hook: any failure is logged + swallowed, never propagated.
   await maybeRecomputeCommissionOnCreate(ctx, created.id, created.status);
+
+  // SVT-SYNC-2026-06 — A6: recompute student completeness (best-effort).
+  // Enrollment is a completeness key — going 0→1 bumps score from ~89% to 100%.
+  await recomputeCompleteness(ctx, studentId);
+
   return created;
 }
 
@@ -650,11 +656,24 @@ export async function softDelete(ctx: Ctx, id: string): Promise<void> {
     select: { id: true, student_id: true, institution_id: true, program_id: true, status: true },
   });
   if (!before) throw NotFound('Enrollment not found');
-  const result = await db.enrollment.updateMany({
-    where: { id, tenant_id: tenantId, deleted_at: null },
-    data: { deleted_at: new Date(), updated_by_id: actorId },
+  const now = new Date();
+  // SVT-SYNC-2026-06: a CommissionClaim does NOT auto-soft-delete with its
+  // enrollment (FK is Restrict), so a direct enrollment delete used to leave
+  // the claim live — still counted in commission lists/summaries and still
+  // firing "commission due" reminders. Soft-delete both atomically, mirroring
+  // the student-delete cascade in students.service.ts.
+  const claimsDeleted = await db.$transaction(async (tx) => {
+    const result = await tx.enrollment.updateMany({
+      where: { id, tenant_id: tenantId, deleted_at: null },
+      data: { deleted_at: now, updated_by_id: actorId },
+    });
+    if (result.count === 0) throw NotFound('Enrollment not found');
+    const claims = await tx.commissionClaim.updateMany({
+      where: { enrollment_id: id, tenant_id: tenantId, deleted_at: null },
+      data: { deleted_at: now, updated_by_id: actorId },
+    });
+    return claims.count;
   });
-  if (result.count === 0) throw NotFound('Enrollment not found');
   // SVT-AUDIT-2026-05: soft-delete must leave a chain entry so forensic replay
   // can reconstruct who removed which enrollment + when. Status snapshot lets
   // an investigator reason about commission claim state at the time of delete.
@@ -664,8 +683,58 @@ export async function softDelete(ctx: Ctx, id: string): Promise<void> {
     action: 'enrollment.deleted',
     entityType: 'Enrollment',
     entityId: id,
-    before,
+    before: { ...before, commission_claims_soft_deleted: claimsDeleted },
   });
+
+  // SVT-SYNC-2026-06 — A7: dismiss all PENDING/SENT/SNOOZED reminders
+  // linked to the deleted enrollment. Without this, "enrollment milestone"
+  // reminders keep firing for a deleted enrollment.
+  await dismissRemindersForEntity(db, tenantId, 'enrollment', id);
+  // Commission claim reminders use the claim's own id as source_entity_id.
+  // The claims were already soft-deleted above — find them by enrollment_id
+  // (including the just-deleted ones) and dismiss their reminders.
+  const claims = await db.commissionClaim.findMany({
+    where: { enrollment_id: id, tenant_id: tenantId },
+    select: { id: true },
+  });
+  for (const cl of claims) {
+    await dismissRemindersForEntity(db, tenantId, 'commission_claim', cl.id);
+  }
+
+  // SVT-SYNC-2026-06 — A6: recompute student completeness (best-effort).
+  // Deleting the last enrollment drops score ~11%.
+  await recomputeCompleteness(ctx, before.student_id);
+}
+
+// SVT-SYNC-2026-06 — A7: dismiss PENDING/SENT/SNOOZED reminders referencing
+// a given source entity. Best-effort: failure logged + swallowed.
+async function dismissRemindersForEntity(db: Db, tenantId: string, entityType: string, entityId: string): Promise<void> {
+  try {
+    const result = await db.reminder.updateMany({
+      where: {
+        tenant_id: tenantId,
+        source_entity_type: entityType,
+        source_entity_id: entityId,
+        status: { in: ['PENDING', 'SENT', 'SNOOZED'] },
+      },
+      data: { status: 'DISMISSED' },
+    });
+    if (result.count > 0) {
+      logger.info({ tenantId, entityType, entityId, dismissed: result.count }, 'auto-dismissed stale reminders');
+    }
+  } catch (err) {
+    logger.warn({ err, tenantId, entityType, entityId }, 'dismissRemindersForEntity: best-effort failed');
+  }
+}
+
+// SVT-SYNC-2026-06 — A6: fire-and-forget recompute of parent student's
+// completeness_pct. Best-effort: failure is logged + swallowed.
+async function recomputeCompleteness(ctx: { db: Db; tenantId: string }, studentId: string): Promise<void> {
+  try {
+    await computeCompleteness(ctx, studentId);
+  } catch (err) {
+    logger.warn({ err, studentId }, 'recomputeCompleteness: best-effort failed');
+  }
 }
 
 // -----------------------------------------------------------------------------

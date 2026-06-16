@@ -56,6 +56,11 @@ export default function LabeledField({
   encrypted = false,
   srOnly = false,
 }: Props) {
+  // Hooks must run unconditionally + in the same order every render — call
+  // useId() BEFORE any early return (the srOnly branch below). React
+  // rules-of-hooks; a conditional hook corrupts state across re-renders.
+  const reactId = useId();
+
   // Screen-reader-only mode: render the label inline-but-hidden and skip
   // the helperText caption row entirely so filter toolbars stay compact.
   if (srOnly) {
@@ -77,7 +82,6 @@ export default function LabeledField({
   // inputProps, preserving any the caller already set, and set aria-invalid in
   // the error state. The error helper also becomes a role="alert" live region
   // (WCAG 3.3.1 Error Identification + 4.1.3 Status Messages).
-  const reactId = useId();
   const helperId = helperText ? `${reactId}-helper` : undefined;
   type WithInputProps = { inputProps?: Record<string, unknown> };
   const describedChild =

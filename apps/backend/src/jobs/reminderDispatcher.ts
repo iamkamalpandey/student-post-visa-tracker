@@ -79,6 +79,31 @@ export async function dispatchPending(
 
   const fallbackAdmin = await fallbackAdminFor(tenantId, db);
 
+  // Find-or-create a comms thread for (channel, threadStudentId). When
+  // threadStudentId is null (SVT-V2-TRACKER tracked-fee reminders) we key the
+  // synthetic per-tenant thread by subject so all such reminders share one.
+  async function findOrCreateThread(
+    tx: Prisma.TransactionClient,
+    channel: 'IN_APP' | 'EMAIL',
+    threadStudentId: string | null,
+    subject: string,
+  ): Promise<{ id: string }> {
+    const existing = await tx.commsThread.findFirst({
+      where: {
+        tenant_id: tenantId,
+        student_id: threadStudentId,
+        channel,
+        ...(threadStudentId === null ? { subject } : {}),
+      },
+      select: { id: true },
+    });
+    if (existing) return existing;
+    return tx.commsThread.create({
+      data: { tenant_id: tenantId, student_id: threadStudentId, channel, subject },
+      select: { id: true },
+    });
+  }
+
   // Pre-flight read happens via the singleton (no RLS GUC) but is filtered by
   // tenant_id explicitly. The actual writes use withTenantTx so policies +
   // triggers see the right tenant.
@@ -98,6 +123,8 @@ export async function dispatchPending(
       title: true,
       due_on: true,
       assigned_to_id: true,
+      source_entity_type: true,
+      metadata: true,
     },
   });
   result.picked = candidates.length;
@@ -106,11 +133,24 @@ export async function dispatchPending(
     try {
       const recipient = r.assigned_to_id ?? fallbackAdmin;
       const studentId = r.student_id;
+      // SVT-V2-CRM-MIRROR-2026-06 — deep-link target carried on the reminder.
+      const href = ((r.metadata ?? {}) as { href?: string | null }).href ?? null;
+      // Reminders with no `students` row (e.g. crm_lead_fee, which lives in the
+      // CRM mirror) still deliver — to a per-tenant synthetic IN_APP/EMAIL
+      // thread (CommsThread.student_id is nullable) — as long as they carry an
+      // href to navigate to. Otherwise there's nothing actionable to surface.
+      const isSynthetic = !studentId && href != null;
+      const threadStudentId = studentId ?? null;
+      const threadSubject = studentId
+        ? 'Reminders'
+        : r.source_entity_type === 'crm_lead_fee'
+          ? 'Fee reminders'
+          : 'Notifications';
 
-      // CommsThread requires student_id (NOT NULL). For tenant-wide reminders
-      // with no student we have nothing to thread against — mark SENT so the
-      // dispatcher doesn't loop on it forever, but skip the message create.
-      if (!studentId) {
+      // Genuinely tenant-wide reminders with neither a student nor an href have
+      // nothing actionable to thread against — mark SENT so the dispatcher
+      // doesn't loop forever, but skip the message create.
+      if (!studentId && !isSynthetic) {
         await withTenantTx(tenantId, async (tx) => {
           await tx.reminder.updateMany({
             where: { id: r.id, status: 'PENDING' },
@@ -135,22 +175,9 @@ export async function dispatchPending(
         });
         if (claimed.count === 0) return false;
 
-        // Find or create the IN_APP thread for this student.
-        let thread = await tx.commsThread.findFirst({
-          where: { tenant_id: tenantId, student_id: studentId, channel: 'IN_APP' },
-          select: { id: true },
-        });
-        if (!thread) {
-          thread = await tx.commsThread.create({
-            data: {
-              tenant_id: tenantId,
-              student_id: studentId,
-              channel: 'IN_APP',
-              subject: 'Reminders',
-            },
-            select: { id: true },
-          });
-        }
+        // Find or create the IN_APP thread (per-student, or per-tenant
+        // synthetic when threadStudentId is null — see isTrackedFee above).
+        const thread = await findOrCreateThread(tx, 'IN_APP', threadStudentId, threadSubject);
 
         await tx.commsMessage.create({
           data: {
@@ -166,6 +193,7 @@ export async function dispatchPending(
               reminder_id: r.id,
               type: r.type,
               due_on: r.due_on.toISOString().slice(0, 10),
+              href, // deep-link target for the NotificationsBell
             },
           } as never,
         });
@@ -175,21 +203,7 @@ export async function dispatchPending(
         // comms.dispatcher job handles provider send + retry. Skip when there
         // is no recipient (the IN_APP row above also goes nowhere then).
         if (recipient) {
-          let emailThread = await tx.commsThread.findFirst({
-            where: { tenant_id: tenantId, student_id: studentId, channel: 'EMAIL' },
-            select: { id: true },
-          });
-          if (!emailThread) {
-            emailThread = await tx.commsThread.create({
-              data: {
-                tenant_id: tenantId,
-                student_id: studentId,
-                channel: 'EMAIL',
-                subject: 'Reminders',
-              },
-              select: { id: true },
-            });
-          }
+          const emailThread = await findOrCreateThread(tx, 'EMAIL', threadStudentId, threadSubject);
           await tx.commsMessage.create({
             data: {
               tenant_id: tenantId,
@@ -203,6 +217,7 @@ export async function dispatchPending(
                 reminder_id: r.id,
                 type: r.type,
                 due_on: r.due_on.toISOString().slice(0, 10),
+                href,
               },
             } as never,
           });

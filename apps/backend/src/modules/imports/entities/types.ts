@@ -36,5 +36,8 @@ export type NonStudentRowResult = {
 };
 
 export type DryRunResult =
-  | { ok: true; willUpdate: boolean }
+  // `dedupKey` is the importer's natural upsert key for THIS row, stringified.
+  // The orchestrator uses it to detect within-file duplicates (two rows that
+  // would collide on apply, last-write-wins) before any data is written.
+  | { ok: true; willUpdate: boolean; dedupKey: string }
   | { ok: false; errors: Array<{ field: string; message: string }> };

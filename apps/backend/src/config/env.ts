@@ -142,6 +142,41 @@ const EnvSchema = z.object({
   // environment-aware default applied in the post-parse normalisation
   // below.
   HIBP_FAIL_CLOSED: z.enum(['true', 'false']).optional(),
+
+  // SVT-V2-TRACKER-2026-06 — read-only ingestion from the external "V2 MIS"
+  // (TheNextMis) Postgres. All optional so existing deploys boot unchanged;
+  // when V2_INGEST_ENABLED=true the superRefine below requires the source URL
+  // + destination tenant. V2_MIS_DATABASE_SSL=true enables TLS to managed
+  // remotes (DigitalOcean etc.); leave unset for a local copy.
+  V2_MIS_DATABASE_URL: z.string().url().optional(),
+  V2_MIS_DATABASE_SSL: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
+  // SVT-SEC-2026-06 — CA bundle (inline PEM or a file path) for FULL TLS
+  // verification of the managed V2 DB. When set, pool.ts uses
+  // rejectUnauthorized:true; when unset it falls back to encrypted-but-
+  // unverified TLS with a loud warning (dev only). Ship the DO CA in prod.
+  V2_MIS_DATABASE_CA: z.string().optional(),
+  // Assert (once per process) that the V2 credential is read-only — catalog
+  // reads only, never writes to V2. Default on; flip to 'false' to silence.
+  V2_MIS_ASSERT_READONLY: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  V2_INGEST_TENANT_ID: z.string().uuid().optional(),
+  V2_INGEST_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  // Fallback currency for seeded fees when V2 Course.feeCurrency is blank.
+  // NPR — V2 is a Nepal consultancy (V2 Payment.currency defaults NPR).
+  V2_INGEST_DEFAULT_CURRENCY: z.string().length(3).default('NPR'),
+  // SVT-FEDERATION-2026-06 — read source for the visa-accepted CRM data:
+  //   'mirror' = read the synced crm_* tables (current default).
+  //   'live'   = read V2 directly per request (read-only) + stitch the spv_*
+  //              overlay; no sync. Flip only after the live path is verified.
+  SPV_READ_MODE: z.enum(['mirror', 'live']).default('mirror'),
 }).superRefine((cfg, ctx) => {
   // KMS_KEK_BASE64 must be present in production when using the local provider
   // (envelope encryption requires the KEK to be loadable). Remote providers
@@ -215,6 +250,23 @@ const EnvSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['RESEND_API_KEY'],
       message: 'RESEND_API_KEY is required when EMAIL_PROVIDER=resend',
+    });
+  }
+  // SVT-V2-TRACKER-2026-06 — switching the ingest on requires both a source
+  // connection and a destination tenant, else the daily job has nothing to
+  // read / nowhere to write.
+  if (cfg.V2_INGEST_ENABLED && !cfg.V2_MIS_DATABASE_URL) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['V2_MIS_DATABASE_URL'],
+      message: 'V2_MIS_DATABASE_URL is required when V2_INGEST_ENABLED=true',
+    });
+  }
+  if (cfg.V2_INGEST_ENABLED && !cfg.V2_INGEST_TENANT_ID) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['V2_INGEST_TENANT_ID'],
+      message: 'V2_INGEST_TENANT_ID is required when V2_INGEST_ENABLED=true',
     });
   }
   // SVT-WAVE-JWT-ROTATE-2026-05 — paired NEXT/PREV vars must declare a kid,

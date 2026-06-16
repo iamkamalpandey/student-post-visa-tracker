@@ -61,8 +61,9 @@ vi.mock('../src/config/db.js', () => {
         let rows = store.students.filter((s) => {
           if (s.tenant_id !== where['tenant_id']) return false;
           if (where['deleted_at'] === null && s.deleted_at != null) return false;
-          const status = where['status'] as { notIn: string[] } | undefined;
-          if (status?.notIn && status.notIn.includes(s.status)) return false;
+          const status = where['status'] as string | { notIn?: string[] } | undefined;
+          if (typeof status === 'string' && s.status !== status) return false;
+          if (status && typeof status === 'object' && status.notIn?.includes(s.status)) return false;
           const cs = where['current_stage_id'] as { in: string[] } | undefined;
           if (cs?.in && !cs.in.includes(s.current_stage_id)) return false;
           return true;
@@ -175,11 +176,18 @@ describe('GET /api/v1/dashboard/sla-breaches', () => {
     expect(res.body.data).toEqual([]);
   });
 
-  it('ignores students in terminal statuses (WITHDRAWN, COMPLETED)', async () => {
+  it('counts only ACTIVE students (terminal + paused statuses have a stopped clock)', async () => {
     const stage = seedStage({ sla_hours: 24 });
-    seedStudent({ current_stage_id: stage.id, status: 'WITHDRAWN', stage_entered_at: new Date(Date.now() - 100 * HOUR_MS) });
-    seedStudent({ current_stage_id: stage.id, status: 'COMPLETED', stage_entered_at: new Date(Date.now() - 100 * HOUR_MS) });
-    seedStudent({ current_stage_id: stage.id, status: 'ACTIVE', stage_entered_at: new Date(Date.now() - 100 * HOUR_MS), student_code: 'ACT' });
+    const old = new Date(Date.now() - 100 * HOUR_MS);
+    // Terminal — excluded.
+    seedStudent({ current_stage_id: stage.id, status: 'WITHDRAWN', stage_entered_at: old });
+    seedStudent({ current_stage_id: stage.id, status: 'COMPLETED', stage_entered_at: old });
+    // Paused / pre-start — clock stopped, must NOT show as a breach (the fix).
+    seedStudent({ current_stage_id: stage.id, status: 'ON_HOLD', stage_entered_at: old });
+    seedStudent({ current_stage_id: stage.id, status: 'ON_LEAVE', stage_entered_at: old });
+    seedStudent({ current_stage_id: stage.id, status: 'DEFERRED', stage_entered_at: old });
+    // Only this one is a real breach.
+    seedStudent({ current_stage_id: stage.id, status: 'ACTIVE', stage_entered_at: old, student_code: 'ACT' });
     const res = await request(app)
       .get('/api/v1/dashboard/sla-breaches')
       .set('Authorization', `Bearer ${token}`);

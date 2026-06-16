@@ -28,7 +28,11 @@ export async function dryRun(mapped: MappedRow, ctx: DryRunCtx): Promise<DryRunR
     },
     select: { id: true },
   });
-  return { ok: true, willUpdate: !!existing };
+  return {
+    ok: true,
+    willUpdate: !!existing,
+    dedupKey: `${r.value.student_id}|${r.value.institution_id}|${r.value.program_id}`,
+  };
 }
 
 export async function applyRow(

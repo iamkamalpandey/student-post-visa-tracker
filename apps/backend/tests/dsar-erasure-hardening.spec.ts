@@ -183,6 +183,11 @@ const childDelegates = {
   institution: mkChildModel(),
   campus: mkChildModel(),
   consentRecord: mkChildModel(),
+  // SVT-SYNC-2026-06 — eraseStudent now redacts the finance line-items'
+  // free-text, the converted lead's mirror PII, and the SPVT lead overlay.
+  financeItem: mkChildModel(),
+  crmLead: mkChildModel(),
+  spvLeadOverlay: mkChildModel(),
 };
 
 const prismaMock: Record<string, unknown> = {

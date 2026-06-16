@@ -125,6 +125,7 @@ ropaRouter.get('/ropa', async (req, res, next) => {
       prisma.subProcessor.findMany({
         where: { tenant_id: tenantId, removed_at: null },
         orderBy: { added_at: 'asc' },
+        take: 1000,
       }),
       prisma.dSARRequest.groupBy({
         by: ['type', 'status'],
@@ -180,6 +181,7 @@ ropaRouter.get('/ropa.csv', async (req, res, next) => {
     const subProcessors = await prisma.subProcessor.findMany({
       where: { tenant_id: tenantId },
       orderBy: { added_at: 'asc' },
+      take: 5000,
     });
 
     const header = [

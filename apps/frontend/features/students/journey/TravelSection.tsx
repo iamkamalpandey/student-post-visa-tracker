@@ -110,6 +110,7 @@ export default function TravelSection({ studentId }: TravelSectionProps) {
     onSuccess: () => {
       enqueueSnackbar('Flight deleted', { variant: 'success' });
       qc.invalidateQueries({ queryKey });
+      qc.invalidateQueries({ queryKey: ['student', studentId] });
       deleteDlg.close();
     },
     onError: (err) => enqueueSnackbar(err.detail || err.title, { variant: 'error' }),
@@ -138,7 +139,10 @@ export default function TravelSection({ studentId }: TravelSectionProps) {
         editing={dlg.editing}
         studentId={studentId}
         onClose={dlg.close}
-        onSaved={() => qc.invalidateQueries({ queryKey })}
+        onSaved={() => {
+          qc.invalidateQueries({ queryKey });
+          qc.invalidateQueries({ queryKey: ['student', studentId] });
+        }}
       />
       <ConfirmDialog
         open={deleteDlg.open}

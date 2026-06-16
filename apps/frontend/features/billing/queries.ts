@@ -211,12 +211,17 @@ export function usePaymentDetail(paymentId: string | null): UseQueryResult<Payme
 
 const ADMIN_STALE_MS = 60_000;
 
-export type FinanceSummary = {
+export type FinanceSummaryCurrencyRow = {
+  currency: string;
   total_outstanding_minor: string;
-  overdue_count: number;
   collections_30d_minor: string;
   refunds_30d_minor: string;
   refund_rate_30d: number;
+};
+export type FinanceSummary = {
+  /** Per-currency money rows — NEVER netted across currencies. */
+  by_currency: FinanceSummaryCurrencyRow[];
+  overdue_count: number;
   active_plans_count: number;
 };
 

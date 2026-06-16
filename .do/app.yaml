@@ -1,0 +1,124 @@
+# DigitalOcean App Platform spec — SPVT (Student Post-Visa Tracker).
+#
+# Deploy:   doctl apps create --spec .do/app.yaml      (first time)
+#           doctl apps update <app-id> --spec .do/app.yaml
+#
+# Fill in before deploying:
+#   - github.repo            → your org/repo
+#   - every `type: SECRET`   → set the value in the DO dashboard or via
+#                              `doctl apps update ... --spec` with the value;
+#                              NEVER commit secret values to git.
+#
+# Why App Platform + same-VPC managed Postgres (Phase 2 of the hardening plan):
+#   - The external V2 MIS DB is on DO. Deploying SPVT in the SAME VPC/region lets
+#     us reach V2 over the PRIVATE network — no public IP allowlist, so the
+#     rotating dev-egress-IP problem disappears — and pin V2_MIS_DATABASE_CA for
+#     verified TLS (rejectUnauthorized:true).
+#   - Use the V2 DB's PRIVATE host + the dedicated read-only role (spv_ro_ingest),
+#     NOT doadmin (see apps/backend/.env.example for the role SQL).
+
+name: spvt
+region: blr # match the V2 DB region for private networking + low latency
+
+# App-owned managed datastores. (The external V2 DB is reached via the
+# V2_MIS_DATABASE_URL secret, not declared here.)
+databases:
+  - name: spvt-db
+    engine: PG
+    version: "16"
+    production: true
+  - name: spvt-redis
+    engine: REDIS
+    version: "7"
+    production: true
+
+# Pre-deploy migration job — runs ONCE before new instances go live so multiple
+# service instances never race on schema migrations.
+jobs:
+  - name: migrate
+    kind: PRE_DEPLOY
+    source_dir: /
+    github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
+    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend build
+    run_command: pnpm --filter backend prisma:migrate:deploy
+    instance_size_slug: basic-xxs
+    envs:
+      - { key: DATABASE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+
+services:
+  - name: backend
+    source_dir: /
+    github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
+    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend build && pnpm --filter backend exec prisma generate
+    run_command: pnpm --filter backend start
+    http_port: 4000
+    # Scheduler uses Postgres advisory locks, so >1 instance is safe (extra
+    # replicas record SKIPPED_LOCKED). Keep 1 unless request load needs more.
+    instance_count: 1
+    instance_size_slug: basic-xs
+    health_check:
+      http_path: /api/v1/health/livez
+      initial_delay_seconds: 20
+      period_seconds: 10
+      failure_threshold: 5
+    envs:
+      - { key: NODE_ENV, scope: RUN_AND_BUILD_TIME, value: production }
+      - { key: DATABASE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
+      # CORS_ORIGIN has NO default — backend won't boot without it (any env).
+      - { key: CORS_ORIGIN, scope: RUN_TIME, value: "${frontend.PUBLIC_URL}" }
+      # --- Auth / crypto (set every SECRET in the DO dashboard) ---
+      - { key: JWT_PRIVATE_KEY, scope: RUN_TIME, type: SECRET }
+      - { key: JWT_PUBLIC_KEY, scope: RUN_TIME, type: SECRET }
+      - { key: JWT_KID, scope: RUN_TIME, type: SECRET }
+      - { key: JWT_ISSUER, scope: RUN_TIME, value: "https://spvt.example.com" }
+      - { key: JWT_AUDIENCE, scope: RUN_TIME, value: "spvt-api" }
+      # Prod-required — backend fails-fast without these (config/env.ts superRefine):
+      - { key: REFRESH_TOKEN_PEPPER, scope: RUN_TIME, type: SECRET } # openssl rand -hex 32
+      - { key: LOG_HMAC_KEY_BASE64, scope: RUN_TIME, type: SECRET }  # openssl rand -base64 32
+      # --- KMS (envelope encryption) ---
+      # Deploy-now: local KMS, gated by KMS_LOCAL_OK. FINANCE-GRADE: switch to a
+      # managed KMS (KMS_PROVIDER=aws|gcp|vault + KMS_KEY_ID) and drop KMS_LOCAL_OK.
+      - { key: KMS_PROVIDER, scope: RUN_TIME, value: "local" }
+      - { key: KMS_LOCAL_OK, scope: RUN_TIME, value: "true" }
+      - { key: KMS_KEK_BASE64, scope: RUN_TIME, type: SECRET } # openssl rand -base64 32
+      # --- Email ---
+      - { key: EMAIL_PROVIDER, scope: RUN_TIME, value: "log" } # set "resend" + RESEND_API_KEY for real delivery
+      - { key: EMAIL_FROM, scope: RUN_TIME, value: "noreply@spvt.example.com" }
+      # - { key: RESEND_API_KEY, scope: RUN_TIME, type: SECRET }
+      # --- Document storage ---
+      # WARNING: App Platform container fs is EPHEMERAL — STORAGE_DRIVER=local LOSES
+      # uploaded documents on every redeploy. For production, use DO Spaces (S3-compat):
+      # STORAGE_DRIVER=s3 + S3_* — REQUIRES the S3 driver (documents/storage.ts) to be
+      # implemented (currently a stub). Local is dev/demo only.
+      - { key: STORAGE_DRIVER, scope: RUN_TIME, value: "local" }
+      # --- V2 MIS read-only ingestion (Phase 2 security) ---
+      # Use the PRIVATE host + spv_ro_ingest role; CA bundle for verified TLS.
+      - { key: V2_MIS_DATABASE_URL, scope: RUN_TIME, type: SECRET }
+      - { key: V2_MIS_DATABASE_SSL, scope: RUN_TIME, value: "true" }
+      - { key: V2_MIS_DATABASE_CA, scope: RUN_TIME, type: SECRET }
+      - { key: V2_MIS_ASSERT_READONLY, scope: RUN_TIME, value: "true" }
+      - { key: V2_INGEST_ENABLED, scope: RUN_TIME, value: "true" }
+      - { key: V2_INGEST_TENANT_ID, scope: RUN_TIME, type: SECRET }
+      - { key: V2_INGEST_DEFAULT_CURRENCY, scope: RUN_TIME, value: "NPR" }
+      # --- Observability ---
+      - { key: SENTRY_DSN, scope: RUN_TIME, type: SECRET }
+      - { key: SENTRY_TRACES_SAMPLE_RATE, scope: RUN_TIME, value: "0.05" }
+
+  - name: frontend
+    source_dir: /
+    github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
+    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter frontend build
+    run_command: pnpm --filter frontend start
+    http_port: 3001
+    instance_size_slug: basic-xs
+    health_check:
+      http_path: /
+      initial_delay_seconds: 20
+    envs:
+      - { key: NODE_ENV, scope: RUN_AND_BUILD_TIME, value: production }
+      # Next.js inlines NEXT_PUBLIC_* at build time → scope must include BUILD.
+      - { key: NEXT_PUBLIC_API_BASE_URL, scope: RUN_AND_BUILD_TIME, value: "${backend.PUBLIC_URL}/api/v1" }
+      - { key: NEXT_PUBLIC_APP_NAME, scope: RUN_AND_BUILD_TIME, value: "Student Post-Visa Tracker" }

@@ -3,6 +3,8 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
+import { logger } from '../../config/logger.js';
+import { completeness as computeCompleteness } from '../students/students.service.js';
 import type {
   CreateTravelRequest,
   UpdateTravelRequest,
@@ -11,6 +13,16 @@ import type {
 
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
+
+// SVT-SYNC-2026-06 — A6: best-effort recompute of parent student's completeness_pct.
+// travel is a completeness key — going 0→1 travel records bumps ~11%.
+async function recomputeCompleteness(client: DB, tenantId: string, studentId: string): Promise<void> {
+  try {
+    await computeCompleteness({ db: client as never, tenantId }, studentId);
+  } catch (err) {
+    logger.warn({ err, studentId }, 'travel.recomputeCompleteness: best-effort failed');
+  }
+}
 
 const toDate = (v: string | null | undefined) => (v ? new Date(v) : v ?? null);
 
@@ -43,6 +55,8 @@ export const travelService = {
       entityId: created.id,
       after: created,
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (travel is a key).
+    await recomputeCompleteness(db(req), req.user!.tid, studentId);
     return created;
   },
 
@@ -107,5 +121,7 @@ export const travelService = {
       entityId: id,
       before,
     });
+    // SVT-SYNC-2026-06 — A6: recompute completeness (deleting last travel record drops ~11%).
+    await recomputeCompleteness(db(req), req.user!.tid, (before as { student_id: string }).student_id);
   },
 };

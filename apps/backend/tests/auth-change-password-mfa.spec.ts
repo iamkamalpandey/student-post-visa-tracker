@@ -175,6 +175,7 @@ describe('POST /api/v1/auth/change-password — MFA step-up gate', () => {
       USER_ID,
       VALID_BODY.current_password,
       VALID_BODY.new_password,
+      TENANT_ID,
     );
   });
 });
