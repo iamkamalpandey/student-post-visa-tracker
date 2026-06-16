@@ -20,6 +20,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../config/db.js';
 import { logger } from '../../config/logger.js';
+import { writeAudit } from '../../shared/audit.js';
 import { createFeePlan, pausePlan, resumePlan, cancelPlan } from './plan.service.js';
 
 type DB = PrismaClient | Prisma.TransactionClient;
@@ -161,5 +162,41 @@ export async function maybeCancelOnWithdraw(
     });
   } catch (err) {
     logger.error({ err, enrollmentId }, 'billing.cancelOnWithdraw failed');
+  }
+
+  // SVT-FIN-2026-06 — a withdrawal usually triggers the institution to claw back
+  // the agency's commission, so flag any not-yet-paid claim for this enrollment
+  // as DISPUTED so it surfaces for follow-up instead of sitting as expected
+  // revenue. PAID claims are left untouched (a paid clawback is a separate
+  // financial event the operator reconciles). enrollment_id is unique → ≤1 claim.
+  // Best-effort + tamper-evident; never blocks the withdrawal.
+  try {
+    const claim = await dbOf(ctx).commissionClaim.findFirst({
+      where: {
+        enrollment_id: enrollmentId,
+        tenant_id: ctx.user!.tid,
+        status: { in: ['PENDING', 'CLAIMED', 'INVOICED'] },
+      },
+      select: { id: true, status: true },
+    });
+    if (claim) {
+      const wr = await dbOf(ctx).commissionClaim.updateMany({
+        where: { id: claim.id, tenant_id: ctx.user!.tid, status: { in: ['PENDING', 'CLAIMED', 'INVOICED'] } },
+        data: { status: 'DISPUTED' },
+      });
+      if (wr.count > 0) {
+        await writeAudit({
+          action: 'commission.disputed.auto',
+          entityType: 'commission_claim',
+          entityId: claim.id,
+          tenantId: ctx.user!.tid,
+          actorId: ctx.user?.sub ?? null,
+          after: { from: claim.status, to: 'DISPUTED', reason: `enrollment ${reason.toLowerCase()}` },
+        } as never);
+        logger.info({ enrollmentId, claimId: claim.id }, 'billing.cancelOnWithdraw: commission claim flagged DISPUTED');
+      }
+    }
+  } catch (err) {
+    logger.error({ err, enrollmentId }, 'billing.cancelOnWithdraw: commission dispute flag failed');
   }
 }

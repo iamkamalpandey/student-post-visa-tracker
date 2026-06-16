@@ -26,15 +26,20 @@ type EnrollmentRow = {
   program_intake_id: string | null;
 };
 type PlanRow = { id: string; status: string };
+type ClaimRow = { id: string; status: string };
+
+const commissionUpdateMany = vi.fn(async () => ({ count: 1 }));
 
 const store: {
   billingEnabled: boolean;
   enrollment: EnrollmentRow | null;
   plan: PlanRow | null;
+  claim: ClaimRow | null;
 } = {
   billingEnabled: true,
   enrollment: null,
   plan: null,
+  claim: null,
 };
 
 vi.mock('../src/config/db.js', () => {
@@ -60,6 +65,15 @@ vi.mock('../src/config/db.js', () => {
         return store.plan;
       }),
     },
+    commissionClaim: {
+      findFirst: vi.fn(async ({ where }: { where: Record<string, unknown> }) => {
+        if (!store.claim) return null;
+        const status = where['status'] as { in?: string[] } | undefined;
+        if (status?.in && !status.in.includes(store.claim.status)) return null;
+        return { id: store.claim.id, status: store.claim.status };
+      }),
+      updateMany: commissionUpdateMany,
+    },
   };
   return { prisma, disconnectDb: async () => undefined };
 });
@@ -67,6 +81,8 @@ vi.mock('../src/config/db.js', () => {
 vi.mock('../src/config/logger.js', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
+
+vi.mock('../src/shared/audit.js', () => ({ writeAudit: vi.fn(async () => undefined) }));
 
 const createFeePlan = vi.fn(async () => ({ id: PLAN, status: 'ACTIVE' }));
 const pausePlan = vi.fn(async () => ({ id: PLAN, status: 'PAUSED' }));
@@ -94,6 +110,8 @@ beforeEach(() => {
   pausePlan.mockClear();
   resumePlan.mockClear();
   cancelPlan.mockClear();
+  commissionUpdateMany.mockClear();
+  store.claim = { id: 'claim-1', status: 'PENDING' };
   store.billingEnabled = true;
   store.enrollment = {
     id: ENROLLMENT,
@@ -188,5 +206,21 @@ describe('enrollment-hook: maybeCancelOnWithdraw', () => {
     store.plan = null;
     await maybeCancelOnWithdraw(ctx, ENROLLMENT, 'CANCELLED');
     expect(cancelPlan).not.toHaveBeenCalled();
+  });
+
+  it('flags a not-yet-paid commission claim as DISPUTED on withdrawal', async () => {
+    store.claim = { id: 'claim-1', status: 'PENDING' };
+    await maybeCancelOnWithdraw(ctx, ENROLLMENT, 'WITHDRAWN');
+    expect(commissionUpdateMany).toHaveBeenCalledTimes(1);
+    expect(commissionUpdateMany.mock.calls[0]![0]).toMatchObject({
+      where: { id: 'claim-1', tenant_id: TENANT, status: { in: ['PENDING', 'CLAIMED', 'INVOICED'] } },
+      data: { status: 'DISPUTED' },
+    });
+  });
+
+  it('leaves a PAID commission claim untouched on withdrawal', async () => {
+    store.claim = { id: 'claim-1', status: 'PAID' };
+    await maybeCancelOnWithdraw(ctx, ENROLLMENT, 'WITHDRAWN');
+    expect(commissionUpdateMany).not.toHaveBeenCalled();
   });
 });
