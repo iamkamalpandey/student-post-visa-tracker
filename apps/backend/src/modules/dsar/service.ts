@@ -303,6 +303,16 @@ async function eraseStudent(
       data: { spv_notes: null, deleted_at: now, deleted_by_id: actorId ?? null },
     });
 
+    // 8e. InterviewAttempt — mock-interview records carry the candidate's name +
+    // email (directly-identifying subject PII) alongside a student_id link. Redact
+    // the identity fields; the interview metadata (question/answer counts, status,
+    // dates, course/institution names) is non-identifying and kept for the
+    // soft record skeleton. Required String columns → sentinel.
+    await tx.interviewAttempt.updateMany({
+      where: { student_id: studentId, tenant_id: tenantId },
+      data: { candidate_name: ERASED, candidate_email: ERASED },
+    });
+
     // 9. Addresses. StudentAddress is the per-student link row; Address is a
     // SHARED catalog row (referenced by accommodations, contacts, sponsors,
     // employer_addresses, institutions, campuses — see schema relations). We

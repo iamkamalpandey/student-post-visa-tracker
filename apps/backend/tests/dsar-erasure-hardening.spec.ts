@@ -188,6 +188,8 @@ const childDelegates = {
   financeItem: mkChildModel(),
   crmLead: mkChildModel(),
   spvLeadOverlay: mkChildModel(),
+  // SVT-DSAR-2026-06 — mock-interview records carry candidate name/email PII.
+  interviewAttempt: mkChildModel(),
 };
 
 const prismaMock: Record<string, unknown> = {

@@ -107,13 +107,20 @@ export const publicDsarService = {
     const { tenant_id, subject_email, subject_type, dsar_type, request_text } = body;
 
     // Audit FIRST, before lookup, so an attacker probing for tenants can't
-    // tell from log presence/absence whether a tenant exists. We deliberately
-    // pass tenant_id as-given even if the tenant row doesn't exist; the audit
-    // log table accepts null tenant_id and a non-existent UUID is fine for
-    // the forensic record of "someone hit the public endpoint with this id".
+    // tell from log presence/absence whether a tenant exists.
+    //
+    // SVT-SEC-2026-06 — this endpoint is UNAUTHENTICATED and the tenant_id is
+    // attacker-supplied, so we must NOT chain this row under the claimed tenant:
+    // doing so let anyone append attacker-controlled rows (dsar_type, email
+    // domain) into a victim tenant's tamper-evident audit chain (log injection /
+    // forensic-noise pollution). Land it on the tenant-less system chain
+    // (tenant_id: null) instead and record the claimed tenant as data in `after`.
+    // Anti-enumeration is preserved (we always write the same row, same timing);
+    // the legitimate tenant still gets its own chained record on a real match
+    // (the DSARRequest insert below, under verified RLS context).
     await writeAudit({
       action: 'dsar.public_request_received',
-      tenant_id: tenant_id,
+      tenant_id: null,
       entity_type: 'dsar_request',
       entity_id: null,
       ip: req.ip ?? null,
@@ -122,8 +129,9 @@ export const publicDsarService = {
       // `after` lands inside the envelope-encrypted snapshot. Do NOT log the
       // request_text raw — it could contain PII the subject pasted in. Keep
       // a length-only marker; the DSARRequest row (when created) holds the
-      // full text under the same tenant's normal audit chain.
+      // full text under the tenant's normal audit chain.
       after: {
+        claimed_tenant_id: tenant_id,
         subject_type,
         subject_email_domain: subject_email.split('@')[1] ?? null,
         dsar_type,
