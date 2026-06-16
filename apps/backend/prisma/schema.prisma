@@ -2461,6 +2461,10 @@ model CommissionClaim {
   invoice_no        String?
   invoiced_on       DateTime?        @db.Date
   paid_on           DateTime?        @db.Date
+  // SVT-FIN-2026-06 — amount actually received (minor). Null until paid; set at
+  // mark-paid (defaults to amount_minor). amount_minor - received_minor is the
+  // claimed-vs-received variance (short-payment / partial clawback).
+  received_minor    BigInt?
   payment_reference String?
   dispute_reason    String?
   notes             String?

@@ -78,7 +78,7 @@ const store = {
   claims: [] as ClaimRow[],
   idem: [] as IdemRow[],
 };
-const auditCalls: Array<{ action: string; entityId: string | null }> = [];
+const auditCalls: Array<{ action: string; entityId: string | null; after?: Record<string, unknown> }> = [];
 
 function resetStore() {
   store.claims.length = 0;
@@ -387,10 +387,12 @@ vi.mock('../src/shared/audit.js', () => ({
       action: string;
       entityId?: string | null;
       entity_id?: string | null;
+      after?: Record<string, unknown>;
     };
     auditCalls.push({
       action: ev.action,
       entityId: ev.entityId ?? ev.entity_id ?? null,
+      after: ev.after,
     });
   }),
 }));
@@ -517,6 +519,40 @@ describe('state machine', () => {
     expect(res.body.status).toBe('PAID');
     expect(res.body.payment_reference).toBe('WIRE-12345');
     expect(auditCalls.some((c) => c.action === 'commission_claim.paid')).toBe(true);
+  });
+
+  it('records a short-payment variance via received_minor on mark-paid', async () => {
+    const tok = await tokenFor('ADMIN');
+    const seeded = seedPendingClaim();
+    seeded.status = 'INVOICED';
+    const res = await request(app)
+      .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .send({ paid_on: '2026-05-14', received_minor: '90000' }); // claimed 100000, $100 short
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('PAID');
+    const paid = auditCalls.find((c) => c.action === 'commission_claim.paid') as
+      | { after?: { received_minor?: unknown; variance_minor?: unknown } }
+      | undefined;
+    expect(String(paid?.after?.received_minor)).toBe('90000');
+    expect(String(paid?.after?.variance_minor)).toBe('10000');
+  });
+
+  it('defaults received_minor to the full claimed amount when omitted', async () => {
+    const tok = await tokenFor('ADMIN');
+    const seeded = seedPendingClaim();
+    seeded.status = 'INVOICED';
+    await request(app)
+      .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .send({ paid_on: '2026-05-14' });
+    const paid = auditCalls.find((c) => c.action === 'commission_claim.paid') as
+      | { after?: { received_minor?: unknown; variance_minor?: unknown } }
+      | undefined;
+    expect(String(paid?.after?.received_minor)).toBe('100000');
+    expect(String(paid?.after?.variance_minor)).toBe('0');
   });
 
   it('cannot dispute a PAID claim (409 Conflict — terminal)', async () => {

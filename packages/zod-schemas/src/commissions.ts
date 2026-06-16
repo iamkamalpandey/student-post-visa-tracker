@@ -41,6 +41,11 @@ export const MarkPaidRequest = z
   .object({
     paid_on: Iso8601Date,
     payment_reference: z.string().min(1).max(120).optional(),
+    // SVT-FIN-2026-06 — what the institution ACTUALLY paid (minor units). Lets
+    // the register reconcile claimed-vs-received; a short-payment leaves a
+    // recorded variance instead of silently looking fully paid. Defaults to the
+    // full claimed amount when omitted.
+    received_minor: z.coerce.bigint().nonnegative().optional(),
   })
   .strict();
 export type MarkPaidRequest = z.infer<typeof MarkPaidRequest>;

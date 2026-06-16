@@ -279,12 +279,16 @@ export async function markPaid(req: Request, id: string, body: MarkPaidRequest) 
   if (before.status !== 'INVOICED') {
     throw Conflict(`Cannot mark-paid from status ${before.status}; only INVOICED is allowed`);
   }
+  // SVT-FIN-2026-06 — record what was actually received so claimed-vs-received
+  // variance is visible; default to the full claimed amount when omitted.
+  const receivedMinor = body.received_minor ?? before.amount_minor;
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
   const wr = await db(req).commissionClaim.updateMany({
     where: { id, tenant_id: tid, deleted_at: null },
     data: {
       status: 'PAID',
       paid_on: new Date(body.paid_on),
+      received_minor: receivedMinor,
       payment_reference: body.payment_reference ?? null,
       updated_by_id: sub,
       version: { increment: 1 },
@@ -305,6 +309,9 @@ export async function markPaid(req: Request, id: string, body: MarkPaidRequest) 
       status: after.status,
       paid_on: after.paid_on,
       payment_reference: after.payment_reference,
+      received_minor: receivedMinor,
+      // Positive => short-payment (received less than claimed).
+      variance_minor: before.amount_minor - receivedMinor,
     },
   });
   // SVT-WAVE6-TXN-NOTIFY: PAID is the money-landed signal — admin almost
