@@ -46,25 +46,34 @@ vi.mock('../src/config/db.js', () => {
         // Crude OR-clause evaluator that mirrors the production Prisma query
         // shape used by /comms/threads?q=... — substring match on subject or
         // any student name field. Good enough to exercise the controller path.
+        // The controller wraps the q-search OR inside an AND so it can coexist
+        // with the (non-admin) ownership OR — Prisma allows only one top-level
+        // OR. So we evaluate BOTH a bare where.OR and every where.AND[].OR.
+        const orMatch = (t: ThreadRow, ors: Array<Record<string, unknown>>): boolean =>
+          ors.some((clause) => {
+            const sub = clause['subject'] as { contains?: string } | undefined;
+            if (sub?.contains) {
+              return (t.subject ?? '').toLowerCase().includes(sub.contains.toLowerCase());
+            }
+            const stu = clause['student'] as { is?: Record<string, { contains?: string }> } | undefined;
+            if (stu?.is) {
+              for (const [field, cond] of Object.entries(stu.is)) {
+                const needle = (cond as { contains?: string }).contains;
+                const haystack = (t.student as Record<string, string | undefined> | null | undefined)?.[field];
+                if (needle && haystack && haystack.toLowerCase().includes(needle.toLowerCase())) return true;
+              }
+            }
+            return false;
+          });
         if (Array.isArray(where['OR'])) {
-          const ors = where['OR'] as Array<Record<string, unknown>>;
-          rows = rows.filter((t) =>
-            ors.some((clause) => {
-              const sub = clause['subject'] as { contains?: string } | undefined;
-              if (sub?.contains) {
-                return (t.subject ?? '').toLowerCase().includes(sub.contains.toLowerCase());
-              }
-              const stu = clause['student'] as { is?: Record<string, { contains?: string }> } | undefined;
-              if (stu?.is) {
-                for (const [field, cond] of Object.entries(stu.is)) {
-                  const needle = (cond as { contains?: string }).contains;
-                  const haystack = (t.student as Record<string, string | undefined> | null | undefined)?.[field];
-                  if (needle && haystack && haystack.toLowerCase().includes(needle.toLowerCase())) return true;
-                }
-              }
-              return false;
-            }),
-          );
+          rows = rows.filter((t) => orMatch(t, where['OR'] as Array<Record<string, unknown>>));
+        }
+        if (Array.isArray(where['AND'])) {
+          for (const sub of where['AND'] as Array<Record<string, unknown>>) {
+            if (Array.isArray(sub['OR'])) {
+              rows = rows.filter((t) => orMatch(t, sub['OR'] as Array<Record<string, unknown>>));
+            }
+          }
         }
         rows = rows.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
         return take ? rows.slice(0, take) : rows;

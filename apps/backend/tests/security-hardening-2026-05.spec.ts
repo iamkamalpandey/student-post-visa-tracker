@@ -401,7 +401,14 @@ describe('P1-8 /webhooks/resend fail-closed gate', () => {
     // gate trips. The route reads the env each request via readSecret() +
     // isSecretRequired(), so the test doesn't need to re-import the module.
     vi.stubEnv('NODE_ENV', 'development');
-    delete process.env['RESEND_WEBHOOK_SECRET'];
+    // Simulate an unconfigured secret. We stub to '' rather than delete: the
+    // config/env.ts module calls dotenv.config() at import time, so the
+    // vi.resetModules() re-import below would otherwise repopulate a *deleted*
+    // RESEND_WEBHOOK_SECRET from the local .env. dotenv never overrides a key
+    // that is already present (even when empty), and the route treats '' as
+    // unset, so this stays robust to the local .env and faithful to the prod
+    // "secret missing" case.
+    vi.stubEnv('RESEND_WEBHOOK_SECRET', '');
     // Re-import the routes module so the gate sees the updated env.
     vi.resetModules();
     const { webhooksRouter } = await import('../src/modules/comms/webhooks.routes.js');
