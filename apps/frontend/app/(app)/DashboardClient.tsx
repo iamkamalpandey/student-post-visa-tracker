@@ -111,6 +111,20 @@ type SlaBreachRow = {
   assigned_to_id: string | null;
 };
 
+// SVT-WAVE-ENGAGEMENT-2026-06 — attendance / engagement at-risk row.
+type EngagementRiskRow = {
+  student_id: string;
+  student_code: string;
+  given_name: string;
+  family_name: string;
+  assigned_to_id: string | null;
+  total_count: number;
+  present_count: number;
+  absent_count: number;
+  attendance_rate: number; // 0..1
+  last_check_date: string | null;
+};
+
 function unwrap<T>(payload: unknown): T {
   if (payload && typeof payload === 'object' && 'data' in (payload as Record<string, unknown>)) {
     return (payload as { data: T }).data;
@@ -438,6 +452,20 @@ export default function DashboardClient() {
     queryFn: async () => {
       const res = await api.get('/dashboard/sla-breaches', { params: { limit: 10 } });
       return res.data as { data: SlaBreachRow[]; page: { total: number } };
+    },
+    staleTime: 30_000,
+    placeholderData: (prev) => prev,
+  });
+
+  // SVT-WAVE-ENGAGEMENT-2026-06 — attendance at-risk surface. Server scopes a
+  // counsellor to their own caseload; shown to all roles (not admin-gated).
+  // Independent query so the rest of the dashboard renders even when no
+  // engagement checks have been recorded yet.
+  const engagementQuery = useQuery<{ data: EngagementRiskRow[]; page: { total: number } }>({
+    queryKey: ['dashboard', 'engagement-at-risk'],
+    queryFn: async () => {
+      const res = await api.get('/dashboard/engagement-at-risk', { params: { limit: 10 } });
+      return res.data as { data: EngagementRiskRow[]; page: { total: number } };
     },
     staleTime: 30_000,
     placeholderData: (prev) => prev,
@@ -1275,6 +1303,83 @@ export default function DashboardClient() {
                     <ArrowForwardOutlinedIcon fontSize="inherit" />
                   </MuiLink>
                 </Box>
+              </SectionCard>
+            ) : null}
+
+            {/* SVT-WAVE-ENGAGEMENT-2026-06 — attendance at-risk widget. Hidden
+                when nothing is actionable (no recorded checks below threshold)
+                so a fully-engaged cohort doesn't show an empty card. */}
+            {(engagementQuery.data?.data ?? []).length > 0 ? (
+              <SectionCard
+                title="Engagement at risk"
+                subtitle="Students whose recent attendance has dropped — lowest first"
+                action={
+                  <Chip
+                    size="small"
+                    color="error"
+                    variant="outlined"
+                    label={`${engagementQuery.data?.page.total ?? 0} total`}
+                  />
+                }
+              >
+                <Stack spacing={0} divider={<Divider flexItem />}>
+                  {(engagementQuery.data?.data ?? []).slice(0, 8).map((row) => {
+                    const pct = Math.round(row.attendance_rate * 100);
+                    return (
+                      <Stack
+                        key={row.student_id}
+                        direction="row"
+                        spacing={1.5}
+                        alignItems="center"
+                        sx={{
+                          py: 1.25,
+                          minWidth: 0,
+                          borderLeft: '3px solid #EF5350',
+                          pl: 1.25,
+                        }}
+                      >
+                        <EventBusyOutlinedIcon sx={{ color: 'error.main', fontSize: 18 }} />
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <MuiLink
+                              component={NextLink}
+                              href={`/students/${row.student_id}`}
+                              underline="hover"
+                              onMouseEnter={() =>
+                                prefetch.onEnter(row.student_id, `/students/${row.student_id}`)
+                              }
+                              onMouseLeave={prefetch.onLeave}
+                              sx={{
+                                fontWeight: 600,
+                                color: 'text.primary',
+                                fontSize: 13,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                              title={`${row.given_name} ${row.family_name}`}
+                            >
+                              {row.given_name} {row.family_name}
+                            </MuiLink>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ fontFamily: 'monospace' }}
+                              noWrap
+                            >
+                              {row.student_code}
+                            </Typography>
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary" noWrap>
+                            {row.present_count}/{row.total_count} present
+                            {row.last_check_date ? ` · last ${formatRelative(row.last_check_date)}` : ''}
+                          </Typography>
+                        </Box>
+                        <Chip size="small" color="error" label={`${pct}%`} />
+                      </Stack>
+                    );
+                  })}
+                </Stack>
               </SectionCard>
             ) : null}
 
