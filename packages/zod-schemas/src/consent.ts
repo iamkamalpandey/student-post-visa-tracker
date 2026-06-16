@@ -18,9 +18,23 @@ export const CreateConsentRequest = z
     purpose: z.string().min(1).max(200),
     lawful_basis: LawfulBasisEnum,
     granted: z.boolean(),
+    // GDPR Art. 6(1)(f) — relying on legitimate interests requires a documented
+    // legitimate-interests assessment (the balancing test). Required by the
+    // superRefine below whenever that basis is used.
+    justification: z.string().min(1).max(4000).optional(),
     evidence: z.record(z.string(), z.unknown()).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.lawful_basis === 'LEGITIMATE_INTEREST' && !v.justification?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['justification'],
+        message:
+          'justification (legitimate-interests balancing test) is required when lawful_basis is LEGITIMATE_INTEREST',
+      });
+    }
+  });
 export type CreateConsentRequest = z.infer<typeof CreateConsentRequest>;
 
 export const ConsentListQuery = PaginationQuery.extend({

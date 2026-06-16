@@ -128,3 +128,28 @@ describe('sub-module CreateXRequest schemas', () => {
     });
   }
 });
+
+describe('CreateConsentRequest — GDPR Art. 6(1)(f) balancing test', () => {
+  const base = { subject_type: 'student', subject_id: U, purpose: 'marketing analytics', granted: true };
+
+  it('requires justification when lawful_basis is LEGITIMATE_INTEREST', () => {
+    expect(
+      CreateConsentRequest.safeParse({ ...base, lawful_basis: 'LEGITIMATE_INTEREST' }).success,
+    ).toBe(false);
+    expect(
+      CreateConsentRequest.safeParse({ ...base, lawful_basis: 'LEGITIMATE_INTEREST', justification: '   ' }).success,
+    ).toBe(false);
+    expect(
+      CreateConsentRequest.safeParse({
+        ...base,
+        lawful_basis: 'LEGITIMATE_INTEREST',
+        justification: 'LIA: necessity established, balanced against the data subject rights; opt-out offered.',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('does not require justification for other lawful bases', () => {
+    expect(CreateConsentRequest.safeParse({ ...base, lawful_basis: 'CONSENT' }).success).toBe(true);
+    expect(CreateConsentRequest.safeParse({ ...base, lawful_basis: 'CONTRACT' }).success).toBe(true);
+  });
+});

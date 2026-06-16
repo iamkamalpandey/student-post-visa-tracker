@@ -294,6 +294,9 @@ model ConsentRecord {
   purpose      String
   lawful_basis LawfulBasis
   granted      Boolean
+  // GDPR Art. 6(1)(f) legitimate-interests assessment (balancing test). Required
+  // by the API when lawful_basis = LEGITIMATE_INTEREST (CreateConsentRequest).
+  justification String?
   evidence     Json?
   granted_at   DateTime  @default(now()) @db.Timestamptz
   revoked_at   DateTime? @db.Timestamptz
