@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Prisma } from '@prisma/client';
 import { findUpcomingExpiries } from '../../jobs/expiryAlerts.js';
 import { Unauthorized, Forbidden } from '../../shared/errors.js';
 
@@ -336,6 +337,122 @@ dashboardRouter.get('/sla-breaches', async (req, res, next) => {
       data: breached.slice(0, limit),
       page: { total: breached.length },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// SVT-WAVE-ENGAGEMENT-2026-06 — attendance / engagement at-risk students.
+//
+// A sponsored student must keep "engaging" with their course (UKVI sponsor
+// duties; analogous SEVIS / GTE obligations elsewhere). When attendance drops
+// the agency has a window to intervene BEFORE it becomes a reportable
+// sponsor-duty breach. This surfaces ACTIVE students whose attendance rate
+// over a recent window has fallen below a threshold.
+//
+// at_risk := present/total < threshold over check_date >= now-within_days,
+//            among students with >= min_checks recorded in the window.
+// Defaults: within_days=30, threshold=0.80, min_checks=3.
+//
+// Scope: ACTIVE only (a paused / terminal student has no live engagement
+// duty — same rationale as /sla-breaches). Role-scoped: COUNSELLOR sees own
+// caseload, ADMIN tenant-wide. Defence-in-depth tenant_id predicate on top of
+// the RLS-scoped req.db. Students with ZERO checks in the window are NOT
+// returned here (no rate computable) — that "no engagement recorded" signal
+// is a separate concern and intentionally out of scope for this rate metric.
+dashboardRouter.get('/engagement-at-risk', async (req, res, next) => {
+  try {
+    const tenantId = req.user?.tid;
+    if (!tenantId) throw Unauthorized();
+    const db = req.db;
+    if (!db) throw new Error('tenantContext middleware not applied');
+    const userId = req.user?.sub;
+    const role = req.user?.role;
+    // A counsellor with no resolvable id has an empty caseload — never widen.
+    if (role !== 'ADMIN' && !userId) {
+      res.json({ data: [], page: { total: 0 } });
+      return;
+    }
+
+    const withinDays = Math.min(
+      365,
+      Math.max(7, Number.parseInt(String(req.query['within_days'] ?? '30'), 10) || 30),
+    );
+    const threshold = Math.min(
+      1,
+      Math.max(0.1, Number.parseFloat(String(req.query['threshold'] ?? '0.8')) || 0.8),
+    );
+    const minChecks = Math.min(
+      100,
+      Math.max(1, Number.parseInt(String(req.query['min_checks'] ?? '3'), 10) || 3),
+    );
+    const limit = Math.min(
+      200,
+      Math.max(1, Number.parseInt(String(req.query['limit'] ?? '50'), 10) || 50),
+    );
+    // Hard cap on the at-risk set we materialise; total reflects the capped
+    // set (mirrors /sla-breaches). At-risk students are a small subset so this
+    // is generous headroom, not a real truncation point in practice.
+    const HARD_CAP = 1000;
+
+    // Date-only cutoff so the comparison stays date-to-date (check_date is a DATE).
+    const cutoff = new Date(Date.now() - withinDays * 86_400_000).toISOString().slice(0, 10);
+
+    const scopeFrag =
+      role === 'ADMIN' ? Prisma.empty : Prisma.sql`AND s.assigned_to_id = ${userId}::uuid`;
+
+    const rows = await db.$queryRaw<
+      Array<{
+        student_id: string;
+        student_code: string | null;
+        given_name: string | null;
+        family_name: string | null;
+        assigned_to_id: string | null;
+        total_count: number;
+        present_count: number;
+        last_check_date: Date | null;
+      }>
+    >(Prisma.sql`
+      SELECT s.id AS student_id, s.student_code, s.given_name, s.family_name,
+             s.assigned_to_id,
+             COUNT(e.*)::int AS total_count,
+             COUNT(e.*) FILTER (WHERE e.present)::int AS present_count,
+             MAX(e.check_date) AS last_check_date
+      FROM students s
+      JOIN engagement_checks e
+        ON e.student_id = s.id AND e.tenant_id = s.tenant_id
+      WHERE s.tenant_id = ${tenantId}::uuid
+        AND s.deleted_at IS NULL
+        AND s.status = 'ACTIVE'
+        AND e.check_date >= ${cutoff}::date
+        ${scopeFrag}
+      GROUP BY s.id
+      HAVING COUNT(e.*) >= ${minChecks}
+         AND (COUNT(e.*) FILTER (WHERE e.present))::numeric / COUNT(e.*) < ${threshold}
+      ORDER BY (COUNT(e.*) FILTER (WHERE e.present))::numeric / COUNT(e.*) ASC,
+               MAX(e.check_date) ASC
+      LIMIT ${HARD_CAP}
+    `);
+
+    const data = rows.map((r) => {
+      const total = Number(r.total_count);
+      const present = Number(r.present_count);
+      const rate = total > 0 ? Math.round((present / total) * 10_000) / 10_000 : 0;
+      return {
+        student_id: r.student_id,
+        student_code: r.student_code,
+        given_name: r.given_name,
+        family_name: r.family_name,
+        assigned_to_id: r.assigned_to_id,
+        total_count: total,
+        present_count: present,
+        absent_count: total - present,
+        attendance_rate: rate,
+        last_check_date: r.last_check_date,
+      };
+    });
+
+    res.json({ data: data.slice(0, limit), page: { total: data.length } });
   } catch (err) {
     next(err);
   }
