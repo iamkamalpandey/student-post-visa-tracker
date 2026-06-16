@@ -31,6 +31,9 @@ type FormValues = {
   purpose: string;
   lawful_basis: (typeof LawfulBasisEnum.options)[number];
   granted: boolean;
+  // GDPR Art. 6(1)(f) legitimate-interests assessment — required by the API
+  // (and shown below) only when lawful_basis is LEGITIMATE_INTEREST.
+  justification?: string;
 };
 
 const SUBJECT_TYPES = [
@@ -85,6 +88,7 @@ export default function CreateConsentDialog({ open, onClose }: CreateConsentDial
   });
 
   const subjectType = watch('subject_type');
+  const lawfulBasis = watch('lawful_basis');
 
   const lookupQuery = useQuery({
     queryKey: ['privacy', 'subject-lookup', subjectType, subjectQuery],
@@ -128,7 +132,8 @@ export default function CreateConsentDialog({ open, onClose }: CreateConsentDial
             fe.path === 'subject_id' ||
             fe.path === 'purpose' ||
             fe.path === 'lawful_basis' ||
-            fe.path === 'granted'
+            fe.path === 'granted' ||
+            fe.path === 'justification'
           ) {
             setError(fe.path as keyof FormValues, { type: 'server', message: fe.message });
           }
@@ -306,6 +311,29 @@ export default function CreateConsentDialog({ open, onClose }: CreateConsentDial
               )}
             />
           </LabeledField>
+          {lawfulBasis === 'LEGITIMATE_INTEREST' && (
+            <LabeledField
+              label="Legitimate-interests assessment"
+              required
+              error={Boolean(errors.justification)}
+              helperText={
+                errors.justification?.message ??
+                'GDPR Art. 6(1)(f): document the balancing test — the interest pursued, why processing is necessary, and how it is balanced against the data subject’s rights.'
+              }
+              htmlFor="consent-justification"
+            >
+              <TextField
+                id="consent-justification"
+                fullWidth
+                hiddenLabel
+                multiline
+                minRows={3}
+                placeholder="Necessity established for…; balanced against the subject’s rights by…; opt-out offered."
+                error={Boolean(errors.justification)}
+                {...register('justification')}
+              />
+            </LabeledField>
+          )}
           <Controller
             name="granted"
             control={control}
