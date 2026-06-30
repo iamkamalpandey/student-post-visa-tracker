@@ -30,7 +30,8 @@ async function withTenantTx<T>(
 
 // Return value only if it is one of the allowed enum values, else null. Keeps
 // a row insertable when V2 carries a value outside SPVT's mirrored enum.
-function oneOf<T extends string>(value: string | null | undefined, allowed: readonly T[]): T | null {
+// Exported for unit coverage (tests/v2-ingest.spec.ts).
+export function oneOf<T extends string>(value: string | null | undefined, allowed: readonly T[]): T | null {
   return value != null && (allowed as readonly string[]).includes(value) ? (value as T) : null;
 }
 
@@ -64,7 +65,9 @@ const LEGACY_STATE_TO_ENUM: Record<string, (typeof LEAD_COURSE_STATES)[number]> 
   'application form': 'application_form',
 };
 
-function leadCourseStateEnum(
+// Exported for unit coverage (tests/v2-ingest.spec.ts) — the ambiguous→null
+// rule directly gates post-visa fee seeding, so it is a money-correctness path.
+export function leadCourseStateEnum(
   stateV2: string | null | undefined,
   legacyState: string | null | undefined,
 ): (typeof LEAD_COURSE_STATES)[number] | null {
