@@ -122,3 +122,14 @@ jobs:
 
       - name: Test
         run: pnpm --filter backend test
+
+      # SVT-CI-COVERAGE-2026-06 — coverage VISIBILITY (non-blocking for now).
+      # @vitest/coverage-v8 is now installed and the thresholds live in
+      # apps/backend/vitest.config.ts (70/70/70/60), but they have never been
+      # measured on a clean runner, so we report here without failing the
+      # build. Once CI prints a confirmed baseline at/above the thresholds,
+      # flip this to the gating `test:coverage` (drop continue-on-error) so a
+      # coverage regression blocks the merge.
+      - name: Coverage report (non-blocking until baseline confirmed)
+        continue-on-error: true
+        run: pnpm --filter backend test:coverage
