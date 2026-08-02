@@ -39,7 +39,7 @@ jobs:
     kind: PRE_DEPLOY
     source_dir: /
     github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
-    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend build
+    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend exec prisma generate && pnpm --filter backend build
     run_command: pnpm --filter backend prisma:migrate:deploy
     instance_size_slug: basic-xxs
     envs:
@@ -50,7 +50,7 @@ services:
   - name: backend
     source_dir: /
     github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
-    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend build && pnpm --filter backend exec prisma generate
+    build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend exec prisma generate && pnpm --filter backend build
     run_command: pnpm --filter backend start
     http_port: 4000
     # Scheduler uses Postgres advisory locks, so >1 instance is safe (extra
