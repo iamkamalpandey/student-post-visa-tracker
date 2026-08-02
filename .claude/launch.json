@@ -8,6 +8,14 @@
       "cwd": "apps/frontend",
       "port": 3001,
       "autoPort": false
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "watch", "src/server.ts"],
+      "cwd": "apps/backend",
+      "port": 4000,
+      "autoPort": false
     }
   ]
 }

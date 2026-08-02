@@ -99,6 +99,17 @@ const EnvSchema = z.object({
   STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   STORAGE_LOCAL_ROOT: z.string().default('./storage'),
 
+  // --- S3 / DO Spaces Configuration ---
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().min(1).optional(),
+  S3_BUCKET: z.string().min(1).optional(),
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+
+  // --- ClamAV Configuration ---
+  CLAMAV_HOST: z.string().optional(),
+  CLAMAV_PORT: z.coerce.number().int().positive().default(3310),
+
   RATE_LIMIT_GLOBAL_PER_MINUTE: z.coerce.number().int().positive().default(600),
   // 5 attempts/min — protects against credential stuffing. The 6th request
   // inside a 60s window returns 429. Account-level lockout (5 fails / 15 min)
@@ -263,6 +274,15 @@ const EnvSchema = z.object({
       path: ['V2_MIS_DATABASE_URL'],
       message: 'V2_MIS_DATABASE_URL is required when V2_INGEST_ENABLED=true',
     });
+  }
+
+  // --- S3 storage driver validation ---
+  if (cfg.STORAGE_DRIVER === 's3') {
+    if (!cfg.S3_ENDPOINT) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_ENDPOINT'], message: 'S3_ENDPOINT is required when STORAGE_DRIVER=s3' });
+    if (!cfg.S3_REGION) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_REGION'], message: 'S3_REGION is required when STORAGE_DRIVER=s3' });
+    if (!cfg.S3_BUCKET) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_BUCKET'], message: 'S3_BUCKET is required when STORAGE_DRIVER=s3' });
+    if (!cfg.S3_ACCESS_KEY_ID) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_ACCESS_KEY_ID'], message: 'S3_ACCESS_KEY_ID is required when STORAGE_DRIVER=s3' });
+    if (!cfg.S3_SECRET_ACCESS_KEY) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['S3_SECRET_ACCESS_KEY'], message: 'S3_SECRET_ACCESS_KEY is required when STORAGE_DRIVER=s3' });
   }
   if (cfg.V2_INGEST_ENABLED && !cfg.V2_INGEST_TENANT_ID) {
     ctx.addIssue({

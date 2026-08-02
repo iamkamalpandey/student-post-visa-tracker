@@ -156,16 +156,93 @@ class LocalStorage implements ObjectStorage {
   }
 }
 
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
+
 // ----------------------------------------------------------------------------
-// S3 stub
+// S3 / DO Spaces implementation
 // ----------------------------------------------------------------------------
-// Intentionally throws so that misconfigured production deployments fail
-// loudly during the first put/get rather than silently writing nothing.
-class S3StorageStub implements ObjectStorage {
-  async put(): Promise<void> { throw new Error('Configure S3 driver for production'); }
-  async get(): Promise<Buffer> { throw new Error('Configure S3 driver for production'); }
-  async delete(): Promise<void> { throw new Error('Configure S3 driver for production'); }
-  async exists(): Promise<boolean> { throw new Error('Configure S3 driver for production'); }
+class S3Storage implements ObjectStorage {
+  private readonly client: S3Client;
+  private readonly bucket: string;
+
+  constructor() {
+    if (!env.S3_BUCKET || !env.S3_REGION || !env.S3_ACCESS_KEY_ID || !env.S3_SECRET_ACCESS_KEY) {
+      throw new Error('Missing S3 configuration in environment');
+    }
+    this.bucket = env.S3_BUCKET;
+    this.client = new S3Client({
+      region: env.S3_REGION,
+      endpoint: env.S3_ENDPOINT, // Required for DO Spaces or MinIO
+      credentials: {
+        accessKeyId: env.S3_ACCESS_KEY_ID,
+        secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+      },
+      // DO Spaces requires path style or virtual host style depending on setup,
+      // forcePathStyle is usually safer for third-party S3 compatible endpoints.
+      forcePathStyle: false,
+    });
+  }
+
+  async put(key: string, data: Buffer, contentType: string): Promise<void> {
+    const { encryptField } = await import('../../shared/encryption.js');
+    const ciphertext = await encryptField(data);
+
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: ciphertext,
+        ContentType: contentType,
+      })
+    );
+  }
+
+  async get(key: string): Promise<Buffer> {
+    const response = await this.client.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      })
+    );
+    if (!response.Body) throw new Error('Empty S3 object body');
+    const blob = Buffer.from(await response.Body.transformToByteArray());
+
+    const { decryptFieldRaw, isCiphertext } = await import('../../shared/encryption.js');
+    if (isCiphertext(blob)) {
+      return await decryptFieldRaw(blob);
+    }
+    return blob;
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      })
+    ).catch(() => undefined); // Best-effort idempotent delete
+  }
+
+  async exists(key: string): Promise<boolean> {
+    try {
+      await this.client.send(
+        new HeadObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        })
+      );
+      return true;
+    } catch (err: any) {
+      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) return false;
+      throw err;
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -177,7 +254,7 @@ export function getStorage(): ObjectStorage {
   if (env.STORAGE_DRIVER === 'local') {
     cached = new LocalStorage(env.STORAGE_LOCAL_ROOT);
   } else {
-    cached = new S3StorageStub();
+    cached = new S3Storage();
   }
   return cached;
 }

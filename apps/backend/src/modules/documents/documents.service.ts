@@ -32,6 +32,7 @@ import type { AccessTokenClaims } from '../../shared/jwt.js';
 import { scanBuffer } from './av.js';
 import { ALLOWED_MIME, MAX_UPLOAD_BYTES, detectMime, mimeToExt } from './mime.js';
 import { buildStorageKey, getStorage, sha256Hex } from './storage.js';
+import { env } from '../../config/env.js';
 
 // Caller context — the RLS-scoped Prisma client (tenantContext middleware
 // attaches it as req.db) plus the authenticated principal and the request
@@ -141,21 +142,22 @@ export async function createDocument(ctx: ServiceContext, args: CreateDocumentAr
   // 3. SHA-256 fingerprint (used for dedup analytics + integrity).
   const sha256 = sha256Hex(args.buffer);
 
-  // 4. Antivirus scan. We scan *before* persisting — clean is the only path
-  //    that reaches storage.put. If the scanner is unreachable we record
-  //    av_status = ERROR and refuse the upload.
-  const scan = await scanBuffer(args.buffer);
-  if (scan.result === 'INFECTED') {
-    await writeAudit({
-      tenantId, actorId: ctx.user.sub, action: 'document.upload_rejected_infected',
-      entityType: 'Document', entityId: null,
-      after: { sha256, signature: scan.signature ?? null },
-      ip: ctx.ip, ua: ctx.ua, requestId: ctx.requestId,
-    });
-    throw UnprocessableEntity(`File rejected by antivirus: ${scan.signature ?? 'unknown signature'}`);
-  }
-  if (scan.result === 'ERROR') {
-    throw UnprocessableEntity('Antivirus scan failed; please retry');
+  // 4. Antivirus scan (Optional). If CLAMAV_HOST is not set, we assume trusted environment
+  //    and bypass the scan (e.g. for small teams avoiding the cost of a ClamAV droplet).
+  if (env.CLAMAV_HOST) {
+    const scan = await scanBuffer(args.buffer, { host: env.CLAMAV_HOST, port: env.CLAMAV_PORT });
+    if (scan.result === 'INFECTED') {
+      await writeAudit({
+        tenantId, actorId: ctx.user.sub, action: 'document.upload_rejected_infected',
+        entityType: 'Document', entityId: null,
+        after: { sha256, signature: scan.signature ?? null },
+        ip: ctx.ip, ua: ctx.ua, requestId: ctx.requestId,
+      });
+      throw UnprocessableEntity(`File rejected by antivirus: ${scan.signature ?? 'unknown signature'}`);
+    }
+    if (scan.result === 'ERROR') {
+      throw UnprocessableEntity('Antivirus scan failed; please retry');
+    }
   }
 
   // 5. Optional EXIF strip (no-op until sharp is wired — see comment above).

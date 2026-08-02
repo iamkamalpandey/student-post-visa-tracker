@@ -27,10 +27,10 @@ databases:
     engine: PG
     version: "16"
     production: true
-  - name: spvt-redis
-    engine: REDIS
-    version: "7"
-    production: true
+#  - name: spvt-redis
+#    engine: REDIS
+#    version: "7"
+#    production: true
 
 # Pre-deploy migration job — runs ONCE before new instances go live so multiple
 # service instances never race on schema migrations.
@@ -76,7 +76,8 @@ services:
       # Owner/admin role — runs DDL (prisma migrate PRE_DEPLOY job) + the narrow
       # auth-time BYPASS-RLS lookups (prismaAdmin). Admin is correct here.
       - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
-      - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
+      # Optional Redis (used for multi-instance rate limiting/nonces). Uncomment if scaling beyond 1 instance:
+      # - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
       # CORS_ORIGIN has NO default — backend won't boot without it (any env).
       - { key: CORS_ORIGIN, scope: RUN_TIME, value: "${frontend.PUBLIC_URL}" }
       # --- Auth / crypto (set every SECRET in the DO dashboard) ---
@@ -104,12 +105,19 @@ services:
       - { key: EMAIL_PROVIDER, scope: RUN_TIME, value: "log" } # set "resend" + RESEND_API_KEY for real delivery
       - { key: EMAIL_FROM, scope: RUN_TIME, value: "noreply@spvt.example.com" }
       # - { key: RESEND_API_KEY, scope: RUN_TIME, type: SECRET }
-      # --- Document storage ---
-      # WARNING: App Platform container fs is EPHEMERAL — STORAGE_DRIVER=local LOSES
-      # uploaded documents on every redeploy. For production, use DO Spaces (S3-compat):
-      # STORAGE_DRIVER=s3 + S3_* — REQUIRES the S3 driver (documents/storage.ts) to be
-      # implemented (currently a stub). Local is dev/demo only.
-      - { key: STORAGE_DRIVER, scope: RUN_TIME, value: "local" }
+      # --- Document storage (DigitalOcean Spaces / S3) ---
+      # App Platform container fs is EPHEMERAL. For production, MUST use DO Spaces.
+      - { key: STORAGE_DRIVER, scope: RUN_TIME, value: "s3" }
+      - { key: S3_ENDPOINT, scope: RUN_TIME, type: SECRET } # e.g. https://blr1.digitaloceanspaces.com
+      - { key: S3_REGION, scope: RUN_TIME, value: "blr1" }
+      - { key: S3_BUCKET, scope: RUN_TIME, type: SECRET }
+      - { key: S3_ACCESS_KEY_ID, scope: RUN_TIME, type: SECRET }
+      - { key: S3_SECRET_ACCESS_KEY, scope: RUN_TIME, type: SECRET }
+      # --- ClamAV (Optional for small teams) ---
+      # Run a separate Droplet or App for ClamAV and set the connection here.
+      # If unset, antivirus scanning is safely bypassed.
+      # - { key: CLAMAV_HOST, scope: RUN_TIME, type: SECRET }
+      # - { key: CLAMAV_PORT, scope: RUN_TIME, value: "3310" }
       # --- V2 MIS read-only ingestion (Phase 2 security) ---
       # Use the PRIVATE host + spv_ro_ingest role; CA bundle for verified TLS.
       - { key: V2_MIS_DATABASE_URL, scope: RUN_TIME, type: SECRET }

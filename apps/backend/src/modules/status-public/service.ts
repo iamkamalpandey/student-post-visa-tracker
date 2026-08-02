@@ -108,11 +108,12 @@ async function checkAv(): Promise<PublicSubsystem | null> {
   // AV is similarly optional. Document uploads use ClamAV via av.ts when a
   // clamd is reachable on 127.0.0.1:3310; if no host is configured (operators
   // can opt in via CLAMAV_HOST / CLAMAV_PORT), we omit the row.
-  const host = process.env.CLAMAV_HOST;
+  const { env } = await import('../../config/env.js');
+  const host = env.CLAMAV_HOST;
   if (!host) return null;
   const name = 'Antivirus';
   const now = new Date().toISOString();
-  const port = Number.parseInt(process.env.CLAMAV_PORT ?? '3310', 10);
+  const port = env.CLAMAV_PORT;
   try {
     const { scanBuffer } = await import('../documents/av.js');
     // Scan an empty buffer — clamd responds with `stream: OK` for empty
