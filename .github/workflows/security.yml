@@ -133,7 +133,7 @@ jobs:
         run: docker build -f apps/frontend/Dockerfile -t spv-frontend:scan .
 
       - name: Scan backend image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: spv-backend:scan
           severity: CRITICAL,HIGH
@@ -144,7 +144,7 @@ jobs:
           output: 'trivy-backend.sarif'
 
       - name: Scan frontend image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: spv-frontend:scan
           severity: CRITICAL,HIGH
