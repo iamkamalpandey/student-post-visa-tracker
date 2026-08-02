@@ -9,7 +9,7 @@
 # Bump via Renovate/Dependabot weekly.
 #
 # Stage 1 — build pnpm workspace (only the packages backend depends on).
-FROM node:20-bookworm-slim AS deps
+FROM node:25-bookworm-slim AS deps
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /repo
@@ -33,7 +33,7 @@ RUN pnpm --filter backend build
 # We deliberately do NOT use distroless: the Prisma binary engine
 # (engineType=binary in schema.prisma) dlopens libssl3 + libcrypto3 + libgcc, none of
 # which ship in distroless. node:20-bookworm-slim is ~70MB compressed and has them.
-FROM node:20-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production PORT=4000
 RUN apt-get update \
