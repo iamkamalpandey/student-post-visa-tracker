@@ -43,8 +43,8 @@ jobs:
     run_command: pnpm --filter backend prisma:migrate:deploy
     instance_size_slug: basic-xxs
     envs:
-      - { key: DATABASE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
-      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: DATABASE_URL, scope: RUN_TIME, type: SECRET }
+        - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
 
 services:
   - name: backend
