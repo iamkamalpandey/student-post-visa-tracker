@@ -3,7 +3,29 @@
 This document provides exact, click-by-click instructions for deploying the Student Post-Visa Tracker on Digital Ocean. These instructions are designed to be executed by a non-developer or an automated Browser AI Agent (like a web automation script).
 
 > [!IMPORTANT]
-> **Pre-requisites:** You must be logged into Digital Ocean (https://cloud.digitalocean.com/) and have your GitHub account linked.
+> **Pre-requisites:** You must be logged into Digital Ocean (https://cloud.digitalocean.com/) and have your GitHub account (https://github.com/) linked.
+
+---
+
+## 🚀 Stage 0: Push Code to GitHub
+
+**Goal:** Upload your local codebase to a new GitHub repository so Digital Ocean can access it.
+
+1. Navigate to: `https://github.com/new`
+2. Under **Repository name**, type `student-post-visa-tracker`.
+3. Keep it **Private** (recommended) or Public.
+4. Do **NOT** check "Add a README file". Just click the green **Create repository** button.
+5. Open your local PowerShell terminal.
+6. Copy and paste the following commands to push your code (replace the URL with your actual repository URL from step 4):
+
+```powershell
+Set-Location -Path "D:\Kamal Application\Student Post Visa Tracker"
+git add .
+git commit -m "chore: initial deployment commit"
+git branch -M main
+git remote add origin https://github.com/iamkamalpandey/student-post-visa-tracker.git
+git push -u origin main
+```
 
 ---
 
