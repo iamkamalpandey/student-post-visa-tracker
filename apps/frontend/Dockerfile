@@ -1,5 +1,5 @@
 # Multi-stage Docker build for the Next.js frontend.
-FROM node:20-bookworm-slim AS deps
+FROM node:25-bookworm-slim AS deps
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /repo
@@ -24,7 +24,7 @@ RUN pnpm --filter @spv/tsconfig --filter @spv/eslint-config --filter @spv/utils 
 ENV NEXT_OUTPUT=standalone
 RUN pnpm --filter frontend build
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0
 RUN apt-get update \
