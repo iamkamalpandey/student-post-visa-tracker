@@ -68,7 +68,11 @@ export default function SignOutEverywhereSection() {
               onClick={handleSignOut}
               disabled={busy}
             >
-              {busy ? 'Signing out…' : 'Sign out everywhere'}
+              {busy
+                ? 'Signing out…'
+                : user?.role === 'ADMIN'
+                  ? 'Sign out everywhere'
+                  : 'Sign out of this device'}
             </Button>
           </Box>
         </Stack>

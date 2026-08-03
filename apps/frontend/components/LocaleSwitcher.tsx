@@ -15,13 +15,14 @@ import CheckOutlinedIcon from '@mui/icons-material/CheckOutlined';
 import { setLocale } from '@/app/actions/set-locale';
 
 type LocaleOption = {
-  code: 'en' | 'ar' | 'ne';
+  code: 'en' | 'ar' | 'hi' | 'ne';
   label: string;
 };
 
 const LOCALES: LocaleOption[] = [
   { code: 'en', label: 'English' },
   { code: 'ar', label: 'العربية' },
+  { code: 'hi', label: 'हिन्दी' },
   { code: 'ne', label: 'नेपाली' },
 ];
 

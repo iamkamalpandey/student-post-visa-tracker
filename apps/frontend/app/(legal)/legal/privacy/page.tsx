@@ -117,7 +117,7 @@ export default async function PrivacyPage() {
           purpose, and processing location, is maintained at{' '}
           <Box
             component={Link}
-            href="/admin/sub-processors"
+            href="/sub-processors"
             sx={{
               color: 'primary.main',
               fontWeight: 500,
@@ -125,7 +125,7 @@ export default async function PrivacyPage() {
               '&:hover': { textDecoration: 'underline' },
             }}
           >
-            /admin/sub-processors
+            /sub-processors
           </Box>
           .
         </P>

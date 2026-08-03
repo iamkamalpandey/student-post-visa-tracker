@@ -41,7 +41,7 @@ import ArrowForwardOutlinedIcon from '@mui/icons-material/ArrowForwardOutlined';
 import HourglassBottomOutlinedIcon from '@mui/icons-material/HourglassBottomOutlined';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useStages, type StageLookup } from '@/lib/queries';
+import { useStages, useTenant, type StageLookup } from '@/lib/queries';
 import StageChip from '@/components/StageChip';
 import EmptyState from '@/components/EmptyState';
 import DensityToggle from '@/components/DensityToggle';
@@ -132,7 +132,9 @@ function unwrap<T>(payload: unknown): T {
   return payload as T;
 }
 
-const ORG_NAME = 'Default Tenant';
+// SVT-QA-2026-08 — was: hardcoded 'Default Tenant'. Now hydrated from
+// GET /tenants/me (admin-only route; falls back to '—' for non-admin
+// callers who can't read the tenant record).
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -425,6 +427,9 @@ export default function DashboardClient() {
   const fmt = useFormat();
   const [errorDismissed, setErrorDismissed] = useState(false);
   const t = useTranslations('dashboard');
+  // GET /tenants/me is ADMIN-only. useTenant() no-ops when disabled=false.
+  const tenantQuery = useTenant(user?.role === 'ADMIN');
+  const tenantName = tenantQuery.data?.name ?? '';
   const tPipeline = useTranslations('dashboard.pipeline');
   const tRecent = useTranslations('dashboard.recent');
   const tExp = useTranslations('dashboard.expiries');
@@ -660,7 +665,7 @@ export default function DashboardClient() {
                 </Typography>
               )}
               <Typography variant="body1" color="text.secondary">
-                {ORG_NAME} · {today}
+                {tenantName ? `${tenantName} · ${today}` : today}
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1} alignItems="center">

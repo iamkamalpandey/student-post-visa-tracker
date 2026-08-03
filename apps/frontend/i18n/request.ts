@@ -1,7 +1,7 @@
 import { cookies } from 'next/headers';
 import { getRequestConfig } from 'next-intl/server';
 
-const SUPPORTED = ['en', 'ar', 'ne'] as const;
+const SUPPORTED = ['en', 'ar', 'hi', 'ne'] as const;
 type Locale = (typeof SUPPORTED)[number];
 
 function isLocale(value: string | undefined): value is Locale {
@@ -22,6 +22,9 @@ export default getRequestConfig(async () => {
   switch (locale) {
     case 'ar':
       messages = (await import('../messages/ar.json')).default;
+      break;
+    case 'hi':
+      messages = (await import('../messages/hi.json')).default;
       break;
     case 'ne':
       messages = (await import('../messages/ne.json')).default;

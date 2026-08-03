@@ -2,7 +2,7 @@
 
 import { cookies } from 'next/headers';
 
-const SUPPORTED = new Set(['en', 'ar', 'ne']);
+const SUPPORTED = new Set(['en', 'ar', 'hi', 'ne']);
 
 export async function setLocale(locale: string) {
   const value = SUPPORTED.has(locale) ? locale : 'en';

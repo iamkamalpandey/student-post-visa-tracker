@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from 'react';
 import NextLink from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Box, Button, Chip, Grid, Link as MuiLink, Paper, Stack, Tab, Tabs, Typography,
 } from '@mui/material';
@@ -41,6 +42,7 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
 type FeeAction = { kind: 'pay' | 'waive' | 'delete'; fee: CrmFeeRow } | null;
 
 export default function DetailClient({ id }: { id: string }) {
+  const router = useRouter();
   const { user } = useAuth();
   const fmt = useFormat();
   const { enqueueSnackbar } = useSnackbar();
@@ -248,7 +250,18 @@ export default function DetailClient({ id }: { id: string }) {
 
       {editOpen ? <EditLeadDialog open={editOpen} lead={lead} onClose={() => setEditOpen(false)} /> : null}
       {addFeeOpen ? <AddFeeDialog open={addFeeOpen} leadId={lead.id} onClose={() => setAddFeeOpen(false)} /> : null}
-      {convertOpen ? <ConvertToStudentDialog lead={lead} open={convertOpen} onClose={() => setConvertOpen(false)} onConverted={() => setConvertOpen(false)} /> : null}
+      {convertOpen ? (
+        <ConvertToStudentDialog
+          lead={lead}
+          open={convertOpen}
+          onClose={() => setConvertOpen(false)}
+          onConverted={(studentId, code) => {
+            setConvertOpen(false);
+            enqueueSnackbar(`Converted to student ${code}.`, { variant: 'success' });
+            router.push(`/students/${studentId}`);
+          }}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={Boolean(feeAction)}

@@ -26,6 +26,7 @@ import LoadingSkeleton from '@/components/LoadingSkeleton';
 import ListPageShell from '@/components/ListPageShell';
 import DataTable, { type DataTableColumn } from '@/components/DataTable';
 import CreateBreachDialog from '@/features/privacy/CreateBreachDialog';
+import ConfirmDialog from '@/components/ConfirmDialog';
 
 type Severity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -95,6 +96,14 @@ export default function BreachIncidentsPage() {
   const t = useTranslations('breach');
 
   const [createOpen, setCreateOpen] = useState(false);
+  // SVT-QA-2026-08 — Mark-reported and Mark-closed are timestamp writes that
+  // start / stop the GDPR Art. 33 clock and materially affect the audit chain.
+  // A stray IconButton click on the wrong row (they sit at the row end where
+  // touch users can easily mis-tap) should require an explicit confirmation.
+  const [confirmAction, setConfirmAction] = useState<
+    | { rowId: string; kind: 'report' | 'close'; label: string }
+    | null
+  >(null);
   // SVT-WAVE-HIGH-5-2026-05 — client-side filter chips (list capped at 100).
   // Severity = LOW|MEDIUM|HIGH|CRITICAL; lifecycle = OPEN|REPORTED|CLOSED.
   const [severityFilter, setSeverityFilter] = useState<Severity | 'ALL'>('ALL');
@@ -265,9 +274,10 @@ export default function BreachIncidentsPage() {
                   size="small"
                   disabled={Boolean(r.reported_at) || patchMut.isPending}
                   onClick={() =>
-                    patchMut.mutate({
-                      id: r.id,
-                      body: { reported_at: new Date().toISOString() },
+                    setConfirmAction({
+                      rowId: r.id,
+                      kind: 'report',
+                      label: r.description.slice(0, 60) || r.id.slice(0, 8),
                     })
                   }
                   aria-label={t('aria.markReported')}
@@ -282,9 +292,10 @@ export default function BreachIncidentsPage() {
                   size="small"
                   disabled={Boolean(r.closed_at) || patchMut.isPending}
                   onClick={() =>
-                    patchMut.mutate({
-                      id: r.id,
-                      body: { closed_at: new Date().toISOString() },
+                    setConfirmAction({
+                      rowId: r.id,
+                      kind: 'close',
+                      label: r.description.slice(0, 60) || r.id.slice(0, 8),
                     })
                   }
                   aria-label={t('aria.markClosed')}
@@ -437,6 +448,30 @@ export default function BreachIncidentsPage() {
       )}
 
       <CreateBreachDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <ConfirmDialog
+        open={Boolean(confirmAction)}
+        title={
+          confirmAction?.kind === 'report'
+            ? 'Mark breach as reported to the regulator?'
+            : 'Close this breach incident?'
+        }
+        description={
+          confirmAction?.kind === 'report'
+            ? `Stamp reported_at on "${confirmAction?.label}". This is a GDPR Art. 33 timestamp; it cannot be edited via the UI.`
+            : `Stamp closed_at on "${confirmAction?.label}". Reopen requires an admin console update.`
+        }
+        confirmText={confirmAction?.kind === 'report' ? 'Mark reported' : 'Mark closed'}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={() => {
+          if (!confirmAction) return;
+          const body =
+            confirmAction.kind === 'report'
+              ? { reported_at: new Date().toISOString() }
+              : { closed_at: new Date().toISOString() };
+          patchMut.mutate({ id: confirmAction.rowId, body });
+          setConfirmAction(null);
+        }}
+      />
     </ListPageShell>
   );
 }
