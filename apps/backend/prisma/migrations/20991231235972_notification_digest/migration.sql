@@ -9,7 +9,10 @@
 -- OFF       — backstop alongside notifications_email_enabled=false.
 -- ============================================================================
 
-CREATE TYPE "NotificationDigest" AS ENUM ('PER_EVENT', 'DAILY', 'OFF');
+DO $$ BEGIN
+  CREATE TYPE "NotificationDigest" AS ENUM ('PER_EVENT', 'DAILY', 'OFF');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS notifications_digest "NotificationDigest" NOT NULL DEFAULT 'PER_EVENT';
