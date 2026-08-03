@@ -51,3 +51,59 @@ adminV2DiagnosticsRouter.get(
     }
   },
 );
+
+// SVT-V2-DIAG-2026-08-02 — expose entity counts + join-match stats so we can
+// tell why the /applications list is so small despite many visa-accepted lead
+// courses. The list SQL matches crm_applications to crm_lead_courses on the
+// (v2_lead_id, v2_course_id) pair, so if applications carry a different
+// v2_course_id than the visa-accepted lead-course (e.g. the funnel state sits
+// on a different course than the one the applicant applied for), the match
+// drops silently and the queue looks empty.
+adminV2DiagnosticsRouter.get(
+  '/entity-counts',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) throw Unauthorized();
+      if (!req.db) throw new Error('tenantContext middleware not applied');
+      const tenantId = req.user.tid;
+
+      const rows = await (req.db as unknown as {
+        $queryRaw: <T>(q: Prisma.Sql) => Promise<T>;
+      }).$queryRaw<Array<Record<string, bigint>>>(
+        Prisma.sql`
+          SELECT
+            (SELECT COUNT(*) FROM crm_leads WHERE tenant_id = ${tenantId}::uuid AND deleted_at IS NULL) AS leads_total,
+            (SELECT COUNT(*) FROM crm_applications WHERE tenant_id = ${tenantId}::uuid AND deleted_at IS NULL) AS applications_total,
+            (SELECT COUNT(*) FROM crm_courses WHERE tenant_id = ${tenantId}::uuid AND deleted_at IS NULL) AS courses_total,
+            (SELECT COUNT(*) FROM crm_lead_courses WHERE tenant_id = ${tenantId}::uuid AND deleted_at IS NULL) AS lead_courses_total,
+            (SELECT COUNT(*) FROM crm_lead_courses WHERE tenant_id = ${tenantId}::uuid AND state_v2 = 'visa_accepted' AND deleted_at IS NULL) AS lead_courses_visa_accepted,
+            (SELECT COUNT(*) FROM crm_applications a
+               WHERE a.tenant_id = ${tenantId}::uuid AND a.deleted_at IS NULL
+                 AND EXISTS (
+                   SELECT 1 FROM crm_lead_courses lc
+                    WHERE lc.tenant_id = ${tenantId}::uuid
+                      AND lc.state_v2 = 'visa_accepted'
+                      AND lc.deleted_at IS NULL
+                      AND lc.v2_lead_id = a.v2_lead_id
+                      AND lc.v2_course_id = a.v2_course_id
+                 )) AS applications_matching_va,
+            (SELECT COUNT(*) FROM crm_applications a
+               WHERE a.tenant_id = ${tenantId}::uuid AND a.deleted_at IS NULL
+                 AND EXISTS (
+                   SELECT 1 FROM crm_lead_courses lc
+                    WHERE lc.tenant_id = ${tenantId}::uuid
+                      AND lc.state_v2 = 'visa_accepted'
+                      AND lc.deleted_at IS NULL
+                      AND lc.v2_lead_id = a.v2_lead_id
+                 )) AS applications_matching_va_lead_only
+        `,
+      );
+      const r = rows[0] ?? {};
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(r)) out[k] = Number(v);
+      res.json({ data: out });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
