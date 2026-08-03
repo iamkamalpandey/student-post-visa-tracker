@@ -18,8 +18,12 @@
 import { Router } from 'express';
 import { authenticate, requireRole } from '../../middlewares/auth.js';
 import { tenantContext } from '../../middlewares/tenantContext.js';
-import { prisma } from '../../config/db.js';
 import { writeAudit } from '../../shared/audit.js';
+// SVT-QA-2026-08 — routes now read via req.db (the tenantContext-scoped
+// client) instead of the raw prisma singleton. Under the future spv_app
+// runtime role, raw prisma queries return zero rows because app.tenant_id
+// GUC is unset — this route would silently show an empty ROPA export.
+// Panel finding §Backend §14 [rls-scope].
 
 export const ropaRouter: Router = Router();
 ropaRouter.use(authenticate, tenantContext, requireRole('ADMIN'));
@@ -121,18 +125,20 @@ function csvEscape(v: unknown): string {
 ropaRouter.get('/ropa', async (req, res, next) => {
   try {
     const tenantId = req.user!.tid;
+    if (!req.db) throw new Error('tenantContext middleware not applied');
+    const db = req.db;
     const [subProcessors, dsarCounts, consentCounts] = await Promise.all([
-      prisma.subProcessor.findMany({
+      db.subProcessor.findMany({
         where: { tenant_id: tenantId, removed_at: null },
         orderBy: { added_at: 'asc' },
         take: 1000,
       }),
-      prisma.dSARRequest.groupBy({
+      db.dSARRequest.groupBy({
         by: ['type', 'status'],
         where: { tenant_id: tenantId },
         _count: true,
       }).catch(() => [] as Array<{ type: string; status: string; _count: number }>),
-      prisma.consentRecord.groupBy({
+      db.consentRecord.groupBy({
         by: ['lawful_basis', 'granted'],
         where: { tenant_id: tenantId },
         _count: true,
@@ -173,12 +179,13 @@ ropaRouter.get('/ropa', async (req, res, next) => {
 ropaRouter.get('/ropa.csv', async (req, res, next) => {
   try {
     const tenantId = req.user!.tid;
+    if (!req.db) throw new Error('tenantContext middleware not applied');
     // SVT-WAVE-PRIV-C2-2026-05 — include soft-deleted (removed_at != null)
     // sub-processors in the CSV so regulator review can reconstruct the
     // full processing-activity history (Art. 30(2) "Records of Processing
     // Activities" requires both active AND past processors with retirement
     // dates). The `removed_at` column distinguishes active vs retired.
-    const subProcessors = await prisma.subProcessor.findMany({
+    const subProcessors = await req.db.subProcessor.findMany({
       where: { tenant_id: tenantId },
       orderBy: { added_at: 'asc' },
       take: 5000,
