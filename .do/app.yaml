@@ -44,7 +44,7 @@ jobs:
     instance_size_slug: basic-xxs
     envs:
       - { key: DATABASE_URL, scope: RUN_TIME, type: SECRET }
-        - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
 
 services:
   - name: backend
@@ -78,6 +78,13 @@ services:
       - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
       # Optional Redis (used for multi-instance rate limiting/nonces). Uncomment if scaling beyond 1 instance:
       # - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
+      # Schema requires REDIS_URL as URL; runtime is optional (falls to in-process Map when `redis` pkg absent).
+      # Dummy value satisfies zod; single-replica deployment doesn't need real Redis.
+      - { key: REDIS_URL, scope: RUN_TIME, value: "redis://localhost:6379" }
+      - { key: SPV_ALLOW_SINGLE_REPLICA, scope: RUN_TIME, value: "true" }
+      # Seed admin — created on first boot if users table empty.
+      - { key: SEED_ADMIN_EMAIL, scope: RUN_TIME, type: SECRET }
+      - { key: SEED_ADMIN_PASSWORD, scope: RUN_TIME, type: SECRET }
       # CORS_ORIGIN has NO default — backend won't boot without it (any env).
       - { key: CORS_ORIGIN, scope: RUN_TIME, value: "${frontend.PUBLIC_URL}" }
       # --- Auth / crypto (set every SECRET in the DO dashboard) ---
