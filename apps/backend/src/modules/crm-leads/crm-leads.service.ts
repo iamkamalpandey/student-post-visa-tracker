@@ -638,9 +638,21 @@ export async function listApplications(
 ): Promise<{ data: unknown[]; nextCursor: string | null; hasMore: boolean; total: number }> {
   const { db, tenantId } = ctx;
   const limit = q.limit;
+  const offset = q.offset ?? 0;
 
-  const where: Prisma.CrmApplicationWhereInput = { tenant_id: tenantId, deleted_at: null };
-  if (q.intake_key) where.intake_key = { contains: q.intake_key, mode: 'insensitive' };
+  // SVT-V2-APP-LIST-2026-08 — drive the post-visa work queue off lead_courses
+  // rather than the crm_application mirror. Rationale: V2's operational
+  // reality is that the visa_accepted funnel state lives on LeadCourses (335
+  // rows for this tenant), while formal Application entities are sparse
+  // (9 rows) and their (v2_lead_id, v2_course_id) rarely aligns with the
+  // visa-accepted lead-course. Keying off applications hid ~333 leads that
+  // reached the queue. The lead_course IS the funnel — applications enrich
+  // it (intake_key, fees) when present but must not gate visibility.
+  const where: Prisma.CrmLeadCourseWhereInput = {
+    tenant_id: tenantId,
+    state_v2: 'visa_accepted',
+    deleted_at: null,
+  };
   const leadFilter: Prisma.CrmLeadWhereInput = {};
   if (q.assigned_to_id) leadFilter.assigned_to_id = q.assigned_to_id;
   if (q.search) {
@@ -653,29 +665,26 @@ export async function listApplications(
     ];
   }
   if (Object.keys(leadFilter).length) where.lead = leadFilter;
-  if (q.has_upcoming_fee) where.fees = { some: { deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } } };
 
-  // POST-VISA tracker: list ONLY visa-accepted applications. An application is
-  // visa-accepted when its lead+course funnel state is visa_accepted. Resolve
-  // those (v2_lead_id, v2_course_id) pairs and constrain — pre-visa applications
-  // of the same leads are never listed here (they stay on the lead's own detail
-  // page for context). state_v2 is populated from the typed enum OR normalized
-  // from the legacy free-text on ingest, so this captures the full population.
-  const vaPairs = await db.crmLeadCourse.findMany({
-    where: { tenant_id: tenantId, state_v2: 'visa_accepted', deleted_at: null },
-    select: { v2_lead_id: true, v2_course_id: true },
-  });
-  if (vaPairs.length === 0) {
-    return { data: [], nextCursor: null, hasMore: false, total: 0 };
+  // intake_key + has_upcoming_fee live on the crm_application row. Constrain
+  // via the composite v2 key by pre-resolving the matching pairs — Prisma has
+  // no direct FK between lead_course and application. Only applied when the
+  // client explicitly filters on those fields, so the base "show me everyone
+  // visa-accepted" query stays a single indexed scan of lead_courses.
+  if (q.intake_key || q.has_upcoming_fee) {
+    const appWhere: Prisma.CrmApplicationWhereInput = { tenant_id: tenantId, deleted_at: null };
+    if (q.intake_key) appWhere.intake_key = { contains: q.intake_key, mode: 'insensitive' };
+    if (q.has_upcoming_fee) appWhere.fees = { some: { deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } } };
+    const gating = await db.crmApplication.findMany({
+      where: appWhere,
+      select: { v2_lead_id: true, v2_course_id: true },
+    });
+    if (gating.length === 0) return { data: [], nextCursor: null, hasMore: false, total: 0 };
+    where.AND = [{ OR: gating.map((a) => ({ v2_lead_id: a.v2_lead_id, v2_course_id: a.v2_course_id })) }];
   }
-  where.OR = vaPairs.map((s) => ({ v2_lead_id: s.v2_lead_id, v2_course_id: s.v2_course_id }));
-
-  // Offset pagination — page-number friendly + exposes the TRUE total so the UI
-  // never shows a capped count or hides rows.
-  const offset = q.offset ?? 0;
 
   const [rows, total] = await Promise.all([
-    db.crmApplication.findMany({
+    db.crmLeadCourse.findMany({
       where,
       orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
       skip: offset,
@@ -683,28 +692,32 @@ export async function listApplications(
       include: {
         lead: { select: { first_name: true, last_name: true, phone_number: true, spv_status: true, assigned_to_id: true } },
         course: { select: { name: true, institution: { select: { name: true, country: { select: { name: true } } } } } },
-        fees: { where: { deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } }, orderBy: { due_on: 'asc' }, take: 1 },
       },
     }),
-    db.crmApplication.count({ where }),
+    db.crmLeadCourse.count({ where }),
   ]);
 
   const hasMore = offset + rows.length < total;
   const nextCursor: string | null = null;
 
-  // Stage lives on lead_course (per lead+course), not on application — batch it.
-  // Carry BOTH the typed enum (state_v2, for the chip) and the legacy free-text
-  // (state, e.g. "Offer Rejected") so the UI can fall back to the human label
-  // when the enum is null (V2's stateV2 is sparsely backfilled).
-  const v2LeadIds = [...new Set(rows.map((r) => r.v2_lead_id))];
-  const stageMap = new Map<string, { state_v2: string | null; state: string | null }>();
-  if (v2LeadIds.length) {
-    const lcs = await db.crmLeadCourse.findMany({
-      where: { tenant_id: tenantId, v2_lead_id: { in: v2LeadIds }, deleted_at: null },
-      select: { v2_lead_id: true, v2_course_id: true, state_v2: true, state: true },
+  // Enrich with the matching crm_application (intake_key, application_state)
+  // and the first open fee. Both are optional — leads with no formal V2
+  // Application still appear in the queue with those fields as null.
+  const pairs = rows.map((r) => ({ v2_lead_id: r.v2_lead_id, v2_course_id: r.v2_course_id }));
+  const appMap = new Map<string, { id: string; intake_key: string | null; state: string; fees: FeeRow[] }>();
+  if (pairs.length) {
+    const apps = await db.crmApplication.findMany({
+      where: { tenant_id: tenantId, deleted_at: null, OR: pairs },
+      select: {
+        id: true, intake_key: true, state: true, v2_lead_id: true, v2_course_id: true,
+        fees: { where: { deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } }, orderBy: { due_on: 'asc' }, take: 1 },
+      },
     });
-    for (const lc of lcs) {
-      stageMap.set(`${lc.v2_lead_id}|${lc.v2_course_id}`, { state_v2: lc.state_v2 ?? null, state: lc.state ?? null });
+    for (const a of apps) {
+      const app = a as typeof a & { fees: FeeRow[] };
+      appMap.set(`${a.v2_lead_id}|${a.v2_course_id}`, {
+        id: app.id, intake_key: app.intake_key, state: app.state, fees: app.fees,
+      });
     }
   }
 
@@ -712,22 +725,21 @@ export async function listApplications(
     const row = r as typeof r & {
       lead: { first_name: string; last_name: string; phone_number: string; spv_status: string; assigned_to_id: string | null };
       course: { name: string; institution: { name: string; country: { name: string } | null } | null } | null;
-      fees: FeeRow[];
     };
-    const fee = row.fees[0];
-    const sm = stageMap.get(`${row.v2_lead_id}|${row.v2_course_id}`);
+    const app = appMap.get(`${row.v2_lead_id}|${row.v2_course_id}`);
+    const fee = app?.fees[0];
     return {
-      id: row.id,
+      id: app?.id ?? row.id,
       lead_id: row.lead_id,
       applicant_name: `${row.lead.first_name} ${row.lead.last_name}`.trim(),
       phone_number: row.lead.phone_number,
       country_name: row.course?.institution?.country?.name ?? null,
       course_name: row.course?.name ?? null,
       institution_name: row.course?.institution?.name ?? null,
-      intake_key: row.intake_key,
-      stage: sm?.state_v2 ?? null,
-      stage_raw: sm?.state ?? null,
-      application_state: row.state,
+      intake_key: app?.intake_key ?? null,
+      stage: row.state_v2 ?? null,
+      stage_raw: row.state ?? null,
+      application_state: app?.state ?? null,
       spv_status: row.lead.spv_status,
       assigned_to_id: row.lead.assigned_to_id,
       created_at: iso(row.created_at),
