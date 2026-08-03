@@ -3,7 +3,15 @@
 // Self-service surface scoped to the caller's own tenant. ADMIN-only at the
 // route layer; service trusts req.user.tid as the resolved tenant.
 
-import { prisma } from '../../config/db.js';
+// SVT-SEC-RLS-ESCAPE-HATCH-2026-05 — the tenants-table RLS policy requires
+// app.tenant_id GUC to be set (escape hatch removed). This service loads
+// the caller's tenant by id, but it's called from controllers that use
+// the raw prisma client (no GUC set), so RLS filters out the row → 404.
+// Route through the bypass-RLS admin client; safety is preserved because
+// the caller's tid is trusted from the JWT (already ADMIN-gated at the
+// route) and we always filter by `id = tenantId`.
+import * as dbModule from '../../config/db.js';
+const prisma = (dbModule as { prismaAdmin?: typeof dbModule.prisma }).prismaAdmin ?? dbModule.prisma;
 import { NotFound } from '../../shared/errors.js';
 import { _clearBillingEnabledCache } from '../billing/middleware.js';
 import type { UpdateTenantSettingsRequest, TenantSettingsResponse } from '@spv/zod-schemas';

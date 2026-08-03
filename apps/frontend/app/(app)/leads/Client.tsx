@@ -116,7 +116,7 @@ export default function Client() {
     { key: 'course', label: 'Course', render: (r) => <Box sx={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.course_name ?? ''}>{r.course_name ?? '—'}</Box> },
     { key: 'institution', label: 'Institution', hideOnMobile: true, render: (r) => <Box sx={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.institution_name ?? ''}>{r.institution_name ?? '—'}</Box> },
     { key: 'country', label: 'Country', hideOnMobile: true, render: (r) => r.country_name ?? '—' },
-    { key: 'intake', label: 'Intake', hideOnMobile: true, render: (r) => r.intake_key },
+    { key: 'intake', label: 'Intake', hideOnMobile: true, render: (r) => r.intake_key ?? '—' },
     // Stage column dropped: every row in this visa-accepted-only list is "Visa
     // Accepted" → redundant. Space reclaimed for Next-fee + Status.
     { key: 'nextFee', label: 'Next fee due', render: (r) => <NextFeeChip row={r} /> },
@@ -129,7 +129,7 @@ export default function Client() {
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>Applications</Typography>
           <Typography variant="body2" color="text.secondary">
-            Visa-accepted applications — your post-visa work queue. One row per application; click to open the applicant.
+            Visa-accepted applications — your post-visa work queue. One row per applicant-course; click to open the applicant.
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5} alignItems="flex-start">
