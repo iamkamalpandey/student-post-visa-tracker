@@ -11,6 +11,7 @@ import {
 
 import { requireRole, requireStudentOwnership } from '../../middlewares/auth.js';
 import { validate } from '../../middlewares/validate.js';
+import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { BadRequest } from '../../shared/errors.js';
 
 import * as ctl from './students.controller.js';
@@ -82,6 +83,11 @@ studentsRouter.post(
   // SVT-RBAC-OWN-2026-05: stage advances are KPI-affecting; only the assigned
   // counsellor (or ADMIN) may advance.
   requireStudentOwnership('id'),
+  // SVT-QA-2026-08 — a stage advance writes a StudentLifecycleEvent + updates
+  // the current_stage_id (irreversible fan-out through StageChecklistProgress
+  // resets and SLA computations). Require Idempotency-Key so a client double-
+  // fire (offline/online double-tap) doesn't record two events.
+  requireIdempotencyKey,
   validate(AdvanceStageRequest),
   ctl.advanceStageHandler,
 );

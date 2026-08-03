@@ -14,6 +14,7 @@ import {
   requireStudentOwnershipViaChild,
 } from '../../middlewares/auth.js';
 import { validate } from '../../middlewares/validate.js';
+import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { BadRequest } from '../../shared/errors.js';
 
 import * as ctl from './enrollments.controller.js';
@@ -88,6 +89,11 @@ studentEnrollmentsRouter.post(
   requireRole('ADMIN', 'COUNSELLOR'),
   // SVT-RBAC-OWN-2026-05: ownership-gated
   requireStudentOwnership('studentId'),
+  // SVT-QA-2026-08 — enrollment creation transitively fires the billing hook
+  // (enrollment-hook.ts) which auto-provisions a FeePlan + installments from
+  // the program's ProgramFee. Require Idempotency-Key so a double-fire cannot
+  // double-provision fee schedules.
+  requireIdempotencyKey,
   validate(CreateEnrollmentRequest),
   ctl.createForStudentHandler,
 );

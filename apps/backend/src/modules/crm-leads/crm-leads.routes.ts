@@ -54,7 +54,9 @@ crmLeadsRouter.get('/institutions-report', ctl.institutionsReportHandler);
 crmLeadsRouter.get('/courses-report', ctl.coursesReportHandler);
 
 // On-demand V2 ingest — ADMIN only, rate-limited. Before '/:id' so the literal isn't shadowed.
-crmLeadsRouter.post('/sync', requireRole('ADMIN'), v2SyncLimiter, ctl.syncHandler);
+// SVT-QA-2026-08 — accepts no body; explicit strict-empty validator so a
+// rogue client can't smuggle unexpected fields the handler would silently drop.
+crmLeadsRouter.post('/sync', requireRole('ADMIN'), v2SyncLimiter, validate(z.object({}).strict()), ctl.syncHandler);
 
 crmLeadsRouter.get('/:id', requireUuidId, ctl.getByIdHandler);
 crmLeadsRouter.patch('/:id', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), validate(UpdateCrmLeadRequest), ctl.updateHandler);
@@ -67,8 +69,12 @@ crmLeadsRouter.patch('/:id', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), 
 // otherwise create duplicate students before the dup guard's read sees either).
 crmLeadsRouter.post('/:id/convert', requireUuidId, requireRole('ADMIN'), requireIdempotencyKey, validate(ConvertLeadToStudentRequest), ctl.convertHandler);
 
-crmLeadsRouter.post('/:id/fees', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), validate(CreateCrmLeadFeeRequest), ctl.createFeeHandler);
-crmLeadsRouter.patch('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), validate(UpdateCrmLeadFeeRequest), ctl.updateFeeHandler);
-crmLeadsRouter.post('/:id/fees/:feeId/pay', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), validate(MarkCrmFeePaidRequest), ctl.markFeePaidHandler);
-crmLeadsRouter.post('/:id/fees/:feeId/waive', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), ctl.waiveFeeHandler);
-crmLeadsRouter.delete('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), ctl.deleteFeeHandler);
+// SVT-QA-2026-08 — every fee mutation is money-touching: require Idempotency-Key
+// so a retry replays the cached body instead of creating a duplicate row, and
+// gate the waive handler with a strict-empty validator (was missing) so a
+// rogue body can't slip through the "no schema" gap.
+crmLeadsRouter.post('/:id/fees', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(CreateCrmLeadFeeRequest), ctl.createFeeHandler);
+crmLeadsRouter.patch('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(UpdateCrmLeadFeeRequest), ctl.updateFeeHandler);
+crmLeadsRouter.post('/:id/fees/:feeId/pay', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(MarkCrmFeePaidRequest), ctl.markFeePaidHandler);
+crmLeadsRouter.post('/:id/fees/:feeId/waive', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(z.object({}).strict()), ctl.waiveFeeHandler);
+crmLeadsRouter.delete('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, ctl.deleteFeeHandler);

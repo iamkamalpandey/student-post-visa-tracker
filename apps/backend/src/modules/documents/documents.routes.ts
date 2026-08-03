@@ -17,6 +17,8 @@ import {
   requireStudentOwnershipViaChild,
 } from '../../middlewares/auth.js';
 import { uuidParam } from '../../middlewares/uuidParam.js';
+import { validate } from '../../middlewares/validate.js';
+import { VerifyDocumentRequest } from '@spv/zod-schemas';
 import { ALLOWED_MIME, MAX_UPLOAD_BYTES } from './mime.js';
 import {
   uploadHandler,
@@ -91,6 +93,11 @@ documentsRouter.patch(
   requireRole('ADMIN', 'COUNSELLOR'),
   // SVT-RBAC-OWN-2026-05: ownership-gated (ADMIN still bypasses)
   requireStudentOwnershipViaChild('document', 'id'),
+  // SVT-QA-2026-08 — was missing the validate() middleware; handler parsed
+  // the body inline via VerifyDocumentRequest.parse. Middleware moves the
+  // parse to fail-fast before ownership queries + normalises the 422 shape
+  // against every other write route.
+  validate(VerifyDocumentRequest),
   verifyHandler,
 );
 documentsRouter.delete('/:id', uuidParam('id'), requireRole('ADMIN'), deleteHandler);

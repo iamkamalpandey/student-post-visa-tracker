@@ -8,6 +8,7 @@ import { authenticate, requireRole } from '../../middlewares/auth.js';
 import { importsLimiter } from '../../middlewares/rateLimit.js';
 import { tenantContext } from '../../middlewares/tenantContext.js';
 import { uuidParam } from '../../middlewares/uuidParam.js';
+import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import {
   getSchema,
   getTemplateCsv,
@@ -48,7 +49,12 @@ importsRouter.post('/:resource', importsLimiter, requireRole('ADMIN'), upload.si
 importsRouter.get('/:job_id', uuidParam('job_id'), getJob);
 importsRouter.get('/:job_id/report', uuidParam('job_id'), getJobReport);
 importsRouter.get('/:job_id/errors.jsonl', uuidParam('job_id'), getJobErrors);
-importsRouter.post('/:job_id/apply', uuidParam('job_id'), requireRole('ADMIN'), postApply);
+// SVT-QA-2026-08 — apply commits staged rows to the real target tables. A
+// double-fire on a large staged batch would attempt a second bulk write; the
+// per-row idempotency guards inside postApply catch most, but the outer
+// Idempotency-Key gate makes the operation replay the cached result body
+// instead of re-executing at all — safer + cheaper.
+importsRouter.post('/:job_id/apply', uuidParam('job_id'), requireRole('ADMIN'), requireIdempotencyKey, postApply);
 // SVT-RBAC-2026-05: cancel inherits the ADMIN-only gate now that POST is
 // ADMIN-only — symmetry + closes RBAC P1 (counsellor cancelling sibling jobs).
 importsRouter.post('/:job_id/cancel', uuidParam('job_id'), requireRole('ADMIN'), postCancel);

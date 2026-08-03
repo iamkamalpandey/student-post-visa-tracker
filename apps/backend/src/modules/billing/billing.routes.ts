@@ -257,6 +257,11 @@ billingRouter.post(
   '/installments/:id/adjustments',
   requireRole('ADMIN', 'COUNSELLOR'),
   uuidParam('id'),
+  // SVT-QA-2026-08 — every applied adjustment writes a DISCOUNT / SCHOLARSHIP /
+  // LATE_FEE ledger row that shifts the installment's outstanding balance.
+  // A duplicate on retry double-counts money. Every neighbouring money-mover
+  // already carries requireIdempotencyKey; this one was the missing case.
+  requireIdempotencyKey,
   validate(ApplyAdjustmentRequest),
   adjCtl.apply,
 );
