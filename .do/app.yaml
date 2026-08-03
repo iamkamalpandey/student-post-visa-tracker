@@ -74,8 +74,11 @@ services:
       # (config/db.ts assertRuntimeRoleRespectsRls), so a misconfig fails loud.
       - { key: DATABASE_URL, scope: RUN_TIME, type: SECRET }
       # Owner/admin role — runs DDL (prisma migrate PRE_DEPLOY job) + the narrow
-      # auth-time BYPASS-RLS lookups (prismaAdmin). Admin is correct here.
-      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      # auth-time BYPASS-RLS lookups (prismaAdmin). Must point to the SAME
+      # database as DATABASE_URL, with the doadmin/owner role. Set as SECRET
+      # because ${spvt-db.DATABASE_URL} resolves to `defaultdb` which may
+      # differ from the actual app database.
+      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, type: SECRET }
       # Optional Redis (used for multi-instance rate limiting/nonces). Uncomment if scaling beyond 1 instance:
       # - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
       # Schema requires REDIS_URL as URL; runtime is optional (falls to in-process Map when `redis` pkg absent).
