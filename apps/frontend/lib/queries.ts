@@ -853,10 +853,10 @@ export type CrmApplicationRow = {
   country_name: string | null;
   course_name: string | null;
   institution_name: string | null;
-  intake_key: string;
+  intake_key: string | null;
   stage: string | null;
   stage_raw: string | null;
-  application_state: string;
+  application_state: string | null;
   spv_status: CrmLeadStatus;
   assigned_to_id: string | null;
   created_at: string;

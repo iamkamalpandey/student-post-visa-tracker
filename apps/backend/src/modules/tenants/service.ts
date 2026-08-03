@@ -4,17 +4,30 @@
 // route layer; service trusts req.user.tid as the resolved tenant.
 
 // SVT-SEC-RLS-ESCAPE-HATCH-2026-05 — the tenants-table RLS policy requires
-// app.tenant_id GUC to be set (escape hatch removed). This service loads
-// the caller's tenant by id, but it's called from controllers that use
-// the raw prisma client (no GUC set), so RLS filters out the row → 404.
-// Route through the bypass-RLS admin client; safety is preserved because
-// the caller's tid is trusted from the JWT (already ADMIN-gated at the
-// route) and we always filter by `id = tenantId`.
-import * as dbModule from '../../config/db.js';
-const prisma = (dbModule as { prismaAdmin?: typeof dbModule.prisma }).prismaAdmin ?? dbModule.prisma;
+// app.tenant_id GUC to be set (escape hatch removed). Controllers call this
+// service with the raw prisma client (no GUC set), so RLS filters out the
+// row and getMe returned 404 for a valid tenant.
+//
+// Fix: wrap every DB touch in a transaction that first `set_config`s
+// app.tenant_id, then re-runs the query on the SAME connection. RLS is now
+// enforced as defense-in-depth on top of the JWT `tid` + `where.id=tenantId`
+// filter. Chosen over prismaAdmin (bypass-RLS) because tenants CRUD is not
+// an auth primitive (see db.ts:40-41 invariant) — RLS should still guard
+// writes so a future caller passing an attacker-controlled tenantId (e.g.
+// a "switch tenant" superadmin flow, background job arg, test helper) can
+// never cross tenants even if the app-layer filter is forgotten.
+import { Prisma } from '@prisma/client';
+import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
 import { _clearBillingEnabledCache } from '../billing/middleware.js';
 import type { UpdateTenantSettingsRequest, TenantSettingsResponse } from '@spv/zod-schemas';
+
+async function withTenantTx<T>(tenantId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
+    return fn(tx);
+  });
+}
 
 function toResponse(t: {
   id: string;
@@ -42,7 +55,9 @@ function toResponse(t: {
 
 export const tenantSettingsService = {
   async getMe(tenantId: string): Promise<TenantSettingsResponse> {
-    const t = await prisma.tenant.findFirst({ where: { id: tenantId } });
+    const t = await withTenantTx(tenantId, (tx) =>
+      tx.tenant.findFirst({ where: { id: tenantId } }),
+    );
     if (!t) throw NotFound('Tenant not found');
     return toResponse(t);
   },
@@ -66,7 +81,7 @@ export const tenantSettingsService = {
     if (input.billing_enabled !== undefined) data['billing_enabled'] = input.billing_enabled;
 
     if (Object.keys(data).length === 0) return this.getMe(tenantId);
-    await prisma.tenant.update({ where: { id: tenantId }, data });
+    await withTenantTx(tenantId, (tx) => tx.tenant.update({ where: { id: tenantId }, data }));
     // SVT-BILLING-TOGGLE-2026-05 — bust the per-process billingEnabled cache
     // when the flag flips so /billing/* picks up the new state immediately
     // instead of waiting out the 60s TTL.

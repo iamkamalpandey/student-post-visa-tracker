@@ -140,17 +140,26 @@ export const CrmApplicationListQuery = PaginationQuery.extend({
 export type CrmApplicationListQuery = z.infer<typeof CrmApplicationListQuery>;
 
 export const CrmApplicationListItem = z.object({
-  id: Uuid, // application id
+  // SVT-V2-APP-LIST-2026-08 — the post-visa work queue is now keyed to
+  // crm_lead_course.state_v2='visa_accepted' (see crm-leads.service.ts
+  // listApplications). A matching crm_application is enriched in when
+  // present, but V2's operational reality is that most visa-accepted
+  // lead_courses have no formal Application row, so intake_key +
+  // application_state + next_fee_due are nullable. `id` is the
+  // application id when an app matched, else the lead_course id — the
+  // frontend navigates via lead_id, so callers should not treat `id` as a
+  // stable application handle.
+  id: Uuid,
   lead_id: Uuid,
   applicant_name: z.string(),
   phone_number: z.string(),
   country_name: z.string().nullable(),
   course_name: z.string().nullable(),
   institution_name: z.string().nullable(),
-  intake_key: z.string(),
+  intake_key: z.string().nullable(),
   stage: CrmLeadCourseStateEnum.nullable(), // typed funnel state (V2 stateV2 — sparsely backfilled)
   stage_raw: z.string().nullable(), // legacy free-text funnel state (V2 LeadCourses.state — well populated)
-  application_state: z.string(), // V2 Application.state — lifecycle (ACTIVE/completed), NOT the funnel
+  application_state: z.string().nullable(), // V2 Application.state — null when no matching application
   spv_status: CrmLeadStatusEnum,
   assigned_to_id: Uuid.nullable(),
   created_at: z.string(),

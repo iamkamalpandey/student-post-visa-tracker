@@ -703,11 +703,25 @@ export async function listApplications(
   // Enrich with the matching crm_application (intake_key, application_state)
   // and the first open fee. Both are optional — leads with no formal V2
   // Application still appear in the queue with those fields as null.
+  //
+  // SVT-V2-APP-LIST-2026-08-02 — v2 permits >1 application per (lead, course)
+  // via distinct intake_keys (uniqueness is tenant_id+lead_id+course_id+intake_key).
+  // We enrich with a DETERMINISTIC winner:
+  //  - if the caller filtered by q.intake_key, re-apply that filter so the
+  //    displayed intake matches the filter;
+  //  - otherwise pick the most recent application (created_at desc, id desc).
+  // First-write-wins on `appMap.set` combined with orderBy DESC yields the
+  // newest matching app, stable across renders.
   const pairs = rows.map((r) => ({ v2_lead_id: r.v2_lead_id, v2_course_id: r.v2_course_id }));
   const appMap = new Map<string, { id: string; intake_key: string | null; state: string; fees: FeeRow[] }>();
   if (pairs.length) {
+    const enrichWhere: Prisma.CrmApplicationWhereInput = {
+      tenant_id: tenantId, deleted_at: null, OR: pairs,
+    };
+    if (q.intake_key) enrichWhere.intake_key = { contains: q.intake_key, mode: 'insensitive' };
     const apps = await db.crmApplication.findMany({
-      where: { tenant_id: tenantId, deleted_at: null, OR: pairs },
+      where: enrichWhere,
+      orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
       select: {
         id: true, intake_key: true, state: true, v2_lead_id: true, v2_course_id: true,
         fees: { where: { deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } }, orderBy: { due_on: 'asc' }, take: 1 },
@@ -715,7 +729,9 @@ export async function listApplications(
     });
     for (const a of apps) {
       const app = a as typeof a & { fees: FeeRow[] };
-      appMap.set(`${a.v2_lead_id}|${a.v2_course_id}`, {
+      const key = `${a.v2_lead_id}|${a.v2_course_id}`;
+      if (appMap.has(key)) continue; // first-write-wins: newest app (see comment above)
+      appMap.set(key, {
         id: app.id, intake_key: app.intake_key, state: app.state, fees: app.fees,
       });
     }
