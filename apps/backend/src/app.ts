@@ -83,6 +83,7 @@ import { subProcessorRouter } from './modules/sub-processors/routes.js';
 import { ropaRouter } from './modules/admin/ropa.routes.js';
 // SVT-WAVE-BILLING-SEC-P1-F8 — operator sweeper for stuck idempotency rows.
 import { adminIdempotencyRouter } from './modules/admin/idempotency.routes.js';
+import { adminV2DiagnosticsRouter } from './modules/admin/v2-diagnostics.routes.js';
 import { reportsRouter } from './modules/reports/routes.js';
 import { tagRouter, entityTagRouter } from './modules/tags/routes.js';
 import { noteRouter } from './modules/notes/routes.js';
@@ -332,6 +333,8 @@ export function createApp(): Express {
   app.use('/api/v1/admin', ropaRouter);
   // SVT-WAVE-BILLING-SEC-P1-F8 — sweeper for stuck PENDING idempotency rows.
   app.use('/api/v1/admin/idempotency', adminIdempotencyRouter);
+  // SVT-V2-DIAG-2026-08 — histogram diagnostic for V2 free-text state values.
+  app.use('/api/v1/admin/v2-diagnostics', adminV2DiagnosticsRouter);
   // SVT-WAVE-REPORTS-2026-05 — admin-only analytics endpoints.
   app.use('/api/v1/reports', reportsRouter);
   app.use('/api/v1/tags', tagRouter);
