@@ -71,11 +71,27 @@ export function getRedisClient(): Promise<RedisLikeClient | null> {
         );
         return null;
       }
-      const client = mod.createClient({ url });
+      // reconnectStrategy:false — if the initial connect fails we surface it
+      // ONCE via the catch below and return null. Without this, node-redis's
+      // default retry loop keeps firing 'error' events every ~2s forever even
+      // after we've given up and callers have fallen back to in-process
+      // stores, spamming logs and racking up wasted syscalls.
+      const client = mod.createClient({ url, socket: { reconnectStrategy: false } });
       client.on?.('error', (err: unknown) => {
         logger.error({ err }, 'redis client error');
       });
-      await client.connect();
+      try {
+        await client.connect();
+      } catch (err) {
+        // Ensure the client is fully torn down so no dangling socket handle
+        // keeps the event loop alive or leaks memory.
+        try {
+          await client.destroy?.();
+        } catch {
+          /* best-effort */
+        }
+        throw err;
+      }
       logger.info('redis client connected');
       return client as RedisLikeClient;
     } catch (err) {
