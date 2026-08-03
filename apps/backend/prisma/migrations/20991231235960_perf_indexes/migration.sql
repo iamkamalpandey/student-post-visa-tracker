@@ -27,28 +27,28 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 --    planner to re-check deleted_at on every row. Partial variants are tighter
 --    (smaller, hotter) and let an index-only scan satisfy the groupBy.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS students_tenant_stage_active_idx
+CREATE INDEX IF NOT EXISTS students_tenant_stage_active_idx
   ON students (tenant_id, current_stage_id)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS students_tenant_status_active_idx
+CREATE INDEX IF NOT EXISTS students_tenant_status_active_idx
   ON students (tenant_id, status)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS students_tenant_assigned_active_idx
+CREATE INDEX IF NOT EXISTS students_tenant_assigned_active_idx
   ON students (tenant_id, assigned_to_id)
   WHERE deleted_at IS NULL;
 
 -- Default list ordering is `created_at desc, id desc` per
 -- students.service.ts::buildOrderBy. Without a matching index Postgres falls
 -- back to a sort node on every page request.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS students_tenant_created_at_active_idx
+CREATE INDEX IF NOT EXISTS students_tenant_created_at_active_idx
   ON students (tenant_id, created_at DESC, id DESC)
   WHERE deleted_at IS NULL;
 
 -- ILIKE %needle% on (family_name, given_name, student_code). One GIN over a
 -- concatenated expression keeps it to a single index probe per search.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS students_search_trgm_idx
+CREATE INDEX IF NOT EXISTS students_search_trgm_idx
   ON students USING GIN (
     (lower(coalesce(family_name,'') || ' ' || coalesce(given_name,'') || ' ' || coalesce(student_code,''))) gin_trgm_ops
   )
@@ -60,7 +60,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS students_search_trgm_idx
 --    filter, so it currently triggers a sort. New index is keyed on tenant +
 --    occurred_at DESC, giving an instant top-N read.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS student_lifecycle_events_tenant_occurred_idx
+CREATE INDEX IF NOT EXISTS student_lifecycle_events_tenant_occurred_idx
   ON student_lifecycle_events (tenant_id, occurred_at DESC);
 
 -- ----------------------------------------------------------------------------
@@ -68,18 +68,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS student_lifecycle_events_tenant_occurred
 --    window. Existing indexes are global on the date column — not selective
 --    once data grows. Partial indexes encode the constant WHERE clauses.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS student_visas_tenant_expiry_active_idx
+CREATE INDEX IF NOT EXISTS student_visas_tenant_expiry_active_idx
   ON student_visas (tenant_id, expires_on)
   WHERE is_active = true;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS student_identifications_tenant_passport_expiry_idx
+CREATE INDEX IF NOT EXISTS student_identifications_tenant_passport_expiry_idx
   ON student_identifications (tenant_id, expires_on)
   WHERE type = 'PASSPORT';
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS insurance_records_tenant_ends_on_idx
+CREATE INDEX IF NOT EXISTS insurance_records_tenant_ends_on_idx
   ON insurance_records (tenant_id, ends_on);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_tenant_expiry_active_idx
+CREATE INDEX IF NOT EXISTS documents_tenant_expiry_active_idx
   ON documents (tenant_id, expires_on)
   WHERE deleted_at IS NULL;
 
@@ -89,11 +89,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_tenant_expiry_active_idx
 --    created_at desc. Add a partial pagination index, plus a trgm GIN for
 --    ILIKE on email/given_name/family_name.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS users_tenant_created_at_active_idx
+CREATE INDEX IF NOT EXISTS users_tenant_created_at_active_idx
   ON users (tenant_id, created_at DESC, id DESC)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS users_search_trgm_idx
+CREATE INDEX IF NOT EXISTS users_search_trgm_idx
   ON users USING GIN (
     (lower(coalesce(email,'') || ' ' || coalesce(given_name,'') || ' ' || coalesce(family_name,''))) gin_trgm_ops
   )
@@ -105,19 +105,19 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS users_search_trgm_idx
 --    (tenant_id, is_partner) are good for filters but ignore deleted_at and
 --    don't help pagination ordering.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS institutions_tenant_created_at_active_idx
+CREATE INDEX IF NOT EXISTS institutions_tenant_created_at_active_idx
   ON institutions (tenant_id, created_at DESC, id DESC)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS institutions_tenant_country_active_idx
+CREATE INDEX IF NOT EXISTS institutions_tenant_country_active_idx
   ON institutions (tenant_id, country_code)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS institutions_tenant_partner_active_idx
+CREATE INDEX IF NOT EXISTS institutions_tenant_partner_active_idx
   ON institutions (tenant_id, is_partner)
   WHERE deleted_at IS NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS institutions_search_trgm_idx
+CREATE INDEX IF NOT EXISTS institutions_search_trgm_idx
   ON institutions USING GIN (
     (lower(coalesce(display_name,'') || ' ' || coalesce(legal_name,'') || ' ' || coalesce(short_name,''))) gin_trgm_ops
   )
@@ -128,10 +128,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS institutions_search_trgm_idx
 --    ASC by default; the UI lists newest-first. Add a DESC variant so the
 --    planner doesn't reverse-scan + sort.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS import_jobs_tenant_resource_created_desc_idx
+CREATE INDEX IF NOT EXISTS import_jobs_tenant_resource_created_desc_idx
   ON import_jobs (tenant_id, resource, created_at DESC);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS export_jobs_tenant_resource_created_desc_idx
+CREATE INDEX IF NOT EXISTS export_jobs_tenant_resource_created_desc_idx
   ON export_jobs (tenant_id, resource, created_at DESC);
 
 -- ============================================================================
