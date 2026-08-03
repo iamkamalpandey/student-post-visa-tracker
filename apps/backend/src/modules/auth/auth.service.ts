@@ -197,7 +197,7 @@ class AuthService {
         const capped = Math.min(minutes, 60 * 24);
         lockUntil = new Date(Date.now() + capped * 60_000);
       }
-      await prisma.user.update({
+      await adminDb.user.update({
         where: { id: user.id },
         data: { failed_login_count: newFailed, locked_until: lockUntil },
       });
@@ -261,7 +261,7 @@ class AuthService {
             const capped = Math.min(minutes, 60 * 24);
             lockUntil = new Date(Date.now() + capped * 60_000);
           }
-          await prisma.user.update({
+          await adminDb.user.update({
             where: { id: user.id },
             data: { failed_login_count: newFailed, locked_until: lockUntil },
           });
@@ -346,7 +346,7 @@ class AuthService {
     }
 
     // All checks passed: reset counters and stamp last_login_at.
-    await prisma.user.update({
+    await adminDb.user.update({
       where: { id: user.id },
       data: { failed_login_count: 0, locked_until: null, last_login_at: new Date() },
     });
@@ -459,7 +459,7 @@ class AuthService {
         metadata: { ua_mismatch: uaMismatch, subnet_mismatch: subnetMismatch },
       });
       // Defensive: also revoke this token so the session can't continue under a stolen cookie.
-      await prisma.refreshToken.update({
+      await adminDb.refreshToken.update({
         where: { id: row.id },
         data: { revoked_at: new Date() },
       });
@@ -467,10 +467,10 @@ class AuthService {
     }
 
     // SVT-SYNC-2026-06: defense-in-depth — scope to tenant from the refresh token.
-    const user = await prisma.user.findFirst({ where: { id: row.user_id, tenant_id: row.tenant_id } });
+    const user = await adminDb.user.findFirst({ where: { id: row.user_id, tenant_id: row.tenant_id } });
     if (!user || !user.is_active || user.deleted_at) {
       // The token was valid but the account is no longer eligible.
-      await prisma.refreshToken.update({
+      await adminDb.refreshToken.update({
         where: { id: row.id },
         data: { revoked_at: new Date() },
       });
@@ -480,7 +480,7 @@ class AuthService {
     // a locked account whose access token had expired could keep spinning
     // fresh access tokens via refresh until the refresh TTL ran out.
     if (user.locked_until && user.locked_until > new Date()) {
-      await prisma.refreshToken.update({
+      await adminDb.refreshToken.update({
         where: { id: row.id },
         data: { revoked_at: new Date() },
       });
@@ -493,7 +493,7 @@ class AuthService {
     const idleMs = env.IDLE_TIMEOUT_MIN * 60_000;
     const lastSeen = (row.last_used_at ?? row.issued_at).getTime();
     if (Date.now() - lastSeen > idleMs) {
-      await prisma.refreshToken.update({
+      await adminDb.refreshToken.update({
         where: { id: row.id },
         data: { revoked_at: new Date() },
       });
@@ -530,10 +530,10 @@ class AuthService {
 
     // Mint the new pair, then revoke + chain the old row.
     const next = await this.mintTokenPair(user, ctx);
-    const newRow = await prisma.refreshToken.findUnique({
+    const newRow = await adminDb.refreshToken.findUnique({
       where: { token_hash: hashRefreshToken(next.refreshTokenRaw) },
     });
-    await prisma.refreshToken.update({
+    await adminDb.refreshToken.update({
       where: { id: row.id },
       data: { revoked_at: new Date(), replaced_by_id: newRow?.id ?? null },
     });
@@ -613,7 +613,7 @@ class AuthService {
       // FKs and silently lose the revocation.
       if (resolvedUserId && resolvedTenantId) {
         try {
-          await prisma.accessTokenDenylist.create({
+          await adminDb.accessTokenDenylist.create({
             data: {
               jti: accessJti,
               user_id: resolvedUserId,
@@ -659,7 +659,7 @@ class AuthService {
    */
   async changePassword(userId: string, current: string, next: string, tenantId?: string): Promise<void> {
     // SVT-SYNC-2026-06: defense-in-depth — scope to tenant when available.
-    const user = await prisma.user.findFirst({
+    const user = await adminDb.user.findFirst({
       where: { id: userId, ...(tenantId ? { tenant_id: tenantId } : {}) },
     });
     if (!user || !user.is_active || user.deleted_at) {
@@ -686,13 +686,12 @@ class AuthService {
 
     const newHash = await hashPassword(next);
 
-    await prisma.$transaction([
-      prisma.user.update({
+    await adminDb.$transaction([
+      adminDb.user.update({
         where: { id: userId },
         data: { password_hash: newHash, password_changed_at: new Date() },
       }),
-      // Revoke every active refresh token belonging to this user.
-      prisma.refreshToken.updateMany({
+      adminDb.refreshToken.updateMany({
         where: { user_id: userId, revoked_at: null },
         data: { revoked_at: new Date() },
       }),
@@ -711,7 +710,7 @@ class AuthService {
   /** Look the user up fresh from the DB so deactivation since token issue is honoured. */
   async getMe(userId: string, tenantId?: string): Promise<AuthUserResponse> {
     // SVT-SYNC-2026-06: defense-in-depth — scope to tenant when available.
-    const user = await prisma.user.findFirst({
+    const user = await adminDb.user.findFirst({
       where: { id: userId, ...(tenantId ? { tenant_id: tenantId } : {}) },
     });
     if (!user || !user.is_active || user.deleted_at) {
@@ -764,9 +763,9 @@ class AuthService {
     }
     // SVT-SYNC-2026-06: defense-in-depth — scope update to tenant.
     if (tenantId) {
-      await prisma.user.updateMany({ where: { id: userId, tenant_id: tenantId }, data });
+      await adminDb.user.updateMany({ where: { id: userId, tenant_id: tenantId }, data });
     } else {
-      await prisma.user.update({ where: { id: userId }, data });
+      await adminDb.user.update({ where: { id: userId }, data });
     }
     return this.getMe(userId, tenantId);
   }
@@ -803,7 +802,7 @@ class AuthService {
     const refreshHash = hashRefreshToken(refreshRaw);
     const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_SECONDS * 1000);
 
-    await prisma.refreshToken.create({
+    await adminDb.refreshToken.create({
       data: {
         tenant_id: user.tenant_id,
         user_id: user.id,
@@ -844,7 +843,7 @@ class AuthService {
       seen.add(id);
 
       // SVT-SYNC-2026-06: defense-in-depth — scope chain walk to tenant.
-      const row = await prisma.refreshToken.findFirst({ where: { id, tenant_id: tenantId } });
+      const row = await adminDb.refreshToken.findFirst({ where: { id, tenant_id: tenantId } });
       if (!row) continue;
 
       // Walk forward.
@@ -852,7 +851,7 @@ class AuthService {
         queue.push(row.replaced_by_id);
       }
       // Walk backward: rows whose replaced_by_id points at this row.
-      const predecessors = await prisma.refreshToken.findMany({
+      const predecessors = await adminDb.refreshToken.findMany({
         where: { replaced_by_id: id, tenant_id: tenantId },
         select: { id: true },
       });
@@ -862,7 +861,7 @@ class AuthService {
     }
 
     if (seen.size > 0) {
-      await prisma.refreshToken.updateMany({
+      await adminDb.refreshToken.updateMany({
         where: { id: { in: Array.from(seen) }, tenant_id: tenantId, revoked_at: null },
         data: { revoked_at: new Date() },
       });

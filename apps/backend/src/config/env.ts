@@ -17,8 +17,8 @@ const EnvSchema = z.object({
 
   REDIS_URL: z.string().url(),
 
-  JWT_PRIVATE_KEY: z.string().min(1),
-  JWT_PUBLIC_KEY: z.string().min(1),
+  JWT_PRIVATE_KEY: z.string().min(1).transform(s => s.replace(/\\n/g, '\n')),
+  JWT_PUBLIC_KEY: z.string().min(1).transform(s => s.replace(/\\n/g, '\n')),
   JWT_KID: z.string().min(1),
   // SVT-WAVE-JWT-ROTATE-2026-05 — graceful rotation (overlap window).
   // NEXT = the key rotating in (published in JWKS, accepted on verify, not yet

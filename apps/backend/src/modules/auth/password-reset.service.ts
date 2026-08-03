@@ -160,7 +160,7 @@ export async function requestPasswordReset(email: string, ctx: RequestCtx = {}):
     try {
       // Invalidate any outstanding live tokens for this user (one live token
       // at a time defeats enumeration via repeated requests).
-      await prisma.passwordResetToken.updateMany({
+      await adminDb.passwordResetToken.updateMany({
         where: {
           user_id: user.id,
           consumed_at: null,
@@ -173,7 +173,7 @@ export async function requestPasswordReset(email: string, ctx: RequestCtx = {}):
       const rawToken = mintRawToken();
       const tokenHash = hashToken(rawToken);
       const expiresAt = new Date(Date.now() + TOKEN_TTL_MS);
-      await prisma.passwordResetToken.create({
+      await adminDb.passwordResetToken.create({
         data: {
           tenant_id: user.tenant_id,
           user_id: user.id,
@@ -253,8 +253,8 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
   // Hash + persist + invalidate refresh tokens, atomically.
   const newHash = await hashPassword(newPassword);
   const now = new Date();
-  await prisma.$transaction([
-    prisma.user.update({
+  await adminDb.$transaction([
+    adminDb.user.update({
       where: { id: row.user_id },
       data: {
         password_hash: newHash,
@@ -263,16 +263,15 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
         locked_until: null,
       },
     }),
-    prisma.passwordResetToken.update({
+    adminDb.passwordResetToken.update({
       where: { id: row.id },
       data: { consumed_at: now },
     }),
-    // Invalidate every other live reset token for this user.
-    prisma.passwordResetToken.updateMany({
+    adminDb.passwordResetToken.updateMany({
       where: { user_id: row.user_id, consumed_at: null, invalidated_at: null, id: { not: row.id } },
       data: { invalidated_at: now },
     }),
-    prisma.refreshToken.updateMany({
+    adminDb.refreshToken.updateMany({
       where: { user_id: row.user_id, revoked_at: null },
       data: { revoked_at: now },
     }),
