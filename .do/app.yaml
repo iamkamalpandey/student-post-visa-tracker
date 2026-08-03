@@ -40,11 +40,20 @@ jobs:
     source_dir: /
     github: { repo: <org>/<repo>, branch: main, deploy_on_push: true }
     build_command: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @spv/zod-schemas --filter @spv/api-types build && pnpm --filter backend exec prisma generate && pnpm --filter backend build
-    run_command: pnpm --filter backend prisma:migrate:deploy
+    # SVT-QA-2026-08 — chain the seed after migrations. Prior release only ran
+    # `prisma migrate deploy`; the readiness memo claimed the admin user was
+    # "created on first boot if users table empty" but no code path actually
+    # did that. The seed is idempotent (ensureTenant + ensureAdminUser both
+    # short-circuit on existing rows) so re-running on every deploy is safe.
+    # Requires SEED_ADMIN_EMAIL + SEED_ADMIN_PASSWORD envs on this job.
+    run_command: pnpm --filter backend prisma:migrate:deploy && pnpm --filter backend prisma:seed
     instance_size_slug: basic-xxs
     envs:
       - { key: DATABASE_URL, scope: RUN_TIME, type: SECRET }
-      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, value: "${spvt-db.DATABASE_URL}" }
+      - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, type: SECRET }
+      - { key: SEED_ADMIN_EMAIL, scope: RUN_TIME, type: SECRET }
+      - { key: SEED_ADMIN_PASSWORD, scope: RUN_TIME, type: SECRET }
+      - { key: SEED_TENANT_NAME, scope: RUN_TIME, value: "Default Tenant" }
 
 services:
   - name: backend

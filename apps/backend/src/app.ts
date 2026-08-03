@@ -16,6 +16,7 @@ import { register } from './config/metrics.js';
 import { requestId } from './middlewares/requestId.js';
 import { httpMetrics } from './middlewares/httpMetrics.js';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler.js';
+import { sentryErrorHandler } from './config/sentry.js';
 import { globalLimiter } from './middlewares/rateLimit.js';
 import { authenticate } from './middlewares/auth.js';
 import { tenantContext } from './middlewares/tenantContext.js';
@@ -372,6 +373,12 @@ export function createApp(): Express {
 
   // 404 + error handler last
   app.use(notFoundHandler);
+  // SVT-QA-2026-08 — sentryErrorHandler mounted BEFORE the central
+  // errorHandler so it can attach tenant / user / request_id tags before the
+  // response is composed. The central errorHandler still calls
+  // Sentry.captureException for defense in depth (no double-capture: sentry
+  // dedupes by fingerprint within the same event).
+  app.use(sentryErrorHandler());
   app.use(errorHandler);
 
   return app;

@@ -265,6 +265,19 @@ const EnvSchema = z.object({
       message: 'RESEND_API_KEY is required when EMAIL_PROVIDER=resend',
     });
   }
+  // SVT-QA-2026-08 — METRICS_TOKEN gates GET /metrics. Without it Prometheus
+  // silently gets a 401 for every scrape and no production metrics are ever
+  // collected. Fail-fast at boot so misconfigured observability is caught
+  // before deploy rather than during an incident.
+  if (cfg.NODE_ENV === 'production' && !cfg.METRICS_TOKEN) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['METRICS_TOKEN'],
+      message:
+        'METRICS_TOKEN (>=16 chars) is required when NODE_ENV=production. ' +
+        'Generate with: openssl rand -hex 24',
+    });
+  }
   // SVT-V2-TRACKER-2026-06 — switching the ingest on requires both a source
   // connection and a destination tenant, else the daily job has nothing to
   // read / nowhere to write.

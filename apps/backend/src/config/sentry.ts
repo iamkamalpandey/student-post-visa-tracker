@@ -28,6 +28,7 @@ type SentryScope = {
   setTags?: (tags: Record<string, string | number | boolean>) => void;
   setContext?: (name: string, ctx: Record<string, unknown> | null) => void;
   setExtra?: (key: string, value: unknown) => void;
+  setUser?: (user: Record<string, unknown> | null) => void;
 };
 
 type SentryMod = {
@@ -144,10 +145,43 @@ export function sentryRequestHandler() {
 }
 
 /** Express error-handler middleware (mount BEFORE central errorHandler). */
+// SVT-QA-2026-08 — previously called sentry.captureException(err) with no
+// scope, so HTTP errors landed in Sentry with no tenant / user / request-id
+// tags — impossible to correlate. Attach a per-invocation scope with the
+// tenant id from the JWT, the user id from the JWT, and the request id from
+// requestId middleware so incidents can be sliced by tenant + correlated to
+// pino logs by request_id.
+type MinReq = { user?: { tid?: string; sub?: string; role?: string }; requestId?: string; id?: string; method?: string; originalUrl?: string; url?: string };
+
 export function sentryErrorHandler() {
-  return (err: unknown, _req: unknown, _res: unknown, next: (err: unknown) => void) => {
-    if (sentry) {
-      try { sentry.captureException(err); } catch { /* swallow */ }
+  return (err: unknown, req: unknown, _res: unknown, next: (err: unknown) => void) => {
+    const s = sentry;
+    if (s) {
+      try {
+        const r = (req ?? {}) as MinReq;
+        const tid = r.user?.tid;
+        const sub = r.user?.sub;
+        const role = r.user?.role;
+        const reqId = r.requestId ?? r.id;
+        if (s.withScope) {
+          s.withScope((scope) => {
+            if (tid) scope.setTag('tenant_id', tid);
+            if (role) scope.setTag('role', role);
+            if (reqId) scope.setTag('request_id', reqId);
+            if (scope.setUser && (sub || tid)) scope.setUser({ id: sub, tenant_id: tid });
+            if (scope.setContext) {
+              scope.setContext('http', {
+                method: r.method,
+                url: r.originalUrl ?? r.url,
+                request_id: reqId,
+              });
+            }
+            s.captureException(err);
+          });
+        } else {
+          s.captureException(err);
+        }
+      } catch { /* swallow — observability never breaks the host */ }
     }
     next(err);
   };

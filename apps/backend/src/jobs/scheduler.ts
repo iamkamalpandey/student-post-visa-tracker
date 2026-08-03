@@ -332,13 +332,13 @@ async function runExpiryAlertsPass(): Promise<JobOutcome> {
   };
 }
 
-// Compute the milliseconds until the next occurrence of HH:00 UTC (today or
+// Compute the milliseconds until the next occurrence of HH:MM UTC (today or
 // tomorrow). Returns at minimum 1s into the future to avoid scheduling work
 // in the past after clock drift.
-function msUntilUtcHour(hourUtc: number): number {
+function msUntilUtcHour(hourUtc: number, minuteUtc = 0): number {
   const now = new Date();
   const next = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc, 0, 0, 0),
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hourUtc, minuteUtc, 0, 0),
   );
   if (next.getTime() <= now.getTime()) {
     next.setUTCDate(next.getUTCDate() + 1);
@@ -347,19 +347,23 @@ function msUntilUtcHour(hourUtc: number): number {
   return Math.max(ms, 1_000);
 }
 
-// Schedule `fn` to fire at HH:00 UTC daily. Returns the active handle so
-// stop() can clear it.
-function scheduleDaily(hourUtc: number, jobName: string, fn: () => Promise<JobOutcome>) {
+// Schedule `fn` to fire at HH:MM UTC daily. Returns the active handle so
+// stop() can clear it. SVT-QA-2026-08 — accepts an optional minute offset so
+// multiple daily jobs can share the same hour without stacking on the same
+// second (previous scheduler doubled-up at 06:00 and 07:00 UTC — expiry.alerts
+// + billing.daily, then dsar.sla.watch + comms.cleanup — pinning both bursts
+// to compete for the same CPU + advisory-lock window).
+function scheduleDaily(hourUtc: number, jobName: string, fn: () => Promise<JobOutcome>, minuteUtc = 0) {
   const fire = () => fireAndForget(runJob(jobName, { ttlSec: 6 * 60 * 60 }, fn));
   const initial = setTimeout(() => {
     fire();
     const interval = setInterval(fire, DAY_MS);
     interval.unref();
     dailyHandles.push(interval);
-  }, msUntilUtcHour(hourUtc));
+  }, msUntilUtcHour(hourUtc, minuteUtc));
   initial.unref();
   dailyHandles.push(initial);
-  logger.info({ jobName, hourUtc, msUntilFirst: msUntilUtcHour(hourUtc) }, 'scheduler: daily job armed');
+  logger.info({ jobName, hourUtc, minuteUtc, msUntilFirst: msUntilUtcHour(hourUtc, minuteUtc) }, 'scheduler: daily job armed');
 }
 
 /**
@@ -415,20 +419,22 @@ export function startScheduler(): { stop: () => void } {
   // so the just-anchored Merkle root is checked against a fresh chain replay.
   // Any broken_count > 0 fires an error-level log → ops alerting.
   scheduleDaily(5, 'audit.chain.verify', runAuditVerifyPass);
+  // SVT-QA-2026-08 — expiry.alerts kicks first at 06:00 UTC, then billing.daily
+  // at 06:15 UTC so they never share the same clock tick / CPU spike.
   scheduleDaily(6, 'expiry.alerts', runExpiryAlertsPass);
-  // SVT-WAVE-PRIV-C3-2026-05 — DSAR 30-day SLA watchdog at 07:00 UTC.
-  scheduleDaily(7, 'dsar.sla.watch', runDsarSlaWatchPass);
   // SVT-WAVE-BILLING-2026-05 — daily billing cron: INVOICED→DUE, DUE→OVERDUE,
   // LATE_FEE adjustments (idempotent), plan ACTIVE→COMPLETED. Skips tenants
-  // with billing_enabled=false. Runs after expiry alerts so today's due-date
-  // signals are visible in both pipelines.
+  // with billing_enabled=false. Offset 15 min after expiry alerts.
   scheduleDaily(6, 'billing.daily', async () => {
     return runBillingDaily();
-  });
+  }, 15);
+  // SVT-WAVE-PRIV-C3-2026-05 — DSAR 30-day SLA watchdog at 07:00 UTC.
+  scheduleDaily(7, 'dsar.sla.watch', runDsarSlaWatchPass);
   // SVT-WAVE13-CLEANUP-2026-05 — purge SENT/READ comms_messages older than
   // 30d to keep the table small. After hash.anchor (4:00) + audit.verify
-  // (5:00) so we never delete rows before they're anchored.
-  scheduleDaily(7, 'comms.cleanup', runCommsCleanupPass);
+  // (5:00) so we never delete rows before they're anchored. Offset 15 min
+  // after dsar.sla.watch to avoid the 07:00 UTC stack.
+  scheduleDaily(7, 'comms.cleanup', runCommsCleanupPass, 15);
   // SVT-WAVE14-DIGEST-2026-05 — collapse per-user queued EMAIL into 1 daily
   // summary at 08:00 UTC. After cleanup so we don't digest rows about to die.
   scheduleDaily(8, 'comms.digest', runCommsDigestPass);
