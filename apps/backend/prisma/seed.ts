@@ -15,6 +15,7 @@
  */
 
 import { PrismaClient, Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,10 +244,22 @@ async function seedVisaCategories(): Promise<number> {
 
 async function ensureTenant(): Promise<string> {
   const name = env.SEED_TENANT_NAME;
-  let tenant = await prisma.tenant.findFirst({ where: { name } });
-  if (!tenant) {
-    tenant = await prisma.tenant.create({
+  // RLS requires app.tenant_id GUC to be set. For tenant creation we
+  // pre-generate the UUID so we can set the GUC before the INSERT.
+  return prisma.$transaction(async (tx) => {
+    // Check existence first (with a wildcard GUC so findFirst sees all rows).
+    const id = randomUUID();
+    await tx.$executeRaw(
+      Prisma.sql`SELECT set_config('app.tenant_id', ${id}, true)`,
+    );
+    const existing = await tx.tenant.findFirst({ where: { name } });
+    if (existing) {
+      console.log(`  = Tenant "${name}" already exists (${existing.id})`);
+      return existing.id;
+    }
+    const tenant = await tx.tenant.create({
       data: {
+        id,
         name,
         legal_name: name,
         default_locale: 'en',
@@ -255,10 +268,8 @@ async function ensureTenant(): Promise<string> {
       },
     });
     console.log(`  + Created tenant "${name}" (${tenant.id})`);
-  } else {
-    console.log(`  = Tenant "${name}" already exists (${tenant.id})`);
-  }
-  return tenant.id;
+    return tenant.id;
+  });
 }
 
 async function seedDocumentTypes(tenantId: string): Promise<number> {
@@ -440,28 +451,33 @@ async function seedCommonVisaTypesForTenant(
 
 async function ensureAdminUser(tenantId: string): Promise<boolean> {
   const email = env.SEED_ADMIN_EMAIL.toLowerCase();
-  const existing = await prisma.user.findUnique({
-    where: { tenant_id_email: { tenant_id: tenantId, email } },
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw(
+      Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`,
+    );
+    const existing = await tx.user.findUnique({
+      where: { tenant_id_email: { tenant_id: tenantId, email } },
+    });
+    if (existing) {
+      console.log(`  = Admin user ${email} already exists (skipped)`);
+      return false;
+    }
+    const password_hash = await hashPassword(env.SEED_ADMIN_PASSWORD);
+    await tx.user.create({
+      data: {
+        tenant_id: tenantId,
+        email,
+        password_hash,
+        given_name: env.SEED_ADMIN_GIVEN_NAME,
+        family_name: env.SEED_ADMIN_FAMILY_NAME,
+        role: 'ADMIN',
+        is_active: true,
+        password_changed_at: new Date(),
+      },
+    });
+    console.log(`  + Created admin user ${email}`);
+    return true;
   });
-  if (existing) {
-    console.log(`  = Admin user ${email} already exists (skipped)`);
-    return false;
-  }
-  const password_hash = await hashPassword(env.SEED_ADMIN_PASSWORD);
-  await prisma.user.create({
-    data: {
-      tenant_id: tenantId,
-      email,
-      password_hash,
-      given_name: env.SEED_ADMIN_GIVEN_NAME,
-      family_name: env.SEED_ADMIN_FAMILY_NAME,
-      role: 'ADMIN',
-      is_active: true,
-      password_changed_at: new Date(),
-    },
-  });
-  console.log(`  + Created admin user ${email}`);
-  return true;
 }
 
 async function main(): Promise<void> {
