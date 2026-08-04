@@ -24,6 +24,33 @@ function assertAuthorised(req: AuthCtx, subjectType: string, subjectId: string) 
 export const consentService = {
   async create(req: AuthCtx, body: CreateConsentRequest) {
     assertAuthorised(req, body.subject_type, body.subject_id);
+    // SVT-QA-2026-08 — dedup no-op writes. The cookie-banner client re-fires
+    // POST /consents whenever an authenticated session (re)mounts alongside a
+    // pre-existing localStorage decision. Without dedup, every full-page
+    // reload appended a fresh row for the same (subject, purpose, granted)
+    // tuple — a QA session with 45 identical rows was observed. GDPR Art. 7
+    // only requires the controller to demonstrate a valid consent decision
+    // is on file; it does not require a fresh row per re-affirmation, and a
+    // flood of identical rows dilutes the register's evidential value.
+    //
+    // Rule: if an ACTIVE (revoked_at IS NULL) row exists for the same
+    // (tenant, subject_type, subject_id, purpose, lawful_basis, granted)
+    // 5-tuple, return it verbatim and skip the insert + audit write. Any
+    // change in `granted` still writes a new row (state transition worth
+    // logging), as does a revoke-then-re-grant sequence.
+    const existing = await db(req).consentRecord.findFirst({
+      where: {
+        tenant_id: req.user!.tid,
+        subject_type: body.subject_type,
+        subject_id: body.subject_id,
+        purpose: body.purpose,
+        lawful_basis: body.lawful_basis,
+        granted: body.granted,
+        revoked_at: null,
+      },
+      orderBy: { granted_at: 'desc' },
+    });
+    if (existing) return existing;
     const created = await db(req).consentRecord.create({
       data: {
         ...body,

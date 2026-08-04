@@ -137,10 +137,12 @@ export default function TenantsAdminClient() {
       </Stack>
 
       <Alert severity="info" variant="outlined">
+        {/* SVT-QA-2026-08 — customer-facing copy: dropped the file-path
+            reference to middlewares/tenantContext.ts. Kept the substantive
+            explanation (RLS-bound sessions, no cross-tenant browsing). */}
         Cross-tenant browsing is intentionally not exposed. Each authenticated session is bound to one
-        tenant by Postgres RLS (see <code>middlewares/tenantContext.ts</code>); breaking that boundary
-        would weaken the isolation guarantees we publish in the privacy policy. To administer a
-        different tenant, sign in with that tenant&apos;s admin account.
+        tenant at the database layer, so an admin account only sees rows for the tenant it belongs to.
+        To administer a different tenant, sign in with that tenant&apos;s admin account.
       </Alert>
 
       <TableContainer component={Paper} variant="outlined">

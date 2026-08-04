@@ -121,7 +121,17 @@ export default function PhoneField({
         }}
         defaultCountry={country as Parameters<typeof PhoneInput>[0]['defaultCountry']}
         value={value ?? ''}
-        onChange={(phone) => onChange(phone)}
+        onChange={(phone) => {
+          // SVT-QA-2026-08 — react-international-phone emits the bare calling
+          // code (e.g. "+977") whenever the country selector changes without
+          // any subscriber digits typed. That bare-code value fails E.164
+          // validation on the server for optional phone fields and silently
+          // blocks form submits (the error surfaces below the fold on scroll).
+          // Normalize the "code-only" state to empty so downstream validators
+          // see "no phone provided" — which is what the user actually meant.
+          const trimmed = phone.trim();
+          onChange(/^\+\d{1,4}$/.test(trimmed) ? '' : phone);
+        }}
         disabled={disabled}
       />
       <FormHelperText id={helperId} error={error}>

@@ -64,11 +64,13 @@ export default function InsuranceSection({ studentId }: InsuranceSectionProps) {
   const dlg = useDialogState<Insurance>();
   const deleteDlg = useDialogState<Insurance>();
 
-  const queryKey = ['students', studentId, 'insurance'];
+  const queryKey = ['students', studentId, 'insurances'];
   const listQuery = useQuery({
     queryKey,
     queryFn: async () => {
-      const res = await api.get(`/students/${studentId}/insurance`);
+      // Backend mounts /api/v1/students/:studentId/insurances (plural) — this
+      // section had /insurance singular in all four routes; every request 404'd.
+      const res = await api.get(`/students/${studentId}/insurances`);
       return unwrapList<Insurance>(res.data);
     },
   });
@@ -95,7 +97,7 @@ export default function InsuranceSection({ studentId }: InsuranceSectionProps) {
 
   const removeMutation = useMutation<void, ApiError, Insurance>({
     mutationFn: async (row) => {
-      await api.delete(`/insurance/${row.id}`);
+      await api.delete(`/insurances/${row.id}`);
     },
     onSuccess: () => {
       enqueueSnackbar('Insurance policy deleted', { variant: 'success' });
@@ -212,8 +214,8 @@ function InsuranceFormDialog({
   const mutation = useMutation<unknown, ApiError, FormValues>({
     mutationFn: async (values) => {
       const body = compactPayload(values);
-      if (editing) return api.patch(`/insurance/${editing.id}`, body);
-      return api.post(`/students/${studentId}/insurance`, body);
+      if (editing) return api.patch(`/insurances/${editing.id}`, body);
+      return api.post(`/students/${studentId}/insurances`, body);
     },
     onSuccess: () => {
       enqueueSnackbar(editing ? 'Insurance updated' : 'Insurance added', { variant: 'success' });

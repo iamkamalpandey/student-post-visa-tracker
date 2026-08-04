@@ -110,12 +110,20 @@ export async function list(req: Request, q: CommissionListQuery) {
     if (q.paid_to) (where.paid_on as Prisma.DateTimeFilter).lte = new Date(q.paid_to);
   }
 
+  // SVT-QA-2026-08 — offset-based pagination when `page` provided (admin
+  // table UI); cursor-based otherwise. `page` takes precedence so a caller
+  // sending both gets the deterministic offset behaviour.
+  const paginate = q.page
+    ? { skip: (q.page - 1) * q.limit, take: q.limit }
+    : {
+        take: q.limit,
+        ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      };
   const [rows, total] = await Promise.all([
     db(req).commissionClaim.findMany({
       where,
       orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
-      take: q.limit,
-      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      ...paginate,
       include: fullInclude,
     }),
     db(req).commissionClaim.count({ where }),

@@ -91,10 +91,6 @@ const ACTION_FAMILIES: Array<{ label: string; value: string }> = [
 
 const PAGE_SIZE = 25;
 
-const VERIFY_SQL = `-- Run as DB superuser inside psql to verify the audit chain for a tenant:
-SELECT * FROM audit_logs_verify('00000000-0000-0000-0000-000000000000'::uuid);
--- Returns one row per gap or hash mismatch; an empty result set means the chain is intact.`;
-
 // UUID v4-ish loose pattern — accepts any 8-4-4-4-12 hex string. We don't
 // reject lower/upper case; the backend canonicalises.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -301,27 +297,14 @@ function VerifierCard() {
               Verifier
             </Typography>
             <Typography variant="body2" color="text.secondary">
+              {/* SVT-QA-2026-08 — dropped the raw psql snippet from the
+                  customer-facing UI. The Verify chain button already runs the
+                  same check for admins. */}
               The audit log is append-only and every row carries a SHA-256 hash of itself
-              plus the hash of the previous row. The Verify chain button calls{' '}
-              <Box component="code" sx={{ mx: 0.5, fontFamily: 'monospace' }}>
-                GET /api/v1/audit-logs/verify
-              </Box>
-              which runs the per-tenant chain verifier. Any broken rows are highlighted
-              red in the table below. The equivalent SQL (run as DB superuser) is:
+              plus the hash of the previous row. The <strong>Verify chain</strong> button re-computes
+              the per-tenant chain and highlights any broken rows red in the table below.
+              An intact chain means no row has been altered or deleted since it was written.
             </Typography>
-            <Paper
-              variant="outlined"
-              sx={{
-                bgcolor: 'action.hover',
-                p: 1.5,
-                borderRadius: 1,
-                fontFamily: 'monospace',
-                fontSize: 12,
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              {VERIFY_SQL}
-            </Paper>
           </Stack>
         </Stack>
       </CardContent>

@@ -11,7 +11,7 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { getTranslations } from 'next-intl/server';
-import { Box, Divider, Stack, Typography } from '@mui/material';
+import { Alert, Box, Divider, Stack, Typography } from '@mui/material';
 
 const SUPPORT_EMAIL = process.env.NEXT_PUBLIC_SUPPORT_EMAIL || 'support@example.com';
 const EFFECTIVE_DATE = '2026-05-19';
@@ -57,6 +57,13 @@ export default async function PrivacyPage() {
 
   return (
     <Stack spacing={4}>
+      {/* SVT-QA-2026-08 — match the counsel-review banner already present on
+          /legal/terms. This policy is a starting-point draft; the operative
+          privacy commitments live in the executed DPA per tenant. */}
+      <Alert severity="warning" variant="outlined">
+        {tc('draftBanner')}
+      </Alert>
+
       <Box>
         <Typography variant="h3" component="h1" sx={{ fontWeight: 700 }}>
           {t('title')}

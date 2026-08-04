@@ -44,6 +44,12 @@ export function formatRelative(iso: string, locale = 'en', _opts: FormatOptions 
   const diff = then - Date.now();
   const abs = Math.abs(diff);
   const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+  // SVT-QA-2026-08 — clamp near-now diffs (both directions) to "now" so a
+  // just-created row whose server timestamp is a few seconds ahead of the
+  // client clock never reads as future-tense ("in 1 second"). Threshold is
+  // 30s — larger than any realistic client/server clock skew but small enough
+  // that fresh events read as "now" for their first half-minute.
+  if (abs < 30_000) return rtf.format(0, 'second');
   for (const { unit, ms } of RTF_UNITS) {
     if (abs >= ms || unit === 'second') {
       const value = Math.round(diff / ms);

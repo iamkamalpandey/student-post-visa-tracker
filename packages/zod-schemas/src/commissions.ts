@@ -30,6 +30,11 @@ export const CommissionListQuery = PaginationQuery.extend({
   claimed_to: Iso8601Date.optional(),
   paid_from: Iso8601Date.optional(),
   paid_to: Iso8601Date.optional(),
+  // SVT-QA-2026-08 — offset-based pagination for admin table UI. Frontend
+  // Commissions Client passes 1-based page numbers; when supplied, the service
+  // computes offset from (page-1)*limit and ignores `cursor`. Kept optional so
+  // the cursor-based flow remains the default for non-UI callers.
+  page: z.coerce.number().int().min(1).optional(),
 }).strict();
 export type CommissionListQuery = z.infer<typeof CommissionListQuery>;
 
