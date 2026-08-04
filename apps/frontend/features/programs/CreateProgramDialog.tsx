@@ -222,11 +222,11 @@ export default function CreateProgramDialog({
     <AppDialog
       open={open}
       onClose={onClose}
-      title="New program"
-      subtitle="Add a program offered by an institution. You can add intakes, fees and modules from the detail page."
+      title="New course"
+      subtitle="Add a course offered by an institution. You can add intakes, fees and modules from the detail page."
       maxWidth="md"
       primaryAction={{
-        label: 'Create program',
+        label: 'Create course',
         loadingLabel: 'Creating…',
         loading: submitting,
         formId: 'create-program-form',
@@ -247,7 +247,7 @@ export default function CreateProgramDialog({
 
         {/* --- Identity ---------------------------------------------- */}
         <FormSection
-          title="Program identity"
+          title="Course identity"
           subtitle="Institution, names and academic level"
           icon={<SchoolOutlinedIcon />}
           iconColor="muted"
@@ -490,7 +490,7 @@ export default function CreateProgramDialog({
                   fullWidth
                   size="medium"
                   hiddenLabel
-                  placeholder="36"
+                  placeholder="e.g. 36"
                   error={Boolean(errors.duration_months)}
                   {...register('duration_months', { required: 'Required' })}
                 />
@@ -509,7 +509,7 @@ export default function CreateProgramDialog({
                   fullWidth
                   size="medium"
                   hiddenLabel
-                  placeholder="360"
+                  placeholder="e.g. 360"
                   error={Boolean(errors.credit_hours)}
                   {...register('credit_hours')}
                 />

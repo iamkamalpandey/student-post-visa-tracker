@@ -135,6 +135,23 @@ export default function ReportsPage() {
     },
   });
 
+  // SVT-QA-2026-08 — stage lookup for the "Students per stage" chart.
+  // The /dashboard/summary aggregation groups by stage_id only (cheap on the
+  // backend); resolving the human-readable label here keeps the chart
+  // readable to admins without changing the aggregation contract.
+  const stagesQuery = useQuery<{ data: Array<{ id: string; key: string; label: string; color_hex?: string | null }> }>({
+    queryKey: ['stages', 'for-reports'],
+    queryFn: async () => {
+      const res = await api.get<{ data: Array<{ id: string; key: string; label: string; color_hex?: string | null }> }>('/stages');
+      return res.data;
+    },
+    staleTime: 5 * 60_000,
+  });
+  const stageLookup = new Map<string, { label: string; key: string }>();
+  for (const s of stagesQuery.data?.data ?? []) {
+    stageLookup.set(s.id, { label: s.label, key: s.key });
+  }
+
   const statusCounts = new Map<string, number>();
   for (const s of summaryQuery.data?.data.by_status ?? []) {
     statusCounts.set(s.status, s.count);
@@ -379,15 +396,22 @@ export default function ReportsPage() {
                     <Stack spacing={1.5}>
                       {stageData.map((s) => {
                         const pct = Math.max(2, Math.round((s.count / maxStageCount) * 100));
+                        // SVT-QA-2026-08 — resolve stage_id → label; fall back
+                        // to the id fragment only when the lookup is still
+                        // loading or the row was deleted. Never a bare UUID
+                        // fragment in the happy path.
+                        const meta = s.stage_id ? stageLookup.get(s.stage_id) : null;
+                        const displayLabel = meta?.label
+                          ?? (s.stage_id ? `Stage ${s.stage_id.slice(0, 8)}` : '(unassigned)');
                         return (
                           <Stack key={s.stage_id ?? '(none)'} spacing={0.5}>
                             <Stack direction="row" justifyContent="space-between">
                               <Typography
                                 variant="caption"
-                                sx={{ fontFamily: 'monospace', color: 'text.secondary' }}
+                                sx={{ color: 'text.secondary' }}
                                 noWrap
                               >
-                                {s.stage_id ? s.stage_id.slice(0, 8) : '(unassigned)'}
+                                {displayLabel}
                               </Typography>
                               <Typography variant="caption" sx={{ fontWeight: 600 }}>
                                 {s.count}
@@ -400,7 +424,7 @@ export default function ReportsPage() {
                                 bgcolor: 'action.hover',
                                 overflow: 'hidden',
                               }}
-                              aria-label={`${s.count} students in stage ${s.stage_id ?? 'unassigned'}`}
+                              aria-label={`${s.count} students in stage ${displayLabel}`}
                             >
                               <Box
                                 sx={{

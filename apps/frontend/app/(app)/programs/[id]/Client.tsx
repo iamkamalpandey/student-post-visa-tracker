@@ -145,10 +145,12 @@ export default function ProgramDetailPage() {
     <Stack spacing={3}>
       <Stack spacing={1}>
         <Breadcrumbs separator="›">
+          {/* SVT-QA-2026-08 — breadcrumb label standardised to "Courses"
+              to match the sidebar + page heading + browser tab. */}
           <Link href="/programs" style={{ color: 'inherit', textDecoration: 'none' }}>
             <Stack direction="row" alignItems="center" spacing={0.5}>
               <ArrowBackIosNewIcon fontSize="inherit" />
-              <Typography variant="body2">Programs</Typography>
+              <Typography variant="body2">Courses</Typography>
             </Stack>
           </Link>
           {prog.institution ? (

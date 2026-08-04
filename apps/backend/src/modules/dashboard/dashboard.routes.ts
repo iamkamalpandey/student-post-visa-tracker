@@ -460,14 +460,16 @@ dashboardRouter.get('/engagement-at-risk', async (req, res, next) => {
 
 // SVT-WAVE60-ONBOARDING-2026-05 — first-run setup checklist.
 //
-// Returns the 8 setup steps every new tenant has to walk through. Each step
+// Returns the setup steps every new tenant has to walk through. Each step
 // has an `id`, a human label, a boolean `complete`, and an `action_url`
 // pointing at the FE screen that resolves it. The FE renders a "Get started"
-// card on the dashboard until all 8 are complete; the dismissal is purely
+// card on the dashboard until all steps are complete; dismissal is purely
 // client-side (localStorage). Restricted to ADMIN/COUNSELLOR — viewers don't
 // own onboarding work and shouldn't see the prompts.
 //
-// Cached per tenant for 60s. The check itself is 6 cheap counts + 2 finds.
+// Cached per tenant for 60s.
+// SVT-QA-2026-08 — extended from 8 steps to 10 (visa types + Art. 30
+// sub-processor register).
 dashboardRouter.get('/onboarding', async (req, res, next) => {
   try {
     const tenantId = req.user?.tid;
@@ -483,21 +485,35 @@ dashboardRouter.get('/onboarding', async (req, res, next) => {
       return;
     }
 
-    const [tenant, userCount, studentCount, institutionCount, programCount, stageCount, adminMfaCount] =
-      await Promise.all([
-        db.tenant.findUnique({
-          where: { id: tenantId },
-          select: { legal_name: true, name: true, billing_enabled: true },
-        }),
-        db.user.count({ where: { tenant_id: tenantId } }),
-        db.student.count({ where: { tenant_id: tenantId, deleted_at: null } }),
-        db.institution.count({ where: { tenant_id: tenantId } }),
-        db.program.count({ where: { tenant_id: tenantId } }),
-        db.lifecycleStage.count({ where: { tenant_id: tenantId } }),
-        db.user.count({
-          where: { tenant_id: tenantId, role: 'ADMIN', mfa_enabled: true },
-        }),
-      ]);
+    // SVT-QA-2026-08 — two extra counts feed new "empty compliance register"
+    // checklist items (visa types + Art 30 sub-processors). Both are cheap
+    // COUNT(*) queries and are folded into the same 60s per-tenant cache.
+    const [
+      tenant,
+      userCount,
+      studentCount,
+      institutionCount,
+      programCount,
+      stageCount,
+      adminMfaCount,
+      visaTypeCount,
+      subProcessorCount,
+    ] = await Promise.all([
+      db.tenant.findUnique({
+        where: { id: tenantId },
+        select: { legal_name: true, name: true, billing_enabled: true },
+      }),
+      db.user.count({ where: { tenant_id: tenantId } }),
+      db.student.count({ where: { tenant_id: tenantId, deleted_at: null } }),
+      db.institution.count({ where: { tenant_id: tenantId } }),
+      db.program.count({ where: { tenant_id: tenantId } }),
+      db.lifecycleStage.count({ where: { tenant_id: tenantId } }),
+      db.user.count({
+        where: { tenant_id: tenantId, role: 'ADMIN', mfa_enabled: true },
+      }),
+      db.visaType.count({ where: { tenant_id: tenantId } }),
+      db.subProcessor.count({ where: { tenant_id: tenantId, removed_at: null } }),
+    ]);
 
     // tenant_settings: legal_name set and not the seed default. Treat both a
     // blank legal_name and the literal "Default Tenant" as incomplete so a
@@ -560,6 +576,22 @@ dashboardRouter.get('/onboarding', async (req, res, next) => {
         label: 'Enable MFA on an admin account',
         complete: adminMfaCount >= 1,
         action_url: '/settings',
+      },
+      // SVT-QA-2026-08 — surface empty compliance registers. A tenant tracking
+      // students through a visa lifecycle without visa types configured has an
+      // incomplete catalogue; the Art 30 register must have at least one row
+      // if the tenant uses any processor (which every deployed tenant does).
+      {
+        id: 'first_visa_type',
+        label: 'Add at least one visa type',
+        complete: visaTypeCount >= 1,
+        action_url: '/visa-types',
+      },
+      {
+        id: 'first_sub_processor',
+        label: 'Populate the Art. 30 sub-processor register',
+        complete: subProcessorCount >= 1,
+        action_url: '/sub-processors',
       },
     ];
     const complete_count = steps.reduce((acc, s) => acc + (s.complete ? 1 : 0), 0);
