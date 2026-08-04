@@ -327,6 +327,72 @@ was caught by checking the existing migrations before writing the new one.
   trigram indexes; coverage was good, the gaps were specifically the
   ORDER BY-matching composites above.
 
+## Backlog burn-down (SVT-QA/CRYPTO/PII-2026-08)
+
+Five of the six long-standing deferred items are now closed. Commits:
+`2f68d36`, `6de96d9`, `bbb4506`.
+
+| Item | Status |
+|---|---|
+| `dsar/service.ts` raw prisma → `withTenantTx` | **DONE** — was returning an EMPTY Art. 15 bundle under `spv_app` (every read RLS-filtered to zero rows). Also now a consistent snapshot instead of ~35 independent statements. |
+| Frontend unit tests | **DONE** — `test` was `echo no tests yet`. Now vitest + jsdom + RTL, 66 tests: XSS URL guards, exhaustive role truth table, money/date formatting. Wired into `frontend-ci`. |
+| Real-Postgres RLS enforcement test | **DONE** — `tests/rls-enforcement.integration.spec.ts`. Creates a NOSUPERUSER NOBYPASSRLS role (asserting that fact first, so the file cannot silently become vacuous), then proves read isolation both ways, direct-id IDOR, zero-rows-without-GUC, `WITH CHECK` on INSERT, no-op cross-tenant UPDATE/DELETE, and that the GUC is transaction-LOCAL. Skips when no DB is reachable. |
+| CI never ran migrations | **DONE** — `backend-ci` now runs `prisma migrate deploy`. ~50 migrations were untested until a production deploy, and the RLS policies (raw-SQL migrations that `db push` skips) did not exist in CI at all, which is what made the test above possible. |
+| KEK versioning | **DONE** — see below. |
+| Student PII encryption | **STAGE 1 OF 6** — see below. |
+| a11y + hydration edges | **DONE** — 4 IconButton + 1 Switch aria-labels, shared `RowActions` gained `itemLabel` (a table of ten rows no longer shows ten identical "Edit" buttons), calendar/outbox UTC-midnight hydration, legal-footer year. |
+
+### KEK versioning — rotating a local KEK was destroying all encrypted PII
+
+`LocalKms` wrapped DEKs as `[iv][ct][tag]` with **no key identity**, and the v1
+envelope recorded none either. Changing `KMS_KEK_BASE64` — a scheduled security
+operation, and the documented response to a suspected compromise — silently
+made every existing ciphertext permanently undecryptable. It did not fail at
+deploy; it failed later, as an opaque GCM error, the first time someone read an
+affected row. `aws`/`gcp` were never affected (their blobs embed the key id).
+
+Envelope **v2** now stamps the active KEK id, and `LocalKms` keeps a registry of
+retired keys (`KMS_KEK_PREVIOUS`). v1 blobs still decrypt unchanged, so **no
+migration or backfill is required**. A missing retired key now errors with the
+id **named**. `rewrap-secrets` skips rows already on the active key, making an
+interrupted rewrap cheaply resumable. 10 tests drive the real crypto path.
+
+### Student PII encryption — stage 1 of 6 landed, deliberately
+
+Target columns: `Student.email_primary`, `email_secondary`,
+`phone_primary_e164`, `phone_secondary_e164`, `date_of_birth`;
+`StudentContact.email`, `phone_e164`.
+
+**Stage 1 (landed, `bbb4506`): the blind index.** Envelope encryption is
+non-deterministic by design, which breaks three things the app relies on:
+`@@unique([tenant_id, email_primary])`, the unauthenticated public-DSAR
+subject-by-email lookup, and the convert dedup guard's `date_of_birth` match.
+A keyed HMAC over the normalised value carries equality. It is inert — nothing
+reads it yet — and independently tested (19 cases).
+
+**Remaining stages, each needing its own deploy:**
+
+2. Additive migration: `*_enc Bytes` + `*_bidx String` columns; move the unique
+   constraint from `email_primary` to the blind index.
+3. Dual-write (plaintext + ciphertext + index) across the 11 backend files that
+   touch these columns.
+4. Backfill existing rows.
+5. Cut reads over to ciphertext; verify.
+6. Drop the plaintext columns.
+
+**Why not all at once:** you cannot atomically encrypt a live column. Shipping
+2–6 together leaves the table half-encrypted on any partial failure, with
+readers that crash on the rows that did not convert.
+
+**Why stages 2–4 were not attempted in this session:** they are a data
+migration touching every student row, and Docker/Postgres was unavailable in
+this environment — the migration could not be executed or verified even once.
+An untested backfill over PII is a worse outcome than a documented gap. Scope
+is now known and small: 11 files, 74 references, and the trigram search index
+does **not** cover these columns, so full-text search is unaffected. Only one
+equality lookup (`dsar-public/service.ts:66`) and the DOB dedup guard need the
+index, and both are now served.
+
 ### CANNOT REPRODUCE / DEFERRED
 
 - **H5 `/status` page renders app error** — [/status page](apps/frontend/app/(public)/status/page.tsx) has a try/catch fallback around the backend fetch and the `status` i18n namespace exists at `messages/en.json:673`. The reported crash is env-specific (possibly the QA session hit it before the backend `/api/v1/public/status` route was deployed). Retest after this deploy.
