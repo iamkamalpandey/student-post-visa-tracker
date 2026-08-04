@@ -60,6 +60,22 @@ const EnvSchema = z.object({
   // AWS_REGION which the AWS SDK already honours, so only set this if you
   // need to override the SDK's default resolution.
   KMS_AWS_REGION: z.string().min(1).optional(),
+  // SVT-CRYPTO-2026-08 — KEK rotation support for KMS_PROVIDER=local.
+  //
+  // `local` wraps DEKs as [iv][ct][tag] with NO key identity embedded, so
+  // before this, rotating KMS_KEK_BASE64 made every existing ciphertext
+  // permanently undecryptable — silent, total, unrecoverable data loss on a
+  // routine security operation. (AWS/GCP are unaffected: their ciphertext
+  // blobs carry the key id internally.)
+  //
+  // KMS_KEK_ID names the ACTIVE key; it is stamped into every new envelope.
+  // KMS_KEK_PREVIOUS holds retired keys as a comma-separated `id:base64` list
+  // so old ciphertext keeps decrypting until infra/scripts/rewrap-secrets.ts
+  // has re-wrapped it. Rotation becomes: mint a new key, set KMS_KEK_BASE64 +
+  // a NEW KMS_KEK_ID, move the old pair into KMS_KEK_PREVIOUS, deploy, rewrap,
+  // then drop the old entry.
+  KMS_KEK_ID: z.string().min(1).default('local-kek-v1'),
+  KMS_KEK_PREVIOUS: z.string().min(1).optional(),
   // REFRESH_TOKEN_PEPPER — 32-byte hex (64 chars). HMAC pepper applied to
   // refresh-token storage hashes. Required in production; rotating it
   // invalidates every issued refresh token and forces re-login (no DB

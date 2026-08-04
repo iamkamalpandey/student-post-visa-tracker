@@ -48,7 +48,8 @@
 // complete in the progress table.
 
 import { PrismaClient, Prisma } from '@prisma/client';
-import { decryptFieldRaw, encryptField } from '../src/shared/encryption.js';
+import { decryptFieldRaw, encryptField, envelopeKekId } from '../src/shared/encryption.js';
+import { getKms } from '../src/config/kms.js';
 import { getKms } from '../src/config/kms.js';
 import { logger } from '../src/config/logger.js';
 
@@ -145,6 +146,10 @@ export async function rewrapColumn(
   const tableId = Prisma.raw(`"${col.table}"`);
   const colId = Prisma.raw(`"${col.column}"`);
   const pkId = Prisma.raw(`"${col.pk}"`);
+  // SVT-CRYPTO-2026-08 — the KEK new writes are wrapped under. Rows whose v2
+  // envelope already names it are skipped (see the loop below), which makes a
+  // re-run cheap and therefore makes the whole operation safely resumable.
+  const activeKekId = getKms().rotateKekId();
   let touched = 0;
   let cursor: string | null = null;
 
@@ -183,7 +188,19 @@ export async function rewrapColumn(
     // CPU + remote KMS calls). Doing them inside would hold a write
     // transaction open across network IO.
     const rewrapped: { id: string; newBlob: Buffer }[] = [];
+    let skippedAlreadyCurrent = 0;
     for (const r of rows) {
+      // SVT-CRYPTO-2026-08 — v2 envelopes record the KEK that wrapped them, so
+      // a row already under the ACTIVE key needs no work. Skipping those turns
+      // a re-run from "decrypt + re-encrypt every row again" into a cheap scan,
+      // which matters because rewrap is exactly the operation you want to be
+      // able to resume after an interruption without redoing everything.
+      // Legacy v1 blobs return null and are always rewrapped (that is how they
+      // acquire an id in the first place).
+      if (envelopeKekId(r.blob) === activeKekId) {
+        skippedAlreadyCurrent += 1;
+        continue;
+      }
       const plain = await decryptFieldRaw(r.blob);
       const newBlob = await encryptField(plain);
       // Defensive: confirm a round-trip on the NEW blob before persisting.
@@ -218,7 +235,17 @@ export async function rewrapColumn(
     touched += rows.length;
     cursor = rows[rows.length - 1]!.id;
     logger.info(
-      { table: col.table, column: col.column, batchSize: rows.length, totalForColumn: touched, dryRun: args.dryRun },
+      {
+        table: col.table,
+        column: col.column,
+        batchSize: rows.length,
+        rewrapped: rewrapped.length,
+        // SVT-CRYPTO-2026-08 — rows already wrapped under the active KEK.
+        // On a resumed run this should be most of the batch.
+        skippedAlreadyCurrent,
+        totalForColumn: touched,
+        dryRun: args.dryRun,
+      },
       'rewrap-secrets: batch complete',
     );
   }

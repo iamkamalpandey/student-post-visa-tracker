@@ -112,7 +112,23 @@ describe('encryption — isCiphertext', () => {
 
   it('returns false for random bytes (low collision probability)', () => {
     const rnd = randomBytes(64);
-    rnd[0] = 0x02; // force non-version byte
+    // SVT-CRYPTO-2026-08 — this used to force 0x02 as "a non-version byte".
+    // 0x02 is now the CURRENT write version (the envelope that carries the
+    // KEK id), so it must be recognised. Use a byte outside the known set.
+    rnd[0] = 0x7f;
     expect(isCiphertext(rnd)).toBe(false);
+  });
+
+  it('recognises BOTH envelope versions', () => {
+    // v1 (legacy, still readable) and v2 (current, carries the KEK id). A
+    // reader that rejected v1 would treat every pre-rotation-support row as
+    // plaintext; one that rejected v2 would do the same for every new row.
+    const v1 = randomBytes(64);
+    v1[0] = 0x01;
+    expect(isCiphertext(v1)).toBe(true);
+
+    const v2 = randomBytes(64);
+    v2[0] = 0x02;
+    expect(isCiphertext(v2)).toBe(true);
   });
 });

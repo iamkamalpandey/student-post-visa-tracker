@@ -41,9 +41,20 @@ const TAG_LEN = 16; // 128 bits
 export interface Kms {
   /** Generate a fresh 256-bit DEK and its KEK-wrapped form. */
   generateDek(): Promise<{ dek: Buffer; encryptedDek: Buffer }>;
-  /** Unwrap a previously wrapped DEK. Throws on tag mismatch / wrong KEK. */
-  decryptDek(encryptedDek: Buffer): Promise<Buffer>;
-  /** Identifier of the active KEK; returned in audit metadata, used during rotation. */
+  /**
+   * Unwrap a previously wrapped DEK. Throws on tag mismatch / wrong KEK.
+   *
+   * SVT-CRYPTO-2026-08 — `kekId` identifies WHICH key wrapped this DEK, read
+   * from the v2 envelope header. Providers that embed key identity in their
+   * own ciphertext (AWS, GCP) ignore it. `local` uses it to select from its
+   * KEK registry, which is what makes rotation survivable: without it, a
+   * rotated KEK orphans every existing ciphertext.
+   *
+   * Undefined means "v1 envelope, no id recorded" — providers fall back to the
+   * active key, preserving the pre-rotation behaviour for legacy blobs.
+   */
+  decryptDek(encryptedDek: Buffer, kekId?: string): Promise<Buffer>;
+  /** Identifier of the active KEK; stamped into new envelopes, used during rotation. */
   rotateKekId(): string;
 }
 
@@ -62,13 +73,37 @@ export interface Kms {
 export class LocalKms implements Kms {
   private readonly kek: Buffer;
   private readonly kekId: string;
+  /**
+   * SVT-CRYPTO-2026-08 — retired KEKs, by id. Ciphertext written before a
+   * rotation still names the key that wrapped it, so we can unwrap it here
+   * until `rewrap-secrets` has migrated every row. Without this registry a
+   * KEK rotation is equivalent to deleting all encrypted PII.
+   */
+  private readonly previous: ReadonlyMap<string, Buffer>;
 
-  constructor(kek: Buffer, kekId = 'local-kek-v1') {
+  constructor(kek: Buffer, kekId = 'local-kek-v1', previous?: ReadonlyMap<string, Buffer>) {
     if (kek.length !== KEK_LEN) {
       throw new Error(`LocalKms: KEK must be ${KEK_LEN} bytes, got ${kek.length}`);
     }
     this.kek = kek;
     this.kekId = kekId;
+    this.previous = previous ?? new Map();
+  }
+
+  /** Resolve the key for an envelope's recorded id. */
+  private keyFor(kekId?: string): Buffer {
+    // v1 envelopes carry no id — they predate rotation support, so by
+    // definition they were written with the only key that ever existed.
+    if (kekId === undefined || kekId === this.kekId) return this.kek;
+    const old = this.previous.get(kekId);
+    if (!old) {
+      throw new Error(
+        `LocalKms.decryptDek: ciphertext was wrapped with KEK "${kekId}" which is not the active ` +
+          `key ("${this.kekId}") and is not in KMS_KEK_PREVIOUS. Restore that key material to ` +
+          `KMS_KEK_PREVIOUS as "${kekId}:<base64>" — this data CANNOT be decrypted without it.`,
+      );
+    }
+    return old;
   }
 
   async generateDek(): Promise<{ dek: Buffer; encryptedDek: Buffer }> {
@@ -81,14 +116,15 @@ export class LocalKms implements Kms {
     return { dek, encryptedDek };
   }
 
-  async decryptDek(encryptedDek: Buffer): Promise<Buffer> {
+  async decryptDek(encryptedDek: Buffer, kekId?: string): Promise<Buffer> {
     if (encryptedDek.length < IV_LEN + TAG_LEN) {
       throw new Error('LocalKms.decryptDek: wrapped DEK too short');
     }
+    const key = this.keyFor(kekId);
     const iv = encryptedDek.subarray(0, IV_LEN);
     const tag = encryptedDek.subarray(encryptedDek.length - TAG_LEN);
     const ct = encryptedDek.subarray(IV_LEN, encryptedDek.length - TAG_LEN);
-    const decipher = createDecipheriv(ALG, this.kek, iv);
+    const decipher = createDecipheriv(ALG, key, iv);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ct), decipher.final()]);
   }
@@ -185,7 +221,11 @@ export class AwsKmsKms implements Kms {
     };
   }
 
-  async decryptDek(encryptedDek: Buffer): Promise<Buffer> {
+  // `kekId` is intentionally unused: an AWS KMS CiphertextBlob embeds the key
+  // id it was produced under, so KMS.Decrypt resolves the right key (and the
+  // right rotated version) on its own. We accept the parameter to satisfy the
+  // interface and keep the call site provider-agnostic.
+  async decryptDek(encryptedDek: Buffer, _kekId?: string): Promise<Buffer> {
     const c = await this.client();
     const out = await c.decrypt(encryptedDek);
     return Buffer.from(out.Plaintext);
@@ -215,6 +255,46 @@ function loadLocalKek(): Buffer {
   throw new Error(
     'KMS_KEK_BASE64 is required outside of test. Generate with: openssl rand -base64 32',
   );
+}
+
+/**
+ * SVT-CRYPTO-2026-08 — parse `KMS_KEK_PREVIOUS` into an id -> key registry.
+ *
+ * Format: `id:base64,id:base64` — e.g.
+ *   local-kek-v1:9f8a…==,local-kek-v2:3b1c…==
+ *
+ * Fails LOUDLY on a malformed entry rather than skipping it. A silently-dropped
+ * retired key looks identical to a correct config right up until someone reads
+ * a row encrypted under it, at which point the data is unrecoverable — exactly
+ * the failure mode this registry exists to prevent.
+ */
+function loadPreviousKeks(): ReadonlyMap<string, Buffer> {
+  const raw = env.KMS_KEK_PREVIOUS;
+  const out = new Map<string, Buffer>();
+  if (!raw) return out;
+
+  for (const entry of raw.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(':');
+    if (sep <= 0) {
+      throw new Error(
+        `KMS_KEK_PREVIOUS entry "${trimmed}" is malformed. Expected "id:base64" pairs, comma-separated.`,
+      );
+    }
+    const id = trimmed.slice(0, sep).trim();
+    const buf = Buffer.from(trimmed.slice(sep + 1).trim(), 'base64');
+    if (buf.length !== KEK_LEN) {
+      throw new Error(
+        `KMS_KEK_PREVIOUS entry "${id}" must decode to ${KEK_LEN} bytes (got ${buf.length}).`,
+      );
+    }
+    if (out.has(id)) {
+      throw new Error(`KMS_KEK_PREVIOUS contains duplicate key id "${id}".`);
+    }
+    out.set(id, buf);
+  }
+  return out;
 }
 
 let cached: Kms | null = null;
@@ -261,7 +341,7 @@ export function getKms(): Kms {
       );
     case 'local':
     default:
-      cached = new LocalKms(loadLocalKek());
+      cached = new LocalKms(loadLocalKek(), env.KMS_KEK_ID, loadPreviousKeks());
       return cached;
   }
 }

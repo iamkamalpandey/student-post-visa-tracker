@@ -4,6 +4,63 @@
 **Trigger:** Quarterly schedule, suspected KEK compromise, retirement of an HSM key version.
 **Scope:** This runbook covers the per-row re-wrap of envelope-encrypted PII columns AND the independent rotations of `REFRESH_TOKEN_PEPPER` and `LOG_HMAC_KEY_BASE64` (a.k.a. `CORRELATION_HMAC_KEY`). The legacy `kms-rotation.md` is preserved as the architecture primer and links here for the actual procedure.
 
+## SVT-CRYPTO-2026-08 — read this first if `KMS_PROVIDER=local`
+
+Until this change, rotating a **local** KEK was a data-destroying operation and
+nothing in the system said so.
+
+`LocalKms` wraps a DEK as `[iv][ct][tag]` with **no key identity inside**, and
+the v1 envelope recorded none either. So swapping `KMS_KEK_BASE64` left every
+existing ciphertext undecryptable, with no way to determine which key a given
+blob needed. The failure did not surface at deploy time — it surfaced later, as
+an opaque GCM authentication error, the first time anyone read an affected row.
+Phase 1's dry-run below was the only thing standing between an operator and
+permanent PII loss.
+
+Two things changed:
+
+- **Envelope v2** stamps the active KEK id into every new blob. v1 blobs still
+  decrypt unchanged (they fall back to the active key, exactly as before), so
+  **no migration or backfill is required** to adopt this.
+- **`LocalKms` keeps a registry of retired keys** (`KMS_KEK_PREVIOUS`, a
+  comma-separated `id:base64` list), so ciphertext written before a rotation
+  stays readable until it has been re-wrapped.
+
+The practical effect on this runbook: the old key is now retained *in config*
+during the rotation window rather than existing only in the operator's
+clipboard. If a retired key is missing, the error **names the key id it needs**
+instead of failing with an opaque crypto error.
+
+`aws` and `gcp` were never affected — their ciphertext blobs carry the key id
+internally and the provider resolves it server-side.
+
+### Local-KEK rotation, concretely
+
+```bash
+openssl rand -base64 32          # new key material
+```
+
+Then, in one config change:
+
+| Variable | Before | After |
+|---|---|---|
+| `KMS_KEK_BASE64` | `<old>` | `<new>` |
+| `KMS_KEK_ID` | `kek-2026-01` | `kek-2026-08` |
+| `KMS_KEK_PREVIOUS` | *(empty)* | `kek-2026-01:<old-base64>` |
+
+Deploy, then run the re-wrap (Phase 2 below). Re-runs are cheap: rows already
+wrapped under the active key are skipped via the envelope's recorded id, so an
+interrupted rewrap resumes instead of redoing everything.
+
+**Do not remove the retired entry from `KMS_KEK_PREVIOUS` until the re-wrap
+reports zero remaining rows.** Any row still wrapped under it becomes
+unrecoverable the moment that key material is gone.
+
+Covered by `tests/kms-kek-rotation.spec.ts`, which drives the real crypto path
+and asserts old ciphertext survives rotation, new writes carry the new id, a
+missing retired key produces an actionable error naming it, and multi-generation
+registries work.
+
 ## Background
 
 | Secret                  | Purpose                                                  | Storage         | Rotation impact                                                   |
