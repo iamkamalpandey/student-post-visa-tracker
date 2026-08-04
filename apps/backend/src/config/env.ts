@@ -76,6 +76,16 @@ const EnvSchema = z.object({
   // then drop the old entry.
   KMS_KEK_ID: z.string().min(1).default('local-kek-v1'),
   KMS_KEK_PREVIOUS: z.string().min(1).optional(),
+  // SVT-PII-2026-08 — HMAC key for the deterministic "blind index" columns that
+  // keep unique constraints and equality lookups working on encrypted PII
+  // (see shared/blindIndex.ts). Base64, >= 32 bytes.
+  //
+  // Deliberately SEPARATE from the KEK and from LOG_HMAC_KEY_BASE64: rotating
+  // the audit-correlation key must not invalidate every unique constraint on
+  // the students table, and vice versa. Unlike the KEK, losing this key is not
+  // a data-loss event — the ciphertext is untouched and the index can be
+  // rebuilt by decrypting each row.
+  PII_BLIND_INDEX_KEY: z.string().min(32).optional(),
   // REFRESH_TOKEN_PEPPER — 32-byte hex (64 chars). HMAC pepper applied to
   // refresh-token storage hashes. Required in production; rotating it
   // invalidates every issued refresh token and forces re-login (no DB
