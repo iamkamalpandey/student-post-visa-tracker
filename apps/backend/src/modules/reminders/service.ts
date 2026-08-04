@@ -6,10 +6,12 @@
 // the tenantContext middleware — so RLS catches anything a controller might
 // have missed. We still pass tenant_id explicitly into where clauses for
 // defence in depth and clearer query plans.
+import type { Request } from 'express';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../config/db.js';
 import { Conflict, Forbidden, NotFound } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
+import { assertStudentOwnership } from '../auth/../../middlewares/auth.js';
 import type {
   CreateReminderRequest,
   ReminderListQuery,
@@ -45,7 +47,7 @@ function assertTransitionAllowed(action: ReminderAction, current: ReminderStatus
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
 
-type ReqCtx = { db?: DB; user?: { tid: string; sub: string; role: string } };
+type ReqCtx = Request & { db?: DB; user?: { tid: string; sub: string; role: string } };
 
 // Default scheduled_for for manual reminders: 09:00 UTC on the due date.
 // Keeps a deterministic firing window so admins know when to expect alerts.
@@ -134,6 +136,13 @@ async function assertReminderWriteAllowed(
 
 export const reminderService = {
   async create(req: ReqCtx, body: CreateReminderRequest) {
+    // SVT-QA-2026-08 — ownership guard on create. Without this a COUNSELLOR
+    // could POST /reminders with student_id=<any student in the tenant>,
+    // attaching a reminder (and later cross-tenant reads through student
+    // joins) to a peer's caseload.
+    if (body.student_id) {
+      await assertStudentOwnership(body.student_id, req);
+    }
     const data = toCreateData(body, req.user!.tid, req.user!.sub);
     const created = await db(req).reminder.create({ data: data as never });
     await writeAudit(req as never, {
@@ -195,6 +204,12 @@ export const reminderService = {
   async update(req: ReqCtx, id: string, body: UpdateReminderRequest, _opts?: { expected?: number }) {
     const before = await this.get(req, id);
     await assertReminderWriteAllowed(req, before as never);
+    // SVT-QA-2026-08 — if reassigning the reminder to a different student,
+    // caller must own the new student too. Prevents a non-admin from moving
+    // a reminder onto a peer's student to trigger a downstream notification.
+    if (body.student_id && body.student_id !== (before as { student_id?: string | null }).student_id) {
+      await assertStudentOwnership(body.student_id, req);
+    }
     const data = toUpdateData(body, req.user!.role ?? 'COUNSELLOR');
     // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
     const r = await db(req).reminder.updateMany({

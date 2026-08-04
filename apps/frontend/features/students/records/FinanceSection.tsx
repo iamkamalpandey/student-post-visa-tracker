@@ -18,7 +18,7 @@ import {
 } from '@spv/zod-schemas';
 import { api, ApiError } from '@/lib/api';
 import { useTenant } from '@/lib/queries';
-import { formatDate, formatMoney } from '@/lib/format';
+import { formatDate, formatMoney, todayLocalIso } from '@/lib/format';
 import DataTable, { type DataTableColumn } from '@/components/DataTable';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CurrencyAutocomplete from '@/components/CurrencyAutocomplete';
@@ -119,7 +119,9 @@ export default function FinanceSection({ studentId }: FinanceSectionProps) {
     mutationFn: async (row) =>
       api.patch(`/finance/${row.id}`, {
         status: 'PAID',
-        paid_on: new Date().toISOString().slice(0, 10),
+        // SVT-QA-2026-08 — use LOCAL day, not UTC. A user marking a fee paid
+        // at 21:00 EDT was recording it one day early via toISOString().
+        paid_on: todayLocalIso(),
       }),
     onSuccess: () => {
       enqueueSnackbar('Marked as paid', { variant: 'success' });

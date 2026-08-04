@@ -20,6 +20,7 @@
 // dispatcher only sends a row once; SENT rows are not retried). Adding the
 // header would over-protect.
 
+import { createHash } from 'node:crypto';
 import { logger } from '../../../config/logger.js';
 import type {
   CommsChannel,
@@ -95,7 +96,26 @@ export class ResendProvider implements CommsProvider {
       const error =
         (body as { message?: string })?.message ??
         `HTTP ${res.status}`;
-      logger.warn({ status: res.status, body, to: msg.to }, 'resend.send failed');
+      // SVT-QA-2026-08 — do not log the recipient email or the full provider
+      // body in plaintext; both are PII surfaces. Hash the recipient (matches
+      // the audit-log ip_hash / ua_hash pattern) and whitelist a handful of
+      // safe provider fields for diagnosis.
+      const bodyMsg =
+        body && typeof body === 'object'
+          ? {
+              message: (body as { message?: string }).message,
+              type: (body as { type?: string }).type,
+              statusCode: (body as { statusCode?: number }).statusCode,
+            }
+          : null;
+      const toHash =
+        typeof msg.to === 'string' && msg.to.length > 0
+          ? createHash('sha256').update(msg.to.toLowerCase()).digest('hex').slice(0, 16)
+          : null;
+      logger.warn(
+        { status: res.status, providerBody: bodyMsg, toHash },
+        'resend.send failed',
+      );
       return { providerId: '', status: 'FAILED', error };
     }
 

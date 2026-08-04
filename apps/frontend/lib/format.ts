@@ -59,6 +59,23 @@ export function formatRelative(iso: string, locale = 'en', _opts: FormatOptions 
   return rtf.format(0, 'second');
 }
 
+/**
+ * SVT-QA-2026-08 — LOCAL YYYY-MM-DD for `paid_on`/`due_on` fields.
+ *
+ * `new Date().toISOString().slice(0,10)` returns the UTC day, so a user in NY
+ * marking a fee paid at 21:00 EDT (01:00 UTC next day) records the payment
+ * one day early. Every payment/mark-paid path in the app takes a `paid_on`
+ * date and MUST use the user's local wall-clock day, not UTC. Callers that
+ * need UTC-anchored dates keep using toISOString() directly.
+ */
+export function todayLocalIso(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 /** "14 May 2026" — short, locale-aware date with no time component. */
 export function formatDate(iso: string, locale = 'en', opts: FormatOptions = {}): string {
   if (!iso) return '—';

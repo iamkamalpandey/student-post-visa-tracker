@@ -19,7 +19,7 @@ import ErrorState from '@/components/ErrorState';
 import LoadingSkeleton from '@/components/LoadingSkeleton';
 import { useAuth } from '@/lib/auth';
 import { canWriteStudents, isAdmin } from '@/lib/auth-helpers';
-import { useFormat } from '@/lib/format';
+import { todayLocalIso, useFormat } from '@/lib/format';
 import { funnelColor, funnelLabel } from '@/lib/crm-funnel';
 import { ApiError } from '@/lib/api';
 import {
@@ -74,7 +74,8 @@ export default function DetailClient({ id }: { id: string }) {
     const { kind, fee } = feeAction;
     const close = () => setFeeAction(null);
     if (kind === 'pay') {
-      markPaid.mutate({ feeId: fee.id, paid_on: new Date().toISOString().slice(0, 10) }, { onSuccess: () => { enqueueSnackbar('Fee marked paid.', { variant: 'success' }); close(); }, onError: (e) => onFeeError(e, 'Could not mark paid') });
+      // SVT-QA-2026-08 — LOCAL day for paid_on (not UTC); see lib/format.
+      markPaid.mutate({ feeId: fee.id, paid_on: todayLocalIso() }, { onSuccess: () => { enqueueSnackbar('Fee marked paid.', { variant: 'success' }); close(); }, onError: (e) => onFeeError(e, 'Could not mark paid') });
     } else if (kind === 'waive') {
       waive.mutate({ feeId: fee.id }, { onSuccess: () => { enqueueSnackbar('Fee waived.', { variant: 'success' }); close(); }, onError: (e) => onFeeError(e, 'Could not waive') });
     } else {

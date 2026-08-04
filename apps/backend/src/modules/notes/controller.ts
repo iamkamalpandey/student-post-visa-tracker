@@ -7,7 +7,7 @@ export const noteController = {
   async create(req: Request, res: Response, next: NextFunction) {
     try {
       await runIdempotent(req, res, { scope: 'notes.create' }, () =>
-        svc.create(req as never, req.body),
+        svc.create(req, req.body),
       );
     } catch (e) { next(e); }
   },
@@ -20,10 +20,10 @@ export const noteController = {
   async update(req: Request, res: Response, next: NextFunction) {
     try {
       const expected = readIfMatch(req);
-      res.json(await svc.update(req as never, req.params['id']!, req.body, { expected }));
+      res.json(await svc.update(req, req.params['id']!, req.body, { expected }));
     } catch (e) { next(e); }
   },
   async remove(req: Request, res: Response, next: NextFunction) {
-    try { await svc.remove(req as never, req.params['id']!); res.status(204).end(); } catch (e) { next(e); }
+    try { await svc.remove(req, req.params['id']!); res.status(204).end(); } catch (e) { next(e); }
   },
 };

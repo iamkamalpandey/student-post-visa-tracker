@@ -205,7 +205,11 @@ const CHILD_STUDENT_RESOLVERS: Record<
 
 export type StudentOwnerChild = keyof typeof CHILD_STUDENT_RESOLVERS;
 
-async function assertStudentOwnership(
+// SVT-QA-2026-08 — exported so polymorphic-parent services (notes, reminders
+// with entity_type='student' or student_id) can enforce the same ownership
+// contract as the per-student routes without duplicating the middleware
+// dispatch. Callers pass a minimal Request-shaped context.
+export async function assertStudentOwnership(
   studentId: string,
   req: Request,
 ): Promise<void> {
