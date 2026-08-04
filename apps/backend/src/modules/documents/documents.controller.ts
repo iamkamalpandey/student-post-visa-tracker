@@ -7,6 +7,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import type { PrismaClient } from '@prisma/client';
+import type { z } from 'zod';
 import { UploadDocumentMetadata, VerifyDocumentRequest } from '@spv/zod-schemas';
 import { BadRequest, Unauthorized } from '../../shared/errors.js';
 import { prisma } from '../../config/db.js';
@@ -148,7 +149,9 @@ export async function verifyHandler(req: Request, res: Response, next: NextFunct
     const ctx = ctxFromReq(req);
     const id = req.params['id'];
     if (!id) throw BadRequest('Missing id');
-    const body = VerifyDocumentRequest.parse(req.body);
+    // Body already validated by validate(VerifyDocumentRequest) middleware in
+    // documents.routes.ts — no inline parse needed.
+    const body = req.body as z.infer<typeof VerifyDocumentRequest>;
     const updated = await svc.verify(ctx, id, body);
     res.json(updated);
   } catch (err) {

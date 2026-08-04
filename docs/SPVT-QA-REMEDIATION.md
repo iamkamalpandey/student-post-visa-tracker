@@ -96,7 +96,9 @@ Applied fixes from `docs/SPVT-QA-AUDIT.md` panel findings. Delivered as 5 commit
    - `DATABASE_MIGRATE_URL` (same value as backend service's SECRET)
    - `SEED_ADMIN_EMAIL`
    - `SEED_ADMIN_PASSWORD`
-2. In DO dashboard on the `backend` service, set `METRICS_TOKEN` (>=16 chars) — the deploy will now fail-boot without it. Generate: `openssl rand -hex 24`.
+2. In DO dashboard on the `backend` service, set:
+   - `METRICS_TOKEN` (>=16 chars) — the deploy will now fail-boot without it. Generate: `openssl rand -hex 24`.
+   - `SEED_ADMIN_EMAIL` + `SEED_ADMIN_PASSWORD` (SAME values as the migrate job). Backend `env.ts` `superRefine` requires these at boot in production even though the actual insert only runs in the migrate job — the backend just validates their presence.
 3. Push to `main` → DO runs migrate + seed + build + deploy.
 4. Verify `/api/v1/health/livez` returns 200; verify `/api/v1/metrics` with `Authorization: Bearer <METRICS_TOKEN>` returns text/plain.
 5. Test login end-to-end (admin credentials from SEED_ADMIN_*).

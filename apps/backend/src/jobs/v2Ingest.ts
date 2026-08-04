@@ -15,17 +15,8 @@ import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import { fetchV2Crm } from '../integrations/v2-mis/queries.js';
 import { decimalToMinor } from '../shared/money.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 import type { JobOutcome } from './runner.js';
-
-async function withTenantTx<T>(
-  tenantId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
-}
 
 
 // Return value only if it is one of the allowed enum values, else null. Keeps

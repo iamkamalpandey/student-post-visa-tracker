@@ -11,6 +11,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
 import { captureJobException } from '../config/sentry.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 
 const JOB_NAME = 'reminder.dispatcher';
 
@@ -38,18 +39,6 @@ async function fallbackAdminFor(tenantId: string, db: DB): Promise<string | null
 /** Test hook — flushes the per-tenant fallback admin cache. */
 export function _clearFallbackCache() {
   fallbackAdminCache.clear();
-}
-
-// Background dispatch runs outside the request scope, so the RLS GUC must be
-// set inside every transaction. Mirrors the comms module's withTenantTx.
-async function withTenantTx<T>(
-  tenantId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
 }
 
 export type DispatchResult = {

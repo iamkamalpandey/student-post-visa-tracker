@@ -16,18 +16,10 @@
 // writes so a future caller passing an attacker-controlled tenantId (e.g.
 // a "switch tenant" superadmin flow, background job arg, test helper) can
 // never cross tenants even if the app-layer filter is forgotten.
-import { Prisma } from '@prisma/client';
-import { prisma } from '../../config/db.js';
 import { NotFound } from '../../shared/errors.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { _clearBillingEnabledCache } from '../billing/middleware.js';
 import type { UpdateTenantSettingsRequest, TenantSettingsResponse } from '@spv/zod-schemas';
-
-async function withTenantTx<T>(tenantId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
-}
 
 function toResponse(t: {
   id: string;

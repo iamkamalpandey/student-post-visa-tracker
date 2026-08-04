@@ -21,6 +21,7 @@ import { getProvider } from './providers/registry.js';
 import type { CommsChannel, CommsSendInput } from './providers/index.js';
 import { renderMessage, extractPlaceholders } from './templating.js';
 import { BadRequest } from '../../shared/errors.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 
 type DB = PrismaClient | Prisma.TransactionClient;
 const db = (req?: { db?: DB }): DB => req?.db ?? prisma;
@@ -383,15 +384,6 @@ type DispatchInput = {
   body: string;
   metadata?: Record<string, unknown>;
 };
-
-// Background dispatch runs outside the request scope, so we must set the RLS GUC
-// ourselves on every transaction.
-async function withTenantTx<T>(tenantId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
-}
 
 async function dispatchOutbound(input: DispatchInput): Promise<void> {
   try {

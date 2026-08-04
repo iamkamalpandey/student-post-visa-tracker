@@ -94,7 +94,11 @@ services:
       # Dummy value satisfies zod; single-replica deployment doesn't need real Redis.
       - { key: REDIS_URL, scope: RUN_TIME, value: "redis://localhost:6379" }
       - { key: SPV_ALLOW_SINGLE_REPLICA, scope: RUN_TIME, value: "true" }
-      # Seed admin — created on first boot if users table empty.
+      # Seed admin — env.ts requires these at BOOT (superRefine in production),
+      # so the backend fails-fast if unset. The actual seed insert runs in the
+      # PRE_DEPLOY `migrate` job above; the backend service just validates
+      # their presence. Set the SAME values in BOTH places (migrate job +
+      # this service) in the DO dashboard.
       - { key: SEED_ADMIN_EMAIL, scope: RUN_TIME, type: SECRET }
       - { key: SEED_ADMIN_PASSWORD, scope: RUN_TIME, type: SECRET }
       # CORS_ORIGIN has NO default — backend won't boot without it (any env).

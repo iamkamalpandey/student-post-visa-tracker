@@ -15,9 +15,10 @@
 //
 // Scheduled daily at 08:00 UTC (after expiry.alerts at 06:00).
 
-import { Prisma, type PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 
 type DB = PrismaClient;
 const BATCH_LIMIT = 500;
@@ -29,16 +30,6 @@ export type CommsDigestResult = {
   rows_collapsed: number;
   errors: number;
 };
-
-async function withTenantTx<T>(
-  tenantId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
-}
 
 export async function runCommsDigest(db: DB = prisma): Promise<CommsDigestResult> {
   const result: CommsDigestResult = {

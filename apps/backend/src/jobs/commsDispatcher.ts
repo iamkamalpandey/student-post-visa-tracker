@@ -17,12 +17,13 @@
 //
 // Backoff: 5min, 30min, 4hr — three attempts total. Tunable via constants.
 
-import { Prisma, type PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
 import { withTenantScope } from '../config/sentry.js';
 import { getProvider } from '../modules/comms/providers/registry.js';
 import type { CommsChannel } from '../modules/comms/providers/index.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 
 const BATCH_LIMIT = 100;
 const MAX_ATTEMPTS = 3;
@@ -38,16 +39,6 @@ export type CommsDispatchResult = {
   opted_out: number;
   terminal: number; // FAILED rows that hit MAX_ATTEMPTS this pass
 };
-
-async function withTenantTx<T>(
-  tenantId: string,
-  fn: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw(Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
-    return fn(tx);
-  });
-}
 
 /**
  * One pass of the outbox dispatcher. Walks every active tenant and drains its

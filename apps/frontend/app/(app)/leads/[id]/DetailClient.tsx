@@ -255,9 +255,11 @@ export default function DetailClient({ id }: { id: string }) {
           lead={lead}
           open={convertOpen}
           onClose={() => setConvertOpen(false)}
-          onConverted={(studentId, code) => {
+          onConverted={(studentId) => {
             setConvertOpen(false);
-            enqueueSnackbar(`Converted to student ${code}.`, { variant: 'success' });
+            // ConvertToStudentDialog already fires a rich success toast
+            // (including fee-migration + enrol notes). Notistack persists
+            // across route navigation, so no need to fire a second one here.
             router.push(`/students/${studentId}`);
           }}
         />

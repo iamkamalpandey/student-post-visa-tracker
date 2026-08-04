@@ -3,7 +3,6 @@ import { ZodError } from 'zod';
 import { HttpError } from '../shared/errors.js';
 import { logger } from '../config/logger.js';
 import { env } from '../config/env.js';
-import { captureException } from '../config/sentry.js';
 
 // RFC 7807 Problem Details. Default content type: application/problem+json.
 export function errorHandler(
@@ -58,11 +57,10 @@ export function errorHandler(
 
   const rawMessage = err instanceof Error ? err.message : 'Unexpected error';
   logger.error({ err, requestId, route: req.originalUrl }, 'Unhandled error');
-  // SVT-OBS-2026-06 — unhandled 5xx never reached Sentry (only background-job
-  // and process-level crashes did), so API faults were invisible in the
-  // alerting stack while the dashboards looked green. Capture here with request
-  // context. No-op when SENTRY_DSN is unset.
-  captureException(err, { source: 'errorHandler', route: req.originalUrl });
+  // Sentry capture is done by sentryErrorHandler (mounted BEFORE this one in
+  // app.ts). It attaches tenant/user/request_id tags via withScope and calls
+  // captureException. Capturing here too would double-charge Sentry quota —
+  // dedup by fingerprint is best-effort when contexts differ.
 
   // Sanitised detail for 5xx responses. We MUST NOT echo raw error messages,
   // because Prisma (and other libs) embed absolute filesystem paths, query
