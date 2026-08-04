@@ -150,7 +150,15 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
   const outstanding = outstandingQuery.data;
   const installmentCount = current.installments?.length ?? null;
   const totalAmount = Number(current.total_minor) / 100;
-  const outstandingAmount = outstanding ? Number(outstanding.total_minor) / 100 : null;
+  // SVT-QA-2026-08 — response is now per-currency. This card is scoped to a
+  // single enrollment so we pick the bucket matching the plan's currency;
+  // absent → treat as zero outstanding.
+  const outstandingBucket = outstanding?.by_currency.find(
+    (b) => b.currency === current.currency,
+  ) ?? null;
+  const outstandingAmount = outstandingBucket
+    ? Number(outstandingBucket.total_minor) / 100
+    : null;
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2 }}>
@@ -182,13 +190,13 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
             <Stack spacing={0.25}>
               <Typography variant="caption" color="text.secondary">Outstanding</Typography>
               <Typography variant="h6" sx={{ fontVariantNumeric: 'tabular-nums' }} color={outstandingAmount && outstandingAmount > 0 ? 'warning.main' : 'success.main'}>
-                {outstandingAmount != null && outstanding?.currency
-                  ? money(outstandingAmount, outstanding.currency)
+                {outstandingAmount != null && outstandingBucket
+                  ? money(outstandingAmount, outstandingBucket.currency)
                   : '—'}
               </Typography>
-              {outstanding?.oldest_due_on ? (
+              {outstandingBucket?.oldest_due_on ? (
                 <Typography variant="caption" color="text.secondary">
-                  Oldest due {date(outstanding.oldest_due_on)}
+                  Oldest due {date(outstandingBucket.oldest_due_on)}
                 </Typography>
               ) : (
                 <Typography variant="caption" color="text.secondary">
@@ -233,9 +241,9 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
             ) : null}
           </Box>
 
-          {outstanding?.by_status ? (
+          {outstandingBucket?.by_status ? (
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              {Object.entries(outstanding.by_status).map(([status, minor]) => {
+              {Object.entries(outstandingBucket.by_status).map(([status, minor]) => {
                 const v = Number(minor) / 100;
                 if (v <= 0) return null;
                 return (
@@ -243,7 +251,7 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
                     key={status}
                     size="small"
                     variant="outlined"
-                    label={`${status}: ${outstanding.currency ? money(v, outstanding.currency) : v}`}
+                    label={`${status}: ${money(v, outstandingBucket.currency)}`}
                   />
                 );
               })}

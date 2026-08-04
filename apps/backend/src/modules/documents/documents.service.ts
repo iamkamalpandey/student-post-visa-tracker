@@ -139,18 +139,17 @@ export async function createDocument(ctx: ServiceContext, args: CreateDocumentAr
     throw UnprocessableEntity('File type not allowed');
   }
 
-  // 3. SHA-256 fingerprint (used for dedup analytics + integrity).
-  const sha256 = sha256Hex(args.buffer);
-
   // 4. Antivirus scan (Optional). If CLAMAV_HOST is not set, we assume trusted environment
   //    and bypass the scan (e.g. for small teams avoiding the cost of a ClamAV droplet).
+  //    Scans the RAW buffer — the pre-EXIF-strip bytes are what the client claimed to send,
+  //    so that is what should be scanned for signatures.
   if (env.CLAMAV_HOST) {
     const scan = await scanBuffer(args.buffer, { host: env.CLAMAV_HOST, port: env.CLAMAV_PORT });
     if (scan.result === 'INFECTED') {
       await writeAudit({
         tenantId, actorId: ctx.user.sub, action: 'document.upload_rejected_infected',
         entityType: 'Document', entityId: null,
-        after: { sha256, signature: scan.signature ?? null },
+        after: { signature: scan.signature ?? null },
         ip: ctx.ip, ua: ctx.ua, requestId: ctx.requestId,
       });
       throw UnprocessableEntity(`File rejected by antivirus: ${scan.signature ?? 'unknown signature'}`);
@@ -160,8 +159,17 @@ export async function createDocument(ctx: ServiceContext, args: CreateDocumentAr
     }
   }
 
-  // 5. Optional EXIF strip (no-op until sharp is wired — see comment above).
+  // 5. Optional EXIF strip. sharp re-encodes JPEG/PNG/WEBP/HEIC so the stored
+  //    bytes differ from the client-supplied bytes.
   const safeBuffer = await stripExifIfImage(args.buffer, detectedMime);
+
+  // 6. SHA-256 fingerprint (used for dedup analytics + integrity check on read).
+  //    MUST hash `safeBuffer` — the bytes actually written to storage — not
+  //    `args.buffer`. Prior code hashed the raw buffer, so every image upload
+  //    produced a row whose stored bytes couldn't pass the round-trip integrity
+  //    check on download (silent UnprocessableEntity on every image stream).
+  //    Fix: hash after strip.
+  const sha256 = sha256Hex(safeBuffer);
 
   // 6. Look up DocumentType to honour retention_days.
   const docType = await ctx.db.documentType.findFirst({

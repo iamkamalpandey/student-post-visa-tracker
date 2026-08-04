@@ -216,8 +216,12 @@ export async function invoice(req: Request, id: string, body: InvoiceRequest) {
   if (!invoiceNo) {
     invoiceNo = await nextInvoiceNumber(req, tid);
   } else {
-    // Reject collisions on (tenant, invoice_no) early — DB doesn't enforce
-    // uniqueness on that pair (no @@unique in schema), so we have to.
+    // Cheap pre-check (fewer DB round-trips than catching P2002 for the common
+    // case of a client-supplied number). The DB-level UNIQUE (added in
+    // migration 20991231235998_commission_invoice_no_uq) is the source of
+    // truth against concurrent mints — even if this check passes, a race
+    // with another admin could still land on the write; the update below
+    // will surface P2002 which the caller sees as 500 (todo: translate).
     const clash = await db(req).commissionClaim.findFirst({
       where: { tenant_id: tid, invoice_no: invoiceNo, NOT: { id } },
       select: { id: true },

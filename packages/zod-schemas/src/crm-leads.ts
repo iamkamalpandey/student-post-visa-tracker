@@ -66,10 +66,28 @@ export const UpdateCrmLeadFeeRequest = z
     amount_minor: z.coerce.bigint().nonnegative().optional(),
     currency: CurrencyCode.optional(),
     due_on: Iso8601Date.optional(),
-    status: CrmFeeStatusEnum.optional(),
+    // SVT-QA-2026-08 — `status` removed from generic PATCH. Status transitions
+    // are money-affecting side-effects (paid_at, paid_amount_minor,
+    // reminder auto-dismiss). Route callers to POST /pay and /waive which
+    // apply the atomic guard + fanout. Delete flows through DELETE /:feeId.
+    // Keeping status here silently bypassed all of that.
     notes: z.string().max(2000).nullable().optional(),
   })
-  .strict();
+  .strict()
+  // SVT-QA-2026-08 — currency change requires amount recompute. A PATCH that
+  // flipped currency (e.g. USD→JPY) without also supplying amount_minor kept
+  // the pre-existing integer, which now represents a completely different
+  // amount in the new currency's minor units. E.g. 1234500 USD-cents
+  // ($12,345.00) becomes 1234500 JPY-units (¥1,234,500) — a 100× money bug.
+  .superRefine((data, ctx) => {
+    if (data.currency !== undefined && data.amount_minor === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['amount_minor'],
+        message: 'amount_minor must be provided when changing currency (minor-unit convention differs per ISO 4217)',
+      });
+    }
+  });
 export type UpdateCrmLeadFeeRequest = z.infer<typeof UpdateCrmLeadFeeRequest>;
 
 export const MarkCrmFeePaidRequest = z

@@ -102,11 +102,19 @@ export type Refund = {
   created_at?: string;
 };
 
-export type Outstanding = {
+// SVT-QA-2026-08 — per-currency breakdown. NEVER net across currencies.
+// A student with a USD enrollment + a GBP enrollment gets two entries. The
+// PlanSummaryCard is scoped per enrollment so typically returns one entry,
+// but the tenant-wide dashboard uses the same endpoint and MUST render one
+// tile-set per currency.
+export type OutstandingCurrencyBucket = {
+  currency: string;
   total_minor: string;
   by_status: Record<string, string>;
   oldest_due_on: string | null;
-  currency: string | null;
+};
+export type Outstanding = {
+  by_currency: OutstandingCurrencyBucket[];
 };
 
 // ---------------------------------------------------------------------------

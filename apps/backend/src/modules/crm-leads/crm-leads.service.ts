@@ -233,12 +233,19 @@ export async function updateFee(ctx: Ctx, leadId: string, feeId: string, input: 
   const expected = parseIfMatch(ifMatch);
   const current = await getFee(db, tenantId, leadId, feeId);
   if (current.version !== expected) throw Conflict(`Version mismatch (have ${current.version}, expected ${expected})`);
+  // SVT-QA-2026-08 — terminal-state guard. Editing a PAID/WAIVED fee via
+  // generic PATCH would bump version + write a bogus `updated` audit without
+  // touching the actual money state. Force callers to use dedicated flows
+  // (or first unpay/unwaive via admin path — currently not exposed).
+  if (current.status === 'PAID' || current.status === 'WAIVED') {
+    throw Conflict(`Cannot edit a ${current.status} fee`);
+  }
   const data: Prisma.CrmLeadFeeUncheckedUpdateInput = { updated_by_id: actorId, version: { increment: 1 } };
   if (input.session_label !== undefined) data.session_label = input.session_label;
   if (input.amount_minor !== undefined) data.amount_minor = input.amount_minor;
   if (input.currency !== undefined) data.currency = input.currency;
   if (input.due_on !== undefined) data.due_on = new Date(input.due_on);
-  if (input.status !== undefined) data.status = input.status;
+  // status intentionally dropped from PATCH — see UpdateCrmLeadFeeRequest.
   if (input.notes !== undefined) data.notes = input.notes ?? null;
   // SVT-QA-2026-08 — atomic If-Match. The prior read-then-write pattern let
   // two concurrent PATCHes with the same If-Match: "3" both pass the version
@@ -279,7 +286,10 @@ async function dismissRemindersForEntity(db: Db, tenantId: string, entityType: s
 export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input: MarkCrmFeePaidRequest): Promise<unknown> {
   const { db, tenantId, actorId } = ctx;
   const current = await getFee(db, tenantId, leadId, feeId);
-  if (current.status === 'PAID') throw Conflict('Fee is already paid');
+  // SVT-QA-2026-08 — also block re-pay of WAIVED (was only blocking PAID).
+  if (current.status === 'PAID' || current.status === 'WAIVED') {
+    throw Conflict(`Fee is already in terminal state (${current.status})`);
+  }
   // SVT-FIN-2026-06: atomic status guard closes the TOCTOU between the read
   // above and the write — two concurrent "pay" calls can't both record a
   // payment on the same money row (the WHERE status != PAID lets exactly one win).
@@ -299,13 +309,19 @@ export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input
 export async function waiveFee(ctx: Ctx, leadId: string, feeId: string): Promise<unknown> {
   const { db, tenantId, actorId } = ctx;
   const current = await getFee(db, tenantId, leadId, feeId);
-  if (current.status === 'PAID') throw Conflict('Cannot waive a paid fee');
-  // SVT-FIN-2026-06: atomic guard — never waive a fee that was concurrently paid.
+  // SVT-QA-2026-08 — block PAID + WAIVED (was only PAID). A repeat waive on
+  // an already-WAIVED row silently bumped version and wrote a bogus
+  // .waived audit; version churn on a terminal row poisoned the audit trail.
+  if (current.status === 'PAID' || current.status === 'WAIVED') {
+    throw Conflict(`Fee is already in terminal state (${current.status})`);
+  }
+  // SVT-FIN-2026-06: atomic guard — never waive a fee that was concurrently
+  // paid or already waived. `notIn` closes both TOCTOUs in one predicate.
   const result = await db.crmLeadFee.updateMany({
-    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null, status: { not: 'PAID' } },
+    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null, status: { notIn: ['PAID', 'WAIVED'] } },
     data: { status: 'WAIVED', updated_by_id: actorId, version: { increment: 1 } },
   });
-  if (result.count === 0) throw Conflict('Cannot waive a paid fee');
+  if (result.count === 0) throw Conflict('Fee reached a terminal state concurrently');
   const updated = await getFee(db, tenantId, leadId, feeId);
   // SVT-SYNC-2026-06 — A7: waived fee → no more payment-due notifications.
   await dismissRemindersForEntity(db, tenantId, 'crm_lead_fee', feeId);
@@ -316,7 +332,15 @@ export async function waiveFee(ctx: Ctx, leadId: string, feeId: string): Promise
 export async function deleteFee(ctx: Ctx, leadId: string, feeId: string): Promise<void> {
   const { db, tenantId, actorId } = ctx;
   await getFee(db, tenantId, leadId, feeId);
-  await db.crmLeadFee.update({ where: { id: feeId }, data: { deleted_at: new Date(), deleted_by_id: actorId } });
+  // SVT-QA-2026-08 — atomic soft-delete. Two admins deleting the same fee
+  // concurrently would both pass getFee, both write, both bump version,
+  // both fanout audit + reminder-dismiss. `updateMany where deleted_at IS
+  // NULL` lets exactly one win; the loser's audit + fanout are skipped.
+  const result = await db.crmLeadFee.updateMany({
+    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null },
+    data: { deleted_at: new Date(), deleted_by_id: actorId },
+  });
+  if (result.count === 0) return; // already deleted by concurrent request
   // SVT-SYNC-2026-06 — A7: deleted fee → dismiss its reminders.
   await dismissRemindersForEntity(db, tenantId, 'crm_lead_fee', feeId);
   await writeAudit({ action: 'crm_lead.fee.deleted', entityType: 'crm_lead_fee', entityId: feeId, actorId, tenantId } as never);
@@ -380,12 +404,23 @@ export async function convertLeadToStudent(
   // handing the rest to the students-create path.
   const { program_id, acknowledge_duplicate, ...studentInput } = input;
 
+  // SVT-QA-2026-08 — join to student so a soft-deleted target no longer
+  // permanently locks the lead. Previously `if (lead.student_id) throw` fired
+  // on any non-null student_id regardless of `student.deleted_at`; a mis-
+  // converted lead that was later cleaned up became un-re-convertible with
+  // no API path to reset. Now: block only if the linked student is LIVE.
   const lead = await db.crmLead.findFirst({
     where: { id: leadId, tenant_id: tenantId, deleted_at: null },
-    select: { id: true, student_id: true },
+    select: {
+      id: true,
+      student_id: true,
+      student: { select: { deleted_at: true } },
+    },
   });
   if (!lead) throw NotFound('Lead not found');
-  if (lead.student_id) throw Conflict('Lead is already linked to a student');
+  if (lead.student_id && lead.student && lead.student.deleted_at === null) {
+    throw Conflict('Lead is already linked to a live managed student');
+  }
 
   // SVT-DEDUP-2026-06 — guard against silently creating a SECOND managed student
   // for someone who already exists (CRM-converted vs manually-added duplicate →

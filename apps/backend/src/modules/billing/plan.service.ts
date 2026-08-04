@@ -556,23 +556,37 @@ export async function getOutstanding(
       currency: true,
     },
   });
-  const total_minor = rows.reduce((s, r) => s + r.balance_minor, 0n);
-  const by_status: Record<string, bigint> = {};
+  // SVT-QA-2026-08 — NEVER net across currencies. Prior code summed every row
+  // and labelled the total with `rows[0].currency`, producing fabricated
+  // aggregates for multi-currency tenants (USD + GBP folded into a single USD
+  // number). Group per ISO currency; oldest_due_on stays global because it's
+  // a scalar, not a monetary aggregate. Callers must render one tile-set per
+  // currency (mirrors crm-leads.service.financeSummary).
+  type Acc = { total_minor: bigint; by_status: Record<string, bigint>; oldest_due_on: Date | null };
+  const byCurrency = new Map<string, Acc>();
   for (const r of rows) {
-    by_status[r.status] = (by_status[r.status] ?? 0n) + r.balance_minor;
+    let acc = byCurrency.get(r.currency);
+    if (!acc) {
+      acc = { total_minor: 0n, by_status: {}, oldest_due_on: null };
+      byCurrency.set(r.currency, acc);
+    }
+    acc.total_minor += r.balance_minor;
+    acc.by_status[r.status] = (acc.by_status[r.status] ?? 0n) + r.balance_minor;
+    if (acc.oldest_due_on === null || r.due_on < acc.oldest_due_on) {
+      acc.oldest_due_on = r.due_on;
+    }
   }
-  const oldest = rows
-    .map((r) => r.due_on)
-    .sort((a, b) => a.getTime() - b.getTime())[0];
-  const currency = rows.length > 0 ? rows[0]!.currency : null;
-  return {
-    total_minor: total_minor.toString(),
-    by_status: Object.fromEntries(
-      Object.entries(by_status).map(([k, v]) => [k, v.toString()]),
-    ),
-    oldest_due_on: oldest ? oldest.toISOString().slice(0, 10) : null,
-    currency,
-  };
+  const by_currency = [...byCurrency.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([currency, acc]) => ({
+      currency,
+      total_minor: acc.total_minor.toString(),
+      by_status: Object.fromEntries(
+        Object.entries(acc.by_status).map(([k, v]) => [k, v.toString()]),
+      ),
+      oldest_due_on: acc.oldest_due_on ? acc.oldest_due_on.toISOString().slice(0, 10) : null,
+    }));
+  return { by_currency };
 }
 
 // Re-export PrismaNS so the test mock signatures stay typed.
