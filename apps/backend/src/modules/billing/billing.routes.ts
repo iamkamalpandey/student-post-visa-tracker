@@ -30,6 +30,9 @@ import {
   FailRefundRequest,
   ApplyAdjustmentRequest,
   PaymentListQuery,
+  StudentCreditListQuery,
+  ApplyCreditRequest,
+  ReverseCreditRequest,
 } from '@spv/zod-schemas';
 import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { billingEnabled } from './middleware.js';
@@ -37,6 +40,7 @@ import {
   planController as ctl,
   paymentController as payCtl,
   adjustmentController as adjCtl,
+  creditController as creditCtl,
 } from './billing.controller.js';
 import { renderInvoiceText, renderInvoicePdf } from './invoice.service.js';
 
@@ -264,4 +268,46 @@ billingRouter.post(
   requireIdempotencyKey,
   validate(ApplyAdjustmentRequest),
   adjCtl.apply,
+);
+
+// -------------------------------------------------------------------------
+// Student credits (SVT-FIN-2026-08)
+//
+// These rows existed since the billing wave but had no routes at all, so an
+// overpayment was money the business held with no way to see it, return it, or
+// apply it. Reads are counsellor+admin like every other billing read.
+// -------------------------------------------------------------------------
+billingRouter.get(
+  '/credits',
+  requireRole('ADMIN', 'COUNSELLOR'),
+  validate(StudentCreditListQuery, 'query'),
+  creditCtl.list,
+);
+billingRouter.get(
+  '/credits/:id',
+  requireRole('ADMIN', 'COUNSELLOR'),
+  uuidParam('id'),
+  creditCtl.get,
+);
+// Applying a credit settles real debt on an installment — a money-mover in
+// every sense except that the cash already arrived. Idempotency-Key required
+// so a retry replays instead of drawing the credit down twice.
+billingRouter.post(
+  '/credits/:id/apply',
+  requireRole('ADMIN', 'COUNSELLOR'),
+  requireIdempotencyKey,
+  uuidParam('id'),
+  validate(ApplyCreditRequest),
+  creditCtl.apply,
+);
+// Reversing retires a liability the business owes. Same guard set as void and
+// refund: admin, MFA step-up with enrolment required, idempotent.
+billingRouter.post(
+  '/credits/:id/reverse',
+  requireRole('ADMIN'),
+  requireMfa({ enrollmentRequired: true }),
+  requireIdempotencyKey,
+  uuidParam('id'),
+  validate(ReverseCreditRequest),
+  creditCtl.reverse,
 );

@@ -364,10 +364,40 @@ export async function cancelPlan(ctx: Ctx, planId: string, input: CancelPlanRequ
     // adjustment + WAIVED status rather than being silently CANCELLED (which
     // would leave their paid_minor stranded in the books).
     if (input.waive_remaining) {
-      const partials = await tx.feeInstallment.findMany({
-        where: { fee_plan_id: planId, tenant_id: tenantId, status: 'PARTIAL' },
-        select: { id: true, balance_minor: true },
-      });
+      // SVT-FIN-2026-08 — this block used to abort the entire cancellation.
+      //
+      // The old code wrote `{ status: 'WAIVED', balance_minor: 0n }` in one
+      // bulk updateMany and never touched net_minor. The database enforces
+      //   CHECK (balance_minor = net_minor - paid_minor)
+      // (migration 20991231235976_billing_checks), and on a PARTIAL row
+      // paid < net, so net - paid > 0 ≠ 0 → Postgres 23514 → the whole
+      // transaction rolled back. Because the withdrawal hook swallows the
+      // throw into a log line, the visible result was: enrollment WITHDRAWN,
+      // fee plan still ACTIVE, installments still marching toward OVERDUE.
+      // A withdrawn student was billed and dunned indefinitely, and the
+      // direct cancel route returned a bare 500 with no way to succeed.
+      //
+      // Waiving the remainder means the student now owes exactly what they
+      // have already paid, so the correct row state is net = paid, balance = 0
+      // — which is precisely what the WAIVER adjustment of -balance computes:
+      //   net_after = net_before + (-(net_before - paid)) = paid.
+      //
+      // Rows are locked FOR UPDATE and each write is guarded on the balance we
+      // read. A payment landing mid-cancel would otherwise either be forgiven
+      // at a stale amount or get a WAIVER adjustment for money it no longer
+      // owed; now it fails the guard and rolls the cancellation back instead.
+      const partials = await tx.$queryRaw<Array<{
+        id: string; net_minor: bigint; paid_minor: bigint; balance_minor: bigint;
+      }>>`
+        SELECT id, net_minor, paid_minor, balance_minor
+        FROM fee_installments
+        WHERE fee_plan_id = ${planId}::uuid
+          AND tenant_id = ${tenantId}::uuid
+          AND status = 'PARTIAL'
+          AND deleted_at IS NULL
+        ORDER BY sequence_no ASC
+        FOR UPDATE
+      `;
       assertOrThrow(feeInstallmentFsm, 'PARTIAL', 'WAIVED', role, input.reason);
       for (const p of partials) {
         if (p.balance_minor <= 0n) continue;
@@ -383,16 +413,26 @@ export async function cancelPlan(ctx: Ctx, planId: string, input: CancelPlanRequ
             created_by_id: actorId,
           },
         });
-      }
-      if (partials.length > 0) {
-        await tx.feeInstallment.updateMany({
+        const wr = await tx.feeInstallment.updateMany({
           where: {
-            fee_plan_id: planId,
+            id: p.id,
             tenant_id: tenantId,
             status: 'PARTIAL',
+            balance_minor: p.balance_minor,
           },
-          data: { status: 'WAIVED', balance_minor: 0n, updated_by_id: actorId },
+          data: {
+            status: 'WAIVED',
+            net_minor: p.paid_minor,
+            balance_minor: 0n,
+            updated_by_id: actorId,
+            version: { increment: 1 },
+          },
         });
+        if (wr.count !== 1) {
+          throw Conflict(
+            `Installment ${p.id} changed while cancelling the plan; retry the cancellation.`,
+          );
+        }
       }
     }
     // CANCEL all remaining non-paid, non-waived installments. PAID + WAIVED
@@ -451,24 +491,58 @@ export async function regeneratePlan(
     throw Conflict(`Cannot regenerate plan in status ${before.status}`);
   }
 
-  // Cancel the old plan first (frees the "one active" partial unique index).
-  await cancelPlan(ctx, planId, {
-    reason: `Regenerated: ${input.reason}`,
+  // SVT-FIN-2026-08 — BUILD AND VALIDATE THE REPLACEMENT BEFORE DESTROYING
+  // THE ORIGINAL.
+  //
+  // These are three separate transactions with no compensation, and the order
+  // used to be cancel → create. Every field on RegeneratePlanRequest is
+  // optional and `installment_count` was not defaulted from the old plan, so
+  // `POST /plans/:id/regenerate {"reason":"fix typo"}` cancelled the live plan,
+  // then threw BadRequest out of resolveLines. The caller saw a 400 and the
+  // enrollment was left with a CANCELLED plan (terminal — the FSM has no edge
+  // back) and every open installment CANCELLED, so getOutstanding reported
+  // zero owed. The only recovery was a brand-new plan, which re-bills whatever
+  // had already been paid.
+  //
+  // Defaulting installment_count from the old plan removes the common trip
+  // wire; resolving the lines up front means any remaining validation error is
+  // raised while the original plan is still intact and still billing.
+  // Default the schedule length to whatever the plan being replaced had, so a
+  // caller who only wants to change the total (or just the notes) does not
+  // have to restate it.
+  const priorInstallmentCount = await db(ctx).feeInstallment.count({
+    where: { fee_plan_id: planId, tenant_id: tenantId, deleted_at: null },
   });
 
-  // Build the createFeePlan input from the regenerate payload + old plan defaults.
-  const next = await createFeePlan(ctx, {
+  const regenInput = {
     enrollment_id: before.enrollment_id,
     cadence: input.cadence ?? before.cadence,
     total_minor: input.total_minor ?? before.total_minor,
-    installment_count: input.installment_count,
+    installment_count: input.installment_count ?? priorInstallmentCount,
     starts_on:
       input.starts_on ?? before.starts_on.toISOString().slice(0, 10),
     currency: before.currency,
     scholarship_minor: before.scholarship_minor,
     lines: input.lines,
-    notes: input.lines ? before.notes ?? undefined : before.notes ?? undefined,
-  } as CreateFeePlanRequest);
+    notes: before.notes ?? undefined,
+  } as CreateFeePlanRequest;
+
+  // Throws here — before anything is destroyed — if the payload cannot produce
+  // a valid schedule (missing count/cadence, CUSTOM without lines, bad date).
+  const plannedLines = resolveLines(regenInput);
+  if (plannedLines.length === 0) {
+    throw BadRequest('Regenerated plan would have no installments');
+  }
+
+  // Only now is it safe to cancel: this frees the "one active plan" partial
+  // unique index that createFeePlan enforces.
+  await cancelPlan(ctx, planId, {
+    reason: `Regenerated: ${input.reason}`,
+  });
+
+  // Pass the already-validated lines so createFeePlan cannot reach a different
+  // schedule than the one we just proved constructible.
+  const next = await createFeePlan(ctx, { ...regenInput, lines: plannedLines });
 
   // Back-link the old plan to the new for audit.
   await prisma.$transaction(async (tx) => {

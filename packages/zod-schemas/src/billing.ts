@@ -334,3 +334,93 @@ export const OutstandingResponse = z.object({
   currency: CurrencyCode.nullable(),
 });
 export type OutstandingResponse = z.infer<typeof OutstandingResponse>;
+
+// ---------------------------------------------------------------------------
+// Student credits (SVT-FIN-2026-08)
+//
+// A credit is money the business is holding that belongs to the student —
+// created when a payment exceeds what it was allocated against, or when a
+// refund exceeds the allocations it unwound. Until this wave the rows existed
+// but were unreachable: nothing listed them, drew them down, or reversed them.
+// ---------------------------------------------------------------------------
+
+export const StudentCreditListQuery = z
+  .object({
+    student_id: Uuid.optional(),
+    enrollment_id: Uuid.optional(),
+    // Default hides fully-consumed and reversed rows: the common question is
+    // "what do we still owe", not "what has ever existed".
+    include_closed: z
+      .union([z.boolean(), z.enum(['true', 'false'])])
+      .transform((v) => v === true || v === 'true')
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+  })
+  .strict();
+export type StudentCreditListQuery = z.infer<typeof StudentCreditListQuery>;
+
+/** One line of an explicit credit application. */
+export const CreditApplicationInput = z
+  .object({
+    fee_installment_id: Uuid,
+    amount_minor: z.coerce.bigint().positive(),
+  })
+  .strict();
+export type CreditApplicationInput = z.infer<typeof CreditApplicationInput>;
+
+export const ApplyCreditRequest = z
+  .object({
+    // Omit to draw the credit down FIFO across the student's open
+    // installments, oldest due date first. Provide to target specific rows.
+    // Either way the server caps the total at the credit's remaining balance
+    // and at each installment's outstanding balance.
+    applications: z.array(CreditApplicationInput).max(120).optional(),
+    // Bounds a FIFO draw-down. Ignored when `applications` is given.
+    max_amount_minor: z.coerce.bigint().positive().optional(),
+    reason_text: z.string().min(3).max(500),
+  })
+  .strict();
+export type ApplyCreditRequest = z.infer<typeof ApplyCreditRequest>;
+
+export const ReverseCreditRequest = z
+  .object({
+    reason_text: z.string().min(3).max(500),
+  })
+  .strict();
+export type ReverseCreditRequest = z.infer<typeof ReverseCreditRequest>;
+
+export const StudentCreditResponse = z.object({
+  id: Uuid,
+  student_id: Uuid,
+  enrollment_id: Uuid.nullable(),
+  amount_minor: z.coerce.bigint(),
+  consumed_minor: z.coerce.bigint(),
+  available_minor: z.coerce.bigint(),
+  currency: CurrencyCode,
+  source: z.string(),
+  source_ref_id: Uuid.nullable(),
+  expires_on: z.string().nullable(),
+  notes: z.string().nullable(),
+  reversed_at: z.string().nullable(),
+  reversed_reason: z.string().nullable(),
+  created_at: z.string(),
+});
+export type StudentCreditResponse = z.infer<typeof StudentCreditResponse>;
+
+/**
+ * Open liability, grouped by ISO currency.
+ *
+ * An array — never a single scalar. Netting a NPR credit against a GBP credit
+ * produces a number that is not money in any currency; this repo has already
+ * shipped that bug once in the outstanding aggregate.
+ */
+export const StudentCreditSummaryResponse = z.object({
+  by_currency: z.array(
+    z.object({
+      currency: CurrencyCode,
+      available_minor: z.coerce.bigint(),
+      credit_count: z.number().int(),
+    }),
+  ),
+});
+export type StudentCreditSummaryResponse = z.infer<typeof StudentCreditSummaryResponse>;

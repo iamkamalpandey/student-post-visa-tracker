@@ -12,12 +12,13 @@
 //
 // Reuses the shared FSM framework in apps/backend/src/shared/fsm.ts.
 
-import { defineMachine } from '../../shared/fsm.js';
+import { defineMachine, assertOrThrow } from '../../shared/fsm.js';
 import type {
   FeePlanStatus,
   FeeInstallmentStatus,
   PaymentStatus,
   RefundStatus,
+  UserRole,
 } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
@@ -177,3 +178,45 @@ export const refundFsm = defineMachine<RefundStatus>({
     { from: 'PENDING', to: 'FAILED',    requires_role: 'ADMIN', require_reason: true },
   ],
 });
+
+// ---------------------------------------------------------------------------
+// assertSettlement — SVT-FIN-2026-08
+// ---------------------------------------------------------------------------
+//
+// Settling an installment means moving it to PARTIAL or PAID because money
+// landed on it. The machine deliberately has NO `SCHEDULED → PARTIAL` and no
+// `SCHEDULED → PAID` edge: an installment is supposed to be invoiced before it
+// is settled, and allowing the jump would let an admin skip invoicing.
+//
+// That rule was correct but incomplete, and it broke a real cash path. A
+// student who pays early — before the daily cron has invoiced the row — leaves
+// the oldest open installment in SCHEDULED. FIFO allocation lands on it, the
+// status assert finds no legal edge, and the whole transaction 422s. The money
+// physically arrived and the system refused to record it, with an error
+// message about state machines. There is no workaround for the operator: they
+// cannot invoice on demand.
+//
+// The adjustment path already solved this by walking the legal two-hop route
+// SCHEDULED → INVOICED → PAID and asserting BOTH edges, so the machine stays
+// the single source of truth and invoicing is still not skipped — it is
+// performed. This helper is that fix, shared by every settlement path
+// (payments and credit applications) instead of re-implemented per call site.
+//
+// Returns the status the caller should persist.
+export function assertSettlement(
+  from: FeeInstallmentStatus,
+  to: 'PARTIAL' | 'PAID',
+  role: UserRole,
+  reason?: string,
+): FeeInstallmentStatus {
+  if (from === to) return to;
+  if (from === 'SCHEDULED') {
+    // Walk the route rather than jumping it. Both edges are asserted, so a
+    // role that may not invoice still cannot settle.
+    assertOrThrow(feeInstallmentFsm, 'SCHEDULED', 'INVOICED', role, reason);
+    assertOrThrow(feeInstallmentFsm, 'INVOICED', to, role, reason);
+    return to;
+  }
+  assertOrThrow(feeInstallmentFsm, from, to, role, reason);
+  return to;
+}

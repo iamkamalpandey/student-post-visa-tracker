@@ -78,6 +78,7 @@ model Tenant {
   fee_adjustments    FeeAdjustment[]
   refunds            Refund[]
   student_credits    StudentCredit[]
+  student_credit_applications StudentCreditApplication[]
   password_reset_tokens PasswordResetToken[]
   audit_anchors         AuditAnchor[]
   // SVT-V2-CRM-MIRROR-2026-06 — CRM mirror tables (read-mostly from V2 MIS).
@@ -2704,6 +2705,7 @@ model FeeInstallment {
   fee_plan     FeePlan             @relation(fields: [fee_plan_id], references: [id], onDelete: Cascade)
   allocations  PaymentAllocation[]
   adjustments  FeeAdjustment[]
+  credit_applications StudentCreditApplication[]
 
   @@unique([fee_plan_id, sequence_no])
   // Hot indexes for: overdue scan (status + due_on), dashboard outstanding
@@ -2869,13 +2871,51 @@ model StudentCredit {
   created_by_id        String?    @db.Uuid
   updated_at           DateTime   @updatedAt @db.Timestamptz
 
+  // SVT-FIN-2026-08 — retirement without deletion. A credit is reversed when
+  // the event that created it is undone (e.g. voiding the overpaying payment).
+  // Money rows are never hard-deleted; the reason is mandatory by CHECK.
+  reversed_at          DateTime?  @db.Timestamptz
+  reversed_reason      String?
+  reversed_by_id       String?    @db.Uuid
+
   tenant     Tenant      @relation(fields: [tenant_id], references: [id])
   student    Student     @relation(fields: [student_id], references: [id], onDelete: Cascade)
   enrollment Enrollment? @relation(fields: [enrollment_id], references: [id], onDelete: SetNull)
+  applications StudentCreditApplication[]
 
   @@index([tenant_id, student_id])
   @@index([tenant_id, enrollment_id])
   @@map("student_credits")
+}
+
+// ---------------------------------------------------------------------------
+// StudentCreditApplication — one ledger line per credit draw-down.
+//
+// Exists so `consumed_minor` is explainable rather than a bare running total.
+// Kept separate from PaymentAllocation because a credit application moves no
+// new cash: routing it through a synthetic Payment would double-count the
+// original receipt in every revenue aggregate. The invariant that ties the two
+// together is:
+//   fee_installment.paid_minor
+//     == sum(payment_allocations) + sum(student_credit_applications)
+// Append-only: spv_app holds SELECT + INSERT, no UPDATE or DELETE.
+// ---------------------------------------------------------------------------
+model StudentCreditApplication {
+  id                 String   @id @default(uuid()) @db.Uuid
+  tenant_id          String   @db.Uuid
+  student_credit_id  String   @db.Uuid
+  fee_installment_id String   @db.Uuid
+  amount_minor       BigInt
+  created_at         DateTime @default(now()) @db.Timestamptz
+  created_by_id      String?  @db.Uuid
+
+  tenant      Tenant         @relation(fields: [tenant_id], references: [id])
+  credit      StudentCredit  @relation(fields: [student_credit_id], references: [id], onDelete: Cascade)
+  installment FeeInstallment @relation(fields: [fee_installment_id], references: [id], onDelete: Restrict)
+
+  @@index([tenant_id, student_credit_id])
+  @@index([tenant_id, fee_installment_id])
+  @@map("student_credit_applications")
 }
 
 // ============================================================================

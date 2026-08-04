@@ -105,10 +105,17 @@ commissionsRouter.post(
 commissionsRouter.post('/:id/waive', requireUuidId, adminOnly, ...moneyMoverGuards, ctl.waiveHandler);
 
 // Admin manual edit (monetary correction + notes only).
+// SVT-FIN-2026-08 — this writes amount_minor and commission_pct DIRECTLY, which
+// makes it the single highest-blast-radius endpoint in the module, yet it was
+// the only write here carrying neither MFA step-up nor an Idempotency-Key while
+// every FSM transition beside it carried both. A stolen ADMIN token could
+// rewrite recognised revenue with one un-stepped-up call. Same guards as its
+// siblings now; the service additionally refuses money edits on PAID/WAIVED.
 commissionsRouter.patch(
   '/:id',
   requireUuidId,
   adminOnly,
+  ...moneyMoverGuards,
   validate(UpdateCommissionRequest),
   ctl.patchHandler,
 );

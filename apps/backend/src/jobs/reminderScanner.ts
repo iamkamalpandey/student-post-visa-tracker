@@ -22,6 +22,7 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
+import { currencyMinorDigits } from '../shared/money.js';
 
 // Days-before offsets per reminder type. Tuned so admins get a heads-up well
 // before the deadline plus a final nudge. Sorted descending so the earliest
@@ -84,10 +85,24 @@ function scheduledForOffset(deadline: Date, daysBefore: number): Date {
 
 // Money formatting for finance reminders. We display the major-unit amount
 // with no fractional digits — admins can drill into the row for cents.
+//
+// SVT-FIN-2026-08 — was `Number(amountMinor) / 100`, which is wrong twice:
+//   * the exponent is per-currency, and JPY and KRW are seeded with
+//     minor_unit: 0 (prisma/data/iso-currencies.json). A ¥50,000 commission
+//     rendered in the chase reminder as "JPY 500" — a 100× understatement of
+//     the amount an admin was being told to chase.
+//   * Number() on a bigint silently loses precision above 2^53.
+// currencyMinorDigits() already existed in shared/money.ts and resolves the
+// exponent from Intl; the division now stays in BigInt.
 function formatMoneyMinor(amountMinor: bigint, currency: string): string {
-  const major = Number(amountMinor) / 100;
-  const rounded = Math.round(major).toLocaleString('en-US');
-  return `${currency} ${rounded}`;
+  const exp = currencyMinorDigits(currency);
+  const scale = 10n ** BigInt(exp);
+  const neg = amountMinor < 0n;
+  const abs = neg ? -amountMinor : amountMinor;
+  // Round half-up to whole major units, in integer arithmetic.
+  const whole = exp === 0 ? abs : (abs + scale / 2n) / scale;
+  const rounded = Number(whole).toLocaleString('en-US');
+  return `${currency} ${neg ? '-' : ''}${rounded}`;
 }
 
 // The shape of a row we hand to `prisma.reminder.createMany`. We build this

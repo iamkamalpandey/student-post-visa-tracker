@@ -3,10 +3,11 @@
 // tuple — or `null` if the commission cannot be determined yet (no partner pct
 // configured, or the enrollment has no tuition_total_minor / tuition_currency).
 //
-// Math: amount_minor = floor(basis_minor * commission_pct / 100). All inputs
-// stay in BigInt / Decimal until the very last `Math.floor`-style truncation,
-// which we implement as integer division on BigInt scaled by 10000 to honour
-// the (5,2) precision of `Institution.commission_pct`.
+// Math: amount_minor = trunc(basis_minor * commission_pct / 100). All inputs
+// stay in BigInt / Decimal throughout; the truncation is integer division on a
+// BigInt scaled by 10000 to honour the (5,2) precision of
+// `Institution.commission_pct`. There is no floating-point value anywhere in
+// this file — see computeCommission for the rounding contract.
 
 import { Prisma, type PrismaClient } from '@prisma/client';
 
@@ -48,16 +49,45 @@ export async function calculateForEnrollment(
   const basis = enrollment.tuition_total_minor;
   const currency = enrollment.tuition_currency;
 
+  return computeCommission({ basis_minor: basis, commission_pct: pct, currency });
+}
+
+/**
+ * The commission arithmetic, with no I/O.
+ *
+ * SVT-FIN-2026-08 — extracted so the money math is testable on its own. It was
+ * previously inlined in calculateForEnrollment, which needs a database, so the
+ * single most consequential calculation in the module had no direct unit test
+ * at all; every assertion about it had to go through a Prisma mock.
+ *
+ * ROUNDING CONTRACT: amount = trunc(basis × pct_scaled / 10000).
+ *
+ * The comment here used to say "floor", which is only the same thing for
+ * non-negative operands. BigInt division truncates toward ZERO, so a negative
+ * basis (reachable via the CSV importer, which accepts a leading '-' on
+ * tuition_total_minor) gives -124 for -999 at 12.50%, not the floor of -125.
+ * Truncation is the behaviour we want — it is symmetric, so a charge and its
+ * exact reversal always net to zero, which floor would not guarantee. The
+ * behaviour was right and the word was wrong, and a wrong word in a rounding
+ * contract is how a drift gets introduced by someone later "fixing" it.
+ *
+ * Truncating also means commission is rounded in the payer's favour by at most
+ * one minor unit per claim. Deliberate and conservative — we never over-claim —
+ * but a choice. Do not switch to half-up without restating historical claims.
+ */
+export function computeCommission(input: {
+  basis_minor: bigint | null | undefined;
+  commission_pct: Prisma.Decimal | null | undefined;
+  currency: string | null | undefined;
+}): CalcResult | null {
+  const { basis_minor: basis, commission_pct: pct, currency } = input;
   // No partner pct OR no tuition_total OR no currency -> nothing to claim yet.
   if (pct == null) return null;
   if (basis == null) return null;
   if (!currency) return null;
 
-  // pct is a Prisma.Decimal with up to 5,2 precision. Convert to a scaled
-  // BigInt (×100) so we can do integer math without floating-point drift.
-  // amount = floor(basis * pct_scaled / 10000)
   const pctScaled = scaledPctToBigInt(pct);
-  const amount = (basis * pctScaled) / 10000n; // BigInt division truncates toward zero — equivalent to floor for non-negative inputs.
+  const amount = (basis * pctScaled) / 10000n;
 
   return {
     amount_minor: amount,

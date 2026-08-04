@@ -166,7 +166,8 @@ interface RefundRateRow {
   currency: string;
   payments_minor: string;
   refunds_minor: string;
-  refund_rate: number;
+  /** null when there were no payments that month — an undefined rate, not 0%. */
+  refund_rate: number | null;
 }
 interface RefundRateFilters { from: Date; to: Date }
 
@@ -188,7 +189,15 @@ async function refundRate(
         FROM payments
        WHERE tenant_id   = ${tenantId}::uuid
          AND deleted_at IS NULL
-         AND status      = 'RECEIVED'
+         -- SVT-FIN-2026-08 — a payment that has since been refunded still
+         -- brought cash in during its month. Filtering to RECEIVED excluded
+         -- it from the denominator while the refunds CTE below (which has no
+         -- payment-status filter) still counted its refund in the numerator.
+         -- A month whose only £1,000 payment was fully refunded therefore
+         -- reported payments £0, refunds £1,000, and — via the CASE guard
+         -- below mapping NULL to 0 — a refund rate of 0.0% for a month that
+         -- was refunded in full. VOIDED stays out: it never happened.
+         AND status      IN ('RECEIVED', 'PARTIALLY_REFUNDED', 'REFUNDED')
          AND received_on BETWEEN ${filters.from}::date AND ${filters.to}::date
        GROUP BY 1, currency
     ),
@@ -220,7 +229,9 @@ async function refundRate(
       currency: r.currency,
       payments_minor: (r.payments_minor ?? 0n).toString(),
       refunds_minor: (r.refunds_minor ?? 0n).toString(),
-      refund_rate: r.refund_rate == null ? 0 : Number(r.refund_rate),
+      // null means "no payments that month", which is not a 0% refund rate —
+      // it is an undefined one. Kept distinct so the UI can render '—'.
+      refund_rate: r.refund_rate == null ? null : Number(r.refund_rate),
     })),
     generated_at: now(),
     filters,

@@ -10,7 +10,7 @@ import type {
 } from '@spv/zod-schemas';
 
 import { prisma } from '../../config/db.js';
-import { Conflict, HttpError, NotFound, PreconditionFailed } from '../../shared/errors.js';
+import { Conflict, HttpError, NotFound, PreconditionFailed, UnprocessableEntity } from '../../shared/errors.js';
 import { logger } from '../../config/logger.js';
 import { writeAudit } from '../../shared/audit.js';
 import { runJob } from '../../jobs/runner.js';
@@ -293,11 +293,45 @@ export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input
   // SVT-FIN-2026-06: atomic status guard closes the TOCTOU between the read
   // above and the write — two concurrent "pay" calls can't both record a
   // payment on the same money row (the WHERE status != PAID lets exactly one win).
+  // SVT-FIN-2026-08 — three defects in this one statement:
+  //
+  // 1. `status: { not: 'PAID' }` omitted WAIVED, so the pre-check above was
+  //    defeated by ordering: pay reads SCHEDULED → a concurrent waive commits
+  //    → this write still matches (WAIVED != PAID) → a written-off fee
+  //    silently became PAID and re-entered financeSummary as revenue
+  //    collected. The sibling waiveFee got this right with `notIn`.
+  //
+  // 2. `current.amount_minor` came from a read with no version guard, so a
+  //    concurrent PATCH that legally lowered the fee (allowed while the row is
+  //    non-terminal) left this write settling the OLD, higher amount —
+  //    over-reporting collections by the difference.
+  //
+  // 3. Nothing bounded the settled amount by what was actually billed. The
+  //    zod schema only requires nonnegative() and the DB CHECK only enforces
+  //    >= 0; there is no paid_amount_minor <= amount_minor constraint like the
+  //    billing side's fee_installments_paid_le_net.
+  //
+  // Folding the version into the WHERE fixes (2) the same way updateFee does.
+  const settledMinor = input.paid_amount_minor ?? current.amount_minor;
+  if (settledMinor > current.amount_minor) {
+    throw UnprocessableEntity(
+      `Settled amount ${settledMinor} exceeds the billed amount ${current.amount_minor}. Adjust the fee first, or record the surplus separately.`,
+    );
+  }
   const result = await db.crmLeadFee.updateMany({
-    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null, status: { not: 'PAID' } },
-    data: { status: 'PAID', paid_at: new Date(input.paid_on), paid_amount_minor: input.paid_amount_minor ?? current.amount_minor, updated_by_id: actorId, version: { increment: 1 } },
+    where: {
+      id: feeId,
+      lead_id: leadId,
+      tenant_id: tenantId,
+      deleted_at: null,
+      status: { notIn: ['PAID', 'WAIVED'] },
+      version: current.version,
+    },
+    data: { status: 'PAID', paid_at: new Date(input.paid_on), paid_amount_minor: settledMinor, updated_by_id: actorId, version: { increment: 1 } },
   });
-  if (result.count === 0) throw Conflict('Fee is already paid');
+  if (result.count === 0) {
+    throw Conflict('Fee changed while being settled (paid, waived, or amended); reload and retry');
+  }
   const updated = await getFee(db, tenantId, leadId, feeId);
   // SVT-SYNC-2026-06 — A7: dismiss PENDING/SENT reminders that reference this fee.
   // Without this, "payment due in 7 days" notifications keep firing for a paid fee.
@@ -336,8 +370,26 @@ export async function deleteFee(ctx: Ctx, leadId: string, feeId: string): Promis
   // concurrently would both pass getFee, both write, both bump version,
   // both fanout audit + reminder-dismiss. `updateMany where deleted_at IS
   // NULL` lets exactly one win; the loser's audit + fanout are skipped.
+  // SVT-FIN-2026-08 — settled money cannot be deleted out of the books.
+  // updateFee refuses to touch a PAID/WAIVED fee and markFeePaid/waiveFee both
+  // refuse terminal transitions, but DELETE had no status predicate at all —
+  // and the route allows COUNSELLOR. Since every financeSummary aggregate
+  // filters `deleted_at: null`, one call made collected revenue vanish from
+  // every report. An audit row was written, but the number was gone.
+  const currentStatus = (await getFee(db, tenantId, leadId, feeId)).status;
+  if (currentStatus === 'PAID' || currentStatus === 'WAIVED') {
+    throw Conflict(
+      `Cannot delete a ${currentStatus} fee — it is part of the financial record. Reverse the settlement first if it was recorded in error.`,
+    );
+  }
   const result = await db.crmLeadFee.updateMany({
-    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null },
+    where: {
+      id: feeId,
+      lead_id: leadId,
+      tenant_id: tenantId,
+      deleted_at: null,
+      status: { notIn: ['PAID', 'WAIVED'] },
+    },
     data: { deleted_at: new Date(), deleted_by_id: actorId },
   });
   if (result.count === 0) return; // already deleted by concurrent request

@@ -101,9 +101,27 @@ export async function getByIdHandler(req: Request, res: Response, next: NextFunc
 
 export async function claimHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    ensureUser(req);
-    const after = await svc.claim(req, req.params['id']!);
-    res.status(200).json(after);
+    const user = ensureUser(req);
+    const id = req.params['id']!;
+    const idem = readIdempotencyKey(req);
+    // SVT-FIN-2026-08 — the route already REQUIRED an Idempotency-Key here via
+    // moneyMoverGuards, but requireIdempotencyKey only asserts the header is
+    // present; it does not cache anything. This handler called the service
+    // directly, so a retry re-executed a money transition instead of replaying
+    // the original response. Its siblings (invoice / mark-paid /
+    // resolve-dispute) were already wrapped; these three were not.
+    const result = await withIdempotency<unknown>(
+      {
+        db: dbForIdem(req),
+        tenantId: user.tid,
+        scope: 'commissions.claim',
+        key: idem,
+        requestHash: hashBody('commissions.claim', id, null),
+      },
+      async () => ({ status: 200, body: await svc.claim(req, id) }),
+    );
+    if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
+    res.status(result.status).json(result.body);
   } catch (err) {
     next(err);
   }
@@ -159,9 +177,28 @@ export async function markPaidHandler(req: Request, res: Response, next: NextFun
 
 export async function disputeHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    ensureUser(req);
-    const after = await svc.dispute(req, req.params['id']!, req.body as DisputeRequest);
-    res.json(after);
+    const user = ensureUser(req);
+    const id = req.params['id']!;
+    const body = req.body as Record<string, unknown>;
+    const idem = readIdempotencyKey(req);
+    // SVT-FIN-2026-08 — the route already REQUIRED an Idempotency-Key here via
+    // moneyMoverGuards, but requireIdempotencyKey only asserts the header is
+    // present; it does not cache anything. This handler called the service
+    // directly, so a retry re-executed a money transition instead of replaying
+    // the original response. Its siblings (invoice / mark-paid /
+    // resolve-dispute) were already wrapped; these three were not.
+    const result = await withIdempotency<unknown>(
+      {
+        db: dbForIdem(req),
+        tenantId: user.tid,
+        scope: 'commissions.dispute',
+        key: idem,
+        requestHash: hashBody('commissions.dispute', id, body),
+      },
+      async () => ({ status: 200, body: await svc.dispute(req, id, body as never) }),
+    );
+    if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
+    res.status(result.status).json(result.body);
   } catch (err) {
     next(err);
   }
@@ -200,9 +237,27 @@ export async function resolveDisputeHandler(
 
 export async function waiveHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    ensureUser(req);
-    const after = await svc.waive(req, req.params['id']!);
-    res.json(after);
+    const user = ensureUser(req);
+    const id = req.params['id']!;
+    const idem = readIdempotencyKey(req);
+    // SVT-FIN-2026-08 — the route already REQUIRED an Idempotency-Key here via
+    // moneyMoverGuards, but requireIdempotencyKey only asserts the header is
+    // present; it does not cache anything. This handler called the service
+    // directly, so a retry re-executed a money transition instead of replaying
+    // the original response. Its siblings (invoice / mark-paid /
+    // resolve-dispute) were already wrapped; these three were not.
+    const result = await withIdempotency<unknown>(
+      {
+        db: dbForIdem(req),
+        tenantId: user.tid,
+        scope: 'commissions.waive',
+        key: idem,
+        requestHash: hashBody('commissions.waive', id, null),
+      },
+      async () => ({ status: 200, body: await svc.waive(req, id) }),
+    );
+    if (result.replayed) res.setHeader('Idempotent-Replayed', 'true');
+    res.status(result.status).json(result.body);
   } catch (err) {
     next(err);
   }

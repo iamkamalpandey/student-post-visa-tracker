@@ -104,11 +104,25 @@ export function recomputeInstallmentAmounts(opts: {
   gross_minor: bigint;
   adjustments_sum_minor: bigint;
   paid_minor: bigint;
-}): { net_minor: bigint; balance_minor: bigint } {
+}): { net_minor: bigint; balance_minor: bigint; overpaid_minor: bigint; over_adjusted_minor: bigint } {
   const net = opts.gross_minor + opts.adjustments_sum_minor;
+  // SVT-FIN-2026-08 (FIN-P0-4) — the two clamps below exist because
+  // net_minor and balance_minor are non-negative by DB contract. Clamping
+  // alone is a silent data loss: the amount that was clamped away is money
+  // the business owes back (overpayment) or an adjustment that could not be
+  // fully applied. Returning both deltas forces every caller to make an
+  // explicit decision instead of inheriting a zero that looks settled.
   const netClamped = net < 0n ? 0n : net;
+  const over_adjusted_minor = netClamped - net; // >0 when adjustments drove net below zero
   const balance = netClamped - opts.paid_minor;
-  return { net_minor: netClamped, balance_minor: balance < 0n ? 0n : balance };
+  const balanceClamped = balance < 0n ? 0n : balance;
+  const overpaid_minor = balanceClamped - balance; // >0 when paid exceeds net
+  return {
+    net_minor: netClamped,
+    balance_minor: balanceClamped,
+    overpaid_minor,
+    over_adjusted_minor,
+  };
 }
 
 /**

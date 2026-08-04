@@ -62,16 +62,33 @@ export type CommissionSummaryBucket = {
   total_minor: bigint | string | number;
 };
 
+/**
+ * SVT-FIN-2026-08 — this now mirrors what the backend actually returns.
+ *
+ * It previously declared `{ institution: {...}, buckets: [...] }` plus an
+ * optional `totals` block, none of which the API has ever sent
+ * (commissions/service.ts summary() returns flat per-status columns keyed by
+ * institution_id + currency). The consequence was silent: `summary.totals` was
+ * always undefined, `row.buckets ?? []` iterated an empty array for every row,
+ * and all four cards in the summary strip rendered "—" no matter how much
+ * commission existed.
+ */
 export type CommissionSummaryRow = {
-  institution: CommissionInstitutionRef;
+  institution_id: string;
   currency: string;
-  buckets: CommissionSummaryBucket[];
+  pending_count: number;
+  pending_total_minor: string;
+  claimed_total_minor: string;
+  invoiced_total_minor: string;
+  /** Cash actually received against PAID claims. */
+  paid_total_minor: string;
+  /** What those PAID claims were billed at — differs on short payments. */
+  paid_claimed_total_minor: string;
+  outstanding_total_minor: string;
 };
 
 export type CommissionSummaryResponse = {
   data: CommissionSummaryRow[];
-  /** Headline totals — keyed by status for the 4-card strip. */
-  totals?: Partial<Record<CommissionStatus, { total_minor: bigint | string | number; currency: string }>>;
 };
 
 export type CommissionFilters = {

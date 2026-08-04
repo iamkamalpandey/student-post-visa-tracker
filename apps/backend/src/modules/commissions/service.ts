@@ -185,7 +185,7 @@ export async function claim(req: Request, id: string) {
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -230,8 +230,17 @@ export async function invoice(req: Request, id: string, body: InvoiceRequest) {
   }
 
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // SVT-FIN-2026-08 — TOCTOU. `before.status` was read in a separate query, so
+  // the check above and this write are not atomic. Folding the expected status
+  // into the WHERE makes the guard part of the write itself: a racing
+  // transition means 0 rows match and we 409 instead of overwriting it. Its
+  // siblings claim/resolveDispute/waive already did this; these did not.
+  // Without it, a stale /invoice landing after the claim had already reached
+  // PAID flipped it back to INVOICED while paid_on and received_minor stayed
+  // set — recognised revenue silently left the paid pivot, and the claim
+  // became eligible for a second mark-paid.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: { id, tenant_id: tid, deleted_at: null, status: 'CLAIMED' },
     data: {
       status: 'INVOICED',
       invoice_no: invoiceNo,
@@ -240,7 +249,7 @@ export async function invoice(req: Request, id: string, body: InvoiceRequest) {
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -299,8 +308,18 @@ export async function markPaid(req: Request, id: string, body: MarkPaidRequest) 
   // variance is visible; default to the full claimed amount when omitted.
   const receivedMinor = body.received_minor ?? before.amount_minor;
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // SVT-FIN-2026-08 — TOCTOU. `before.status` was read in a separate query, so
+  // the check above and this write are not atomic. Folding the expected status
+  // into the WHERE makes the guard part of the write itself: a racing
+  // transition means 0 rows match and we 409 instead of overwriting it. Its
+  // siblings claim/resolveDispute/waive already did this; these did not.
+  // Without it, two admins recording two different remittances against one
+  // INVOICED claim both passed the read-check and both wrote: the last
+  // received_minor and payment_reference won and the other receipt vanished.
+  // The idempotency key does not help — it partitions on the body hash, so two
+  // different payloads are two independent operations.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: { id, tenant_id: tid, deleted_at: null, status: 'INVOICED' },
     data: {
       status: 'PAID',
       paid_on: new Date(body.paid_on),
@@ -310,7 +329,7 @@ export async function markPaid(req: Request, id: string, body: MarkPaidRequest) 
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -360,8 +379,18 @@ export async function dispute(req: Request, id: string, body: DisputeRequest) {
     throw Conflict('Claim is already DISPUTED');
   }
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // SVT-FIN-2026-08 — TOCTOU. `before.status` was read in a separate query, so
+  // the check above and this write are not atomic. Folding the expected status
+  // into the WHERE makes the guard part of the write itself: a racing
+  // transition means 0 rows match and we 409 instead of overwriting it. Its
+  // siblings claim/resolveDispute/waive already did this; these did not.
+  // Without it the "cannot dispute a PAID claim" rule above was defeated by
+  // ordering alone: a dispute that read INVOICED, then lost the race to
+  // mark-paid, still landed and moved a PAID claim to DISPUTED. summary() does
+  // not surface DISPUTED at all, so collected cash disappeared from every
+  // rollup while paid_on and received_minor remained populated.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: { id, tenant_id: tid, deleted_at: null, status: before.status },
     data: {
       status: 'DISPUTED',
       dispute_reason: body.dispute_reason,
@@ -369,7 +398,7 @@ export async function dispute(req: Request, id: string, body: DisputeRequest) {
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -438,7 +467,7 @@ export async function resolveDispute(
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -486,7 +515,7 @@ export async function waive(req: Request, id: string) {
       version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Commission claim not found');
+  if (wr.count !== 1) throw Conflict('Commission claim changed status concurrently; reload and retry');
   const after = await db(req).commissionClaim.findFirstOrThrow({
     where: { id, tenant_id: tid },
     include: fullInclude,
@@ -538,12 +567,36 @@ export async function patch(
   // When an `expected` version was supplied, fold it into the WHERE so the
   // UPDATE is atomic against a concurrent writer that bumped the version
   // between the SELECT above and now.
+  // SVT-FIN-2026-08 — a settled claim's money is not editable.
+  //
+  // Every FSM transition on this module carries requireMfa + Idempotency-Key.
+  // PATCH — the ONE endpoint that writes amount_minor and commission_pct
+  // directly — inspected `before.status` nowhere at all. A PAID claim of
+  // 100,000 could be PATCHed to amount_minor: 1 with a single call: status
+  // stayed PAID, paid_on / received_minor / payment_reference stayed intact,
+  // and summary() then reported 1. Recognised revenue erased, no reversing
+  // entry, no step-up.
+  //
+  // Terminal claims are frozen for money fields. Notes stay editable so
+  // operators can still annotate history.
+  const TERMINAL_FOR_MONEY_EDIT = ['PAID', 'WAIVED'];
+  const touchesMoney = body.amount_minor !== undefined || body.commission_pct !== undefined;
+  if (touchesMoney && TERMINAL_FOR_MONEY_EDIT.includes(before.status)) {
+    throw Conflict(
+      `Cannot change amount or rate on a ${before.status} claim. Reverse the settlement first, or record an adjustment.`,
+    );
+  }
+
   const where: Prisma.CommissionClaimWhereInput = {
     id,
     tenant_id: tid,
     deleted_at: null,
   };
   if (expected !== undefined) where.version = expected;
+  // Freeze the status we validated against into the write, so a claim that
+  // reaches PAID between the check and the update cannot be money-edited by a
+  // request that was authorised against its earlier state.
+  if (touchesMoney) where.status = before.status;
   const wr = await db(req).commissionClaim.updateMany({ where, data });
   if (wr.count !== 1) {
     if (expected !== undefined) {
@@ -592,7 +645,11 @@ export type SummaryRow = {
   pending_total_minor: string;
   claimed_total_minor: string;
   invoiced_total_minor: string;
+  /** Cash actually received against PAID claims (sum of received_minor). */
   paid_total_minor: string;
+  /** What those PAID claims were originally billed at. The difference from
+   *  paid_total_minor is the short-payment variance. */
+  paid_claimed_total_minor: string;
   outstanding_total_minor: string; // CLAIMED + INVOICED (not yet PAID, not DISPUTED/WAIVED)
 };
 
@@ -602,7 +659,7 @@ export async function summary(req: Request) {
   const groups = await db(req).commissionClaim.groupBy({
     by: ['institution_id', 'currency', 'status'],
     where: { tenant_id: tid, deleted_at: null },
-    _sum: { amount_minor: true },
+    _sum: { amount_minor: true, received_minor: true },
     _count: { _all: true },
   });
 
@@ -620,6 +677,7 @@ export async function summary(req: Request) {
         claimed_total_minor: '0',
         invoiced_total_minor: '0',
         paid_total_minor: '0',
+        paid_claimed_total_minor: '0',
         outstanding_total_minor: '0',
       };
       byKey.set(key, row);
@@ -637,7 +695,17 @@ export async function summary(req: Request) {
         row.invoiced_total_minor = sum;
         break;
       case 'PAID':
-        row.paid_total_minor = sum;
+        // SVT-FIN-2026-08 — report CASH RECEIVED, not the amount claimed.
+        // received_minor exists precisely to capture short payments (the
+        // schema calls amount_minor - received_minor the "claimed-vs-received
+        // variance"), and markPaid records it — but no aggregate ever read it,
+        // so a claim of 100,000 settled at 50,000 still contributed 100,000 to
+        // paid_total_minor. The finance summary overstated collections by
+        // exactly the variance the column was added to expose.
+        // COALESCE to amount_minor for rows written before received_minor
+        // existed, where NULL means "settled in full".
+        row.paid_total_minor = (g._sum.received_minor ?? g._sum.amount_minor ?? 0n).toString();
+        row.paid_claimed_total_minor = sum;
         break;
       // DISPUTED + WAIVED counted but not surfaced as separate columns; they're
       // visible via the regular list endpoint with status filter.

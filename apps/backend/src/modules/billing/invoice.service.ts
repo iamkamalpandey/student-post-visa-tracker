@@ -16,6 +16,7 @@
 import { createHash } from 'node:crypto';
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import { getFeePlan } from './plan.service.js';
+import { currencyMinorDigits } from '../../shared/money.js';
 
 type Ctx = { user?: { tid: string; sub?: string; role?: 'ADMIN' | 'COUNSELLOR' | 'VIEWER' } };
 
@@ -33,14 +34,23 @@ export type InvoicePdfArtifact = {
   filename: string;
 };
 
-// Format a bigint minor-unit amount as "1234.56" (two-decimal major units).
-// Currencies with !=2 decimals (JPY, KWD) are out of scope for this stub.
+// Format a bigint minor-unit amount in its currency's own major units.
+//
+// SVT-FIN-2026-08 — the "!=2 decimals out of scope" caveat this carried was
+// not harmless on an invoice: a ¥50,000 line printed as "500.00 JPY" on a
+// document the student is asked to pay against. The exponent now comes from
+// currencyMinorDigits (Intl-backed), and zero-decimal currencies print with no
+// fractional part at all. Arithmetic stays in BigInt throughout.
 function fmtMinor(minor: bigint, currency: string): string {
+  const exp = currencyMinorDigits(currency);
+  const scale = 10n ** BigInt(exp);
   const neg = minor < 0n;
   const abs = neg ? -minor : minor;
-  const major = abs / 100n;
-  const cents = (abs % 100n).toString().padStart(2, '0');
-  return `${neg ? '-' : ''}${major.toString()}.${cents} ${currency}`;
+  const major = abs / scale;
+  const sign = neg ? '-' : '';
+  if (exp === 0) return `${sign}${major.toString()} ${currency}`;
+  const cents = (abs % scale).toString().padStart(exp, '0');
+  return `${sign}${major.toString()}.${cents} ${currency}`;
 }
 
 function pad(s: string, n: number): string {
@@ -338,6 +348,20 @@ export async function renderInvoicePdf(
   hr(dctx);
   dctx.y -= 12;
 
+  // SVT-FIN-2026-08 — TOTAL FIRST, THEN DRAW.
+  //
+  // The accumulators used to live inside the row loop, which ends in
+  // `if (dctx.y < 140) break` once the page runs out of room. The break
+  // truncated the totals along with the rows: only ~30-40 lines fit, the plan
+  // wizard permits up to 240 installments, and a 48-month monthly plan already
+  // overflows. The document then printed a "Gross (sum)" and "Outstanding"
+  // covering just the visible rows, directly beneath a "Plan Total" taken from
+  // the untruncated plan — three numbers that silently disagreed on an
+  // invoice the student pays against. The text renderer has no such break, so
+  // /invoice.txt and /invoice.pdf reported different amounts for one plan.
+  //
+  // Summing over the full set first makes the totals independent of how much
+  // fits on the page.
   let totalGross = 0n;
   let totalPaid = 0n;
   let totalBalance = 0n;
@@ -345,6 +369,10 @@ export async function renderInvoicePdf(
     totalGross += i.gross_minor;
     totalPaid += i.paid_minor;
     totalBalance += i.balance_minor;
+  }
+
+  let rowsDrawn = 0;
+  for (const i of plan.installments) {
     drawRow([
       String(i.sequence_no),
       i.label,
@@ -355,7 +383,19 @@ export async function renderInvoicePdf(
       i.status,
     ]);
     dctx.y -= LINE_HEIGHT;
+    rowsDrawn += 1;
     if (dctx.y < 140) break; // pagination guard — see note above
+  }
+
+  // Never let a truncated table read as a complete one.
+  if (rowsDrawn < plan.installments.length) {
+    drawText(
+      dctx,
+      `… ${plan.installments.length - rowsDrawn} more installment(s) not shown — totals below cover all ${plan.installments.length}.`,
+      MARGIN_X,
+      { size: 9, color: COLOR_MUTED },
+    );
+    dctx.y -= LINE_HEIGHT;
   }
 
   dctx.y -= 4;

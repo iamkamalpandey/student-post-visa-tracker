@@ -150,9 +150,20 @@ dashboardRouter.get('/finance-summary', async (req, res, next) => {
     }
     const overdueWhere = { ...installWhere, status: 'OVERDUE' };
     const since30 = new Date(Date.now() - 30 * 86_400_000);
+    // SVT-FIN-2026-08 — count every payment that BROUGHT CASH IN, not only the
+    // ones still sitting in RECEIVED.
+    //
+    // completeRefund flips a payment to PARTIALLY_REFUNDED or REFUNDED and
+    // never reduces gross_minor, so filtering `status: 'RECEIVED'` dropped the
+    // ENTIRE gross of any payment that had been even slightly refunded. A
+    // £1,000 refund against a £5,000 payment erased all £5,000 from reported
+    // collections. Refunds are already subtracted separately below, so
+    // including these statuses is what makes collections − refunds correct.
+    // VOIDED stays excluded: a void means the payment never happened.
     const paymentWhere: Record<string, unknown> = {
       tenant_id: tenantId, deleted_at: null,
-      status: 'RECEIVED', received_on: { gte: since30 },
+      status: { in: ['RECEIVED', 'PARTIALLY_REFUNDED', 'REFUNDED'] },
+      received_on: { gte: since30 },
     };
     if (scopeOwnCaseload) {
       paymentWhere['student'] = { is: { assigned_to_id: userId ?? '__no_user__' } };
@@ -207,7 +218,16 @@ dashboardRouter.get('/finance-summary', async (req, res, next) => {
     const by_currency = [...byCur.values()]
       .sort((a, b) => a.currency.localeCompare(b.currency))
       .map((r) => {
-        const denom = r.collections + r.refunds;
+        // SVT-FIN-2026-08 — refund rate = refunds / gross collected.
+        //
+        // This used `collections + refunds` as the denominator while
+        // reports/service.ts used `payments` for a metric carrying the same
+        // user-facing label, so the two screens disagreed on the same data
+        // (100k/1.1m = 9.1% here vs the true 100k/1.5m = 6.7%). With
+        // collections now including partially/fully refunded payments, the
+        // gross received IS r.collections — refunds are a subset of it, not an
+        // addition to it. Both surfaces now compute the same ratio.
+        const denom = r.collections;
         const refund_rate_30d = denom > 0n
           ? Math.round((Number(r.refunds) / Number(denom)) * 10_000) / 10_000
           : 0;

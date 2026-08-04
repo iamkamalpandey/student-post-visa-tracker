@@ -12,10 +12,14 @@
 //   - Loading + error states use the shared primitives.
 //
 // Currency formatting goes through useFormat() so the displayed amount
-// respects the caller's locale + currency. The hooks emit BigInt as string
-// over the wire; we convert via Number() for display ONLY (do NOT use for
-// math). Future iteration: format directly from the string via Intl
-// NumberFormat once the helper supports BigInt strings.
+// respects the caller's locale + currency.
+//
+// SVT-FIN-2026-08 — money() / formatMoney() takes MINOR units and performs the
+// major-unit conversion itself (lib/format.ts). This file used to divide by 100
+// first and then hand the result to money(), which divided by 100 again: a
+// £12,000.00 plan total rendered as £120.00 on every card, and the same double
+// conversion hit Outstanding and each per-status chip. Pass the minor-unit
+// value straight through — never pre-convert.
 
 'use client';
 
@@ -149,7 +153,7 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
 
   const outstanding = outstandingQuery.data;
   const installmentCount = current.installments?.length ?? null;
-  const totalAmount = Number(current.total_minor) / 100;
+  const totalAmount = current.total_minor; // minor units — money() converts
   // SVT-QA-2026-08 — response is now per-currency. This card is scoped to a
   // single enrollment so we pick the bucket matching the plan's currency;
   // absent → treat as zero outstanding.
@@ -157,7 +161,7 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
     (b) => b.currency === current.currency,
   ) ?? null;
   const outstandingAmount = outstandingBucket
-    ? Number(outstandingBucket.total_minor) / 100
+    ? outstandingBucket.total_minor // minor units — money() converts
     : null;
 
   return (
@@ -189,7 +193,7 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
 
             <Stack spacing={0.25}>
               <Typography variant="caption" color="text.secondary">Outstanding</Typography>
-              <Typography variant="h6" sx={{ fontVariantNumeric: 'tabular-nums' }} color={outstandingAmount && outstandingAmount > 0 ? 'warning.main' : 'success.main'}>
+              <Typography variant="h6" sx={{ fontVariantNumeric: 'tabular-nums' }} color={outstandingAmount != null && Number(outstandingAmount) > 0 ? 'warning.main' : 'success.main'}>
                 {outstandingAmount != null && outstandingBucket
                   ? money(outstandingAmount, outstandingBucket.currency)
                   : '—'}
@@ -244,8 +248,8 @@ export default function PlanSummaryCard({ enrollmentId, compact, onCreatePlan }:
           {outstandingBucket?.by_status ? (
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               {Object.entries(outstandingBucket.by_status).map(([status, minor]) => {
-                const v = Number(minor) / 100;
-                if (v <= 0) return null;
+                const v = minor; // minor units — money() converts
+                if (Number(v) <= 0) return null;
                 return (
                   <Chip
                     key={status}

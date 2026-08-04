@@ -121,10 +121,43 @@ async function resolvedCalcForEnrollment(
   });
 
   if (resolved) {
-    const pct = new Prisma.Decimal(resolved.commissionPct.toFixed(2));
+    if (resolved.currency !== tuitionCurrency) {
+      // Loud, not silent: someone must fix the rule or add an FX layer.
+      logger.error(
+        {
+          enrollmentId,
+          ruleId: resolved.ruleId,
+          ruleCurrency: resolved.currency,
+          tuitionCurrency,
+        },
+        'commission: rule currency differs from tuition currency; claim denominated in tuition currency (no FX conversion exists)',
+      );
+    }
+    // SVT-FIN-2026-08 — exact decimal string, not a float round-trip.
+    const pct = new Prisma.Decimal(resolved.commissionPctExact);
     return {
       amount_minor: applyPct(basis, pct),
-      currency: resolved.currency,
+      // CURRENCY IS THE BASIS CURRENCY, NOT THE RULE'S.
+      //
+      // amount = basis × pct. A percentage of an amount is denominated in that
+      // amount's currency — full stop. This used to stamp `resolved.currency`,
+      // the currency configured on the SuperAgentCommissionRule, which is an
+      // independent char(3) column with no equality check against
+      // enrollment.tuition_currency, and there is no FX layer anywhere in this
+      // codebase to convert between them.
+      //
+      // The result was fabricated money: tuition of NPR 1,000,000 at a 10% rule
+      // configured in USD produced a claim of USD 100,000 — roughly 130× its
+      // real value — with basis_minor still holding the NPR figure, so the row
+      // could not even be reconciled against itself. Because summary() groups
+      // by currency, that invented USD then landed in and inflated the tenant's
+      // genuine USD pivot: the per-currency separation that protects the books
+      // was defeated at the write, where no read-side grouping can recover it.
+      //
+      // A rule denominated in a different currency is a configuration error,
+      // not an instruction to convert. We record the arithmetically correct
+      // amount and shout about the mismatch rather than inventing a rate.
+      currency: tuitionCurrency,
       commission_pct: pct,
       basis_minor: basis,
       rate_source: 'sa_rule',
@@ -138,9 +171,18 @@ async function resolvedCalcForEnrollment(
     select: { default_commission_pct: true, default_currency: true },
   });
   if (sa?.default_commission_pct != null) {
+    if (sa.default_currency && sa.default_currency !== tuitionCurrency) {
+      logger.error(
+        { enrollmentId, agentCurrency: sa.default_currency, tuitionCurrency },
+        'commission: super-agent default currency differs from tuition currency; claim denominated in tuition currency (no FX conversion exists)',
+      );
+    }
     return {
       amount_minor: applyPct(basis, sa.default_commission_pct),
-      currency: sa.default_currency ?? tuitionCurrency,
+      // SVT-FIN-2026-08 — basis currency, for the same reason as the rule path
+      // above. `sa.default_currency` described the agent's preferred invoicing
+      // currency, not the denomination of an amount derived from NPR tuition.
+      currency: tuitionCurrency,
       commission_pct: sa.default_commission_pct,
       basis_minor: basis,
       rate_source: 'sa_default',

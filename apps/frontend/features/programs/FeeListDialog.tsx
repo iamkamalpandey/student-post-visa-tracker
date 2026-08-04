@@ -33,6 +33,7 @@ import { CreateProgramFeeRequest } from '@spv/zod-schemas';
 import { api, ApiError } from '@/lib/api';
 import { useCurrencies, useTenant } from '@/lib/queries';
 import { formatMoney } from '@/lib/format';
+import { majorToMinor } from '@/lib/money';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CurrencyAutocomplete from '@/components/CurrencyAutocomplete';
 import LabeledField from '@/components/LabeledField';
@@ -69,14 +70,25 @@ const empty = (): FormValues => ({
 });
 
 // Backend stores amount in minor units (cents/pence). We accept a major-unit
-// decimal string and convert using the currency's minor_unit scale (defaulting
-// to 2 — most ISO-4217 currencies). For zero-decimal currencies like JPY the
-// minor_unit lookup returns 0, so 1000 JPY stays 1000.
-function toMinorUnits(major: string, minorUnit = 2): string {
-  const n = Number(major);
-  if (!Number.isFinite(n) || n < 0) return '0';
-  const scale = 10 ** minorUnit;
-  return Math.round(n * scale).toString();
+// decimal string and convert using the currency's minor_unit scale.
+//
+// SVT-FIN-2026-08 — this was the last float-based major→minor conversion in
+// the app, and it was wrong in two ways:
+//
+//   * `Math.round(Number(major) * scale)` rounds the wrong way at the half
+//     boundary because the multiply is not exact in binary floating point:
+//     "1.005" → 1.005 * 100 → 100.49999999999999 → 100, where half-up gives
+//     101. Over three-decimal inputs in [0, 200) that is 1147 wrong values.
+//   * `n < 0 → '0'` turned a negative amount into a silent £0.00 fee instead
+//     of a validation error — the field has no `min`, the form has no
+//     resolver, and the server schema's .nonnegative() happily accepts 0.
+//
+// lib/money.ts already had the correct implementation: pure BigInt, explicit
+// half-up, currency-aware exponent, and null (not 0) on malformed input.
+// Returning null here lets the caller refuse to submit rather than invent a
+// number.
+function toMinorUnits(major: string, currency: string): string | null {
+  return majorToMinor(major, currency);
 }
 
 export type FeeListDialogProps = {
@@ -99,14 +111,6 @@ export default function FeeListDialog({
   const [submitting, setSubmitting] = useState(false);
   const [pendingDeleteFeeId, setPendingDeleteFeeId] = useState<string | null>(null);
   const currenciesQ = useCurrencies();
-
-  // Map "GBP" → 2, "JPY" → 0, etc. Falls back to 2 for unknown codes.
-  function minorUnitFor(code: string): number {
-    const c = (currenciesQ.data ?? []).find(
-      (x) => x.code.toUpperCase() === code.toUpperCase(),
-    );
-    return c?.minor_unit ?? 2;
-  }
 
   const feesQ = useQuery({
     queryKey: ['programs', 'intakes', intakeId, 'fees'],
@@ -180,10 +184,18 @@ export default function FeeListDialog({
     setSubmitting(true);
     try {
       const currencyCode = values.currency.trim().toUpperCase();
+      // Refuse to submit an amount we cannot represent exactly rather than
+      // silently coercing it to zero (SVT-FIN-2026-08).
+      const amountMinor = toMinorUnits(values.amount_major, currencyCode);
+      if (amountMinor === null || amountMinor.startsWith('-')) {
+        enqueueSnackbar('Enter a valid non-negative amount, e.g. 1250.00', { variant: 'error' });
+        setSubmitting(false);
+        return;
+      }
       const payload: Record<string, unknown> = {
         audience: values.audience,
         fee_type: values.fee_type,
-        amount_minor: toMinorUnits(values.amount_major, minorUnitFor(currencyCode)),
+        amount_minor: amountMinor,
         currency: currencyCode,
         per_period: values.per_period,
         is_estimated: values.is_estimated,

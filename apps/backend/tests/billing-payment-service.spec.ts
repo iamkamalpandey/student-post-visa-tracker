@@ -117,13 +117,13 @@ vi.mock('../src/config/db.js', () => {
         const ids = values[0] as string[];
         return store.installments
           .filter((i) => ids.includes(i.id) && !['WAIVED', 'CANCELLED', 'REFUNDED'].includes(i.status))
-          .map((i) => ({ id: i.id, balance_minor: i.balance_minor, net_minor: i.net_minor, currency: i.currency, status: i.status }));
+          .map((i) => ({ id: i.id, balance_minor: i.balance_minor, net_minor: i.net_minor, paid_minor: i.paid_minor, currency: i.currency, status: i.status }));
       }
       if (sql.includes('JOIN fee_plans')) {
         return [...store.installments]
           .filter((i) => ['SCHEDULED', 'INVOICED', 'DUE', 'OVERDUE', 'PARTIAL'].includes(i.status))
           .sort((a, b) => a.sequence_no - b.sequence_no)
-          .map((i) => ({ id: i.id, balance_minor: i.balance_minor, net_minor: i.net_minor, currency: i.currency, status: i.status }));
+          .map((i) => ({ id: i.id, balance_minor: i.balance_minor, net_minor: i.net_minor, paid_minor: i.paid_minor, currency: i.currency, status: i.status }));
       }
       return [];
     }),

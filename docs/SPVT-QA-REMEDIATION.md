@@ -401,3 +401,201 @@ index, and both are now served.
 - **A3 Sign-in button color inconsistency** — needs a design pass; not code-verifiable.
 - **J10 "Restoring your session…" theme mismatch** — [ProtectedLayout.tsx](apps/frontend/components/ProtectedLayout.tsx) uses `bgcolor: 'background.default'` which is theme-aware post-hydration but not pre-hydration. Real fix requires a blocking `<head>` script that sets `<html data-theme="…">` before React runs. Deferred as design polish.
 - **J11 mobile responsive pass** — automation environment couldn't verify. Needs manual device pass or Playwright viewport override.
+
+---
+
+# SVT-FIN-2026-08 — Finance-grade audit (Stripe/PayPal accuracy bar)
+
+Directive: *"This is a finance management app so make sure the accuracy and
+reliability is Stripe and PayPal level and no less, strictly… Single error costs
+millions in loss."*
+
+Method: three parallel read-only audits (commissions; fee plans + billing cron +
+CRM lead fees; money aggregation + display), each required to prove a defect by
+quoting code. Every finding below was independently re-verified against `HEAD`
+before being fixed. One finding was **retracted** — see the end.
+
+## P0 — money invented, lost, or invisible
+
+**1. The receivables ledger was inert. Nothing ever invoiced an installment.**
+`createFeePlan` writes every installment as `SCHEDULED`
+([plan.service.ts](apps/backend/src/modules/billing/plan.service.ts)). The only
+writes of `INVOICED` anywhere in the backend were the `SUSPENDED → INVOICED` hop
+on plan resume. The daily cron's step 1 *filters* on `INVOICED`; it never
+produced it. Since `getOutstanding` and the finance dashboard both filter
+`status IN (INVOICED, DUE, OVERDUE, PARTIAL)`, **every fee plan reported zero
+outstanding forever**, never went `DUE`, never went `OVERDUE`, and could never
+accrue a late fee. The only way to invoice a schedule was to pause and resume
+the plan. Fixed by adding step 0 (`SCHEDULED → INVOICED`, ACTIVE plans only,
+`INVOICE_LEAD_DAYS = 7`) as the first stage of
+[billingDaily.ts](apps/backend/src/jobs/billingDaily.ts).
+
+**2. `cancelPlan(waive_remaining)` violated a DB CHECK and aborted the whole
+cancellation.** It wrote `status: WAIVED, balance_minor: 0` without touching
+`net_minor`, while the database enforces `balance_minor = net_minor -
+paid_minor`. On a `PARTIAL` row `paid < net`, so Postgres raised 23514 and
+rolled the transaction back. The withdrawal hook swallows that throw into a log
+line, so the visible outcome was: enrollment `WITHDRAWN`, fee plan still
+`ACTIVE`, installments still marching to `OVERDUE` — a withdrawn student billed
+and dunned indefinitely. Waiving the remainder means the student owes exactly
+what they have paid, so the row is now written as `net = paid, balance = 0`, per
+row, under `FOR UPDATE`, guarded on the balance that was read.
+
+**3. `regeneratePlan` destroyed the live plan before validating its
+replacement.** Three transactions, no compensation, ordered cancel → create.
+Every field on `RegeneratePlanRequest` is optional and `installment_count` was
+not defaulted, so a request carrying only a reason cancelled the plan and then
+threw out of `resolveLines`. The caller got a 400 and the enrollment was left
+with a terminal `CANCELLED` plan (no FSM edge back) and all installments
+`CANCELLED` → zero outstanding, unrecoverable except by a new plan that re-bills
+what was already paid. Now the schedule is resolved and validated *first*, and
+`installment_count` defaults to the prior plan's length.
+
+**4. Commission claims were denominated in a currency they were never computed
+in.** `amount = basis × pct` was computed from `enrollment.tuition_total_minor`
+but stamped with `SuperAgentCommissionRule.currency` (or
+`SuperAgent.default_currency`) — independent `char(3)` columns with no equality
+check, and there is no FX layer anywhere in the codebase. NPR 1,000,000 tuition
+at a 10% rule configured in USD produced a claim of **USD 100,000** — roughly
+130× its real value — with `basis_minor` still holding the NPR figure, so the
+row could not be reconciled against itself. Because `summary()` groups by
+currency, the invented USD then inflated the tenant's genuine USD pivot:
+per-currency separation was defeated *at the write*, where no read-side grouping
+can recover it. A percentage of an amount is denominated in that amount's
+currency, so the claim now always carries `tuition_currency`, and a mismatched
+configuration logs `logger.error` instead of silently converting.
+
+**5. `student_credits` was a write-only table.** Rows were minted on payment
+overflow and refund surplus; nothing read them, drew them down, or reversed
+them, and `consumed_minor` was never incremented by any code path despite the
+schema promising it would be. There was no route, no service reader, no export
+and no UI — an overpayment was money the business held with no way to see it,
+return it, or apply it. Additionally, voiding a payment reversed its allocations
+but left the credit it had minted alive, so a void that means "this never
+happened" left the student with spending power. Fixed with a real ledger:
+migration `20991231236003_student_credit_ledger` (reversal columns +
+`student_credit_applications`, append-only, RLS + grants),
+[credit.service.ts](apps/backend/src/modules/billing/credit.service.ts)
+(list / apply FIFO or explicit / reverse / reverse-on-void), four routes, and 20
+tests.
+
+**6. Every amount on the plan summary card rendered 100× too small.**
+`PlanSummaryCard` divided by 100 and then passed the result to `money()`, which
+divides by 100 itself — a £12,000.00 plan total displayed as **£120.00**, and
+the same double conversion hit Outstanding and every per-status chip.
+
+## P1 — silent corruption and misreporting
+
+- **Cron overwrote settled money.** `billingDaily` scanned up to 5000 rows then
+  issued sequential updates whose WHERE carried only `id` + `tenant_id`. A
+  payment landing mid-loop was overwritten: a `PAID` installment went back to
+  `DUE`. The FSM assert never caught it — it was asked about the *stale* status.
+  Status is now folded into the WHERE on all three transitions, and plan
+  completion asserts the from-state it actually read rather than a hardcoded
+  `ACTIVE`.
+- **Four commission transitions were read-then-write.** `markPaid`, `invoice`,
+  `dispute` and `patch` checked `before.status` in a separate query and omitted
+  it from the write. Two admins recording different remittances both won; a
+  stale `/invoice` re-opened a `PAID` claim; a losing `/dispute` moved a `PAID`
+  claim to `DISPUTED` (which `summary()` does not surface at all, so collected
+  cash vanished from every rollup).
+- **`PATCH /commissions/:id` could erase revenue with one call.** The only
+  endpoint writing `amount_minor` directly carried neither MFA step-up nor an
+  Idempotency-Key while every FSM transition beside it carried both, and never
+  inspected status: a `PAID` claim of 100,000 could be patched to 1. Now
+  `moneyMoverGuards` + terminal-state refusal for money fields.
+- **`summary().paid_total_minor` reported amounts claimed, not cash received.**
+  `received_minor` exists to capture short payments and was recorded by
+  `markPaid`, but no aggregate ever read it. Now reports received, with
+  `paid_claimed_total_minor` alongside so the variance is visible.
+- **`markFeePaid` (CRM) could settle a waived fee, at a stale amount, without
+  bound.** `status: not PAID` omitted `WAIVED`; the settled amount came from an
+  unversioned read; nothing capped it at the billed amount. All three fixed
+  (`notIn`, version in the WHERE, explicit cap).
+- **`deleteFee` had no terminal guard** — a COUNSELLOR could soft-delete a `PAID`
+  fee, and since every `financeSummary` aggregate filters `deleted_at: null`,
+  collected revenue disappeared from the books.
+- **Invoice PDF totals were truncated by pagination.** The accumulators lived
+  inside the row loop, which breaks when the page fills, so "Gross (sum)" and
+  "Outstanding" covered only the visible rows while "Plan Total" above them did
+  not — and `/invoice.txt` (no break) disagreed with `/invoice.pdf` for the same
+  plan. Totals are now summed over the full set before drawing, and a truncated
+  table says so.
+- **`collections_30d_minor` dropped the entire gross of any refunded payment**
+  (`status: RECEIVED` only), so a £1,000 refund erased £5,000 of reported
+  collections. Two different "refund rate" formulas on two screens now use the
+  same denominator, and a month whose only payment was fully refunded no longer
+  reports a 0.0% refund rate.
+- **The commissions summary strip was permanently blank** — it read
+  `summary.totals` and `row.buckets`, neither of which the API has ever sent.
+  Its dead fallback also summed across currencies and labelled the total with
+  the most frequent code. Rewritten against the real contract, one card row per
+  ISO currency.
+- **Payment allocation derived `paid` as `net - balance`** instead of reading the
+  stored `paid_minor`, so any clamp made every later payment inherit a wrong
+  starting figure.
+- **`recomputeInstallmentAmounts` clamped a negative balance to zero silently.**
+  It now returns `overpaid_minor` and `over_adjusted_minor`, and callers assert
+  they are zero rather than inheriting a zero that looks settled.
+- **A payment arriving before the invoicing cron 422'd.** No `SCHEDULED → PAID`
+  or `SCHEDULED → PARTIAL` edge exists (deliberately — invoicing must not be
+  skipped), so FIFO allocation onto a not-yet-invoiced installment failed with a
+  state-machine error and the operator had no way to record cash that had
+  physically arrived. `assertSettlement` in
+  [fsm-def.ts](apps/backend/src/modules/billing/fsm-def.ts) walks the legal
+  two-hop route and asserts **both** edges; shared by payments, credit
+  applications and adjustments.
+- **`claim` / `dispute` / `waive` required an Idempotency-Key and ignored it** —
+  `requireIdempotencyKey` only asserts the header exists. Now wrapped in
+  `withIdempotency` like their siblings.
+- **`/100` was hardcoded in four money formatters** while JPY and KRW are seeded
+  with `minor_unit: 0`, so a ¥50,000 amount rendered as "JPY 500" on chase
+  reminders and on invoices. All now use `currencyMinorDigits`.
+- **`FeeListDialog.toMinorUnits` was the last float-based major→minor
+  conversion.** `Math.round(Number("1.005") * 100)` is 100, not 101 — 1147 wrong
+  values over 3-dp inputs in `[0, 200)` — and a negative amount was coerced to a
+  silent £0.00 fee. Replaced with `lib/money.ts` (BigInt, half-up), and the form
+  now refuses to submit rather than inventing a number.
+
+## Retracted
+
+**"receivePayment does not enforce sum(allocations) <= gross_minor" — FALSE.**
+The guard exists at
+[payment.service.ts:107](apps/backend/src/modules/billing/payment.service.ts)
+and always has; the initial read started at the transaction body and missed it.
+An in-transaction restatement was kept as defence-in-depth, along with a new
+explicit duplicate-installment-id check (previously caught only as a side effect
+of `ANY()` de-duplicating). No money bug existed here. Recorded because an audit
+that only reports confirmations is not an audit.
+
+## Verification
+
+- Backend: **1304 passed**, 2 failed, 10 skipped. Both failures are in
+  `tests/storage-encryption.spec.ts` and were confirmed pre-existing by
+  re-running them with all source changes stashed.
+- Frontend: 66 passed. `tsc --noEmit` clean on both apps. Frontend lint clean in
+  every touched file.
+- New: `tests/finance-invariants.spec.ts` (27) pins remainder distribution, the
+  `balance == net - paid` identity including both clamps, FIFO conservation,
+  percentage scaling at values inexact in binary floating point and above
+  `Number.MAX_SAFE_INTEGER`, truncation symmetry, and currency exponents.
+  `tests/billing-credits.spec.ts` (20) pins the credit ledger.
+
+## Not fixed — needs a decision or a database
+
+- **Late-fee application is dead code.** `parsePolicy(null)` means
+  `policy.enabled` is always falsy, so the whole block is unreachable. If
+  revived it needs the same treatment as the rest of this pass: its four
+  unsynchronised statements re-bill money paid mid-loop, and
+  `LateFeePolicy.amount_minor` is typed `number | string`.
+- **`scholarship_minor` is stored, printed on invoices, and never applied to any
+  total.** A student receives an invoice showing a scholarship and is billed the
+  undiscounted amount. Fixing it changes what customers are charged, so it needs
+  an explicit product decision, not a silent code change.
+- **CRM lead fees have no PARTIAL state**, so a part payment is recorded as
+  `PAID` with a smaller `paid_amount_minor` and the shortfall leaves the books.
+- **No CHECK constraints on `commission_claims.amount_minor` / `basis_minor` /
+  `enrollments.tuition_total_minor`**, and the CSV importer accepts a leading
+  `-`, bypassing the API schema's `.nonnegative()`.
+- **A reconciliation job** asserting the invariants across a live tenant still
+  needs a working Postgres to be written against.

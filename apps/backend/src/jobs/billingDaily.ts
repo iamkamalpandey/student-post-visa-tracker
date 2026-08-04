@@ -3,6 +3,8 @@
 // Runs at 06:30 UTC after the expiry-alerts pass. Per active tenant where
 // tenant.billing_enabled = true:
 //
+//   0. SCHEDULED → INVOICED when due_on <= today + INVOICE_LEAD_DAYS and the
+//      plan is ACTIVE. Without this the whole pipeline below is unreachable.
 //   1. INVOICED → DUE     when due_on <= today.
 //   2. DUE      → OVERDUE when due_on < today - grace_days (tenant default 7).
 //   3. Apply a LATE_FEE adjustment per OVERDUE installment (idempotent per
@@ -39,6 +41,12 @@ import { derivePlanStatusFromInstallments } from '../modules/billing/pricing.js'
 import type { JobOutcome } from './runner.js';
 
 const SYSTEM_ACTOR = null; // System cron writes — actor_id null is recognised as system.
+
+// How far ahead of its due date an installment is invoiced. Seven days gives
+// the student notice before the amount is actually due, and means a plan whose
+// first installment is due today becomes a visible receivable immediately
+// rather than only on the due date itself.
+const INVOICE_LEAD_DAYS = 7;
 const SYSTEM_ROLE: 'ADMIN' = 'ADMIN';
 
 type LateFeePolicy = {
@@ -63,12 +71,14 @@ function parsePolicy(raw: unknown): LateFeePolicy {
 }
 
 async function processTenant(tenantId: string): Promise<{
+  scheduled_to_invoiced: number;
   invoiced_to_due: number;
   due_to_overdue: number;
   late_fees_applied: number;
   plans_completed: number;
   errors: number;
 }> {
+  let scheduled_to_invoiced = 0;
   let invoiced_to_due = 0;
   let due_to_overdue = 0;
   let late_fees_applied = 0;
@@ -80,7 +90,7 @@ async function processTenant(tenantId: string): Promise<{
     select: { id: true, billing_enabled: true },
   });
   if (!tenant || !tenant.billing_enabled) {
-    return { invoiced_to_due, due_to_overdue, late_fees_applied, plans_completed, errors };
+    return { scheduled_to_invoiced, invoiced_to_due, due_to_overdue, late_fees_applied, plans_completed, errors };
   }
   // SVT-WAVE-BILLING-2026-05 — tenant-wide late_fee_policy lives on the
   // Tenant in a future migration (`late_fee_policy_json`). Until then,
@@ -101,6 +111,67 @@ async function processTenant(tenantId: string): Promise<{
   // tx (createMany / update) opens its own implicit tx which would need its
   // own SET LOCAL — wrap individual writes if RLS must engage.
 
+  // 0. SCHEDULED → INVOICED  (SVT-FIN-2026-08)
+  //
+  // THE RECEIVABLES LEDGER WAS INERT. createFeePlan writes every installment
+  // as SCHEDULED (plan.service.ts), and until this step existed NOTHING in the
+  // codebase ever moved one to INVOICED — the only writes of that status were
+  // the SUSPENDED→INVOICED hop on plan resume. Step 1 below *filters* on
+  // INVOICED; it never produced it.
+  //
+  // Consequences, all silent:
+  //   * getOutstanding and the finance dashboard both filter
+  //     status IN (INVOICED, DUE, OVERDUE, PARTIAL), so every plan reported
+  //     ZERO outstanding forever. The business could not see what it was owed.
+  //   * No installment ever went DUE or OVERDUE, so dunning never fired and
+  //     no late fee could ever accrue.
+  //   * The only way to invoice a schedule was to pause the plan and resume
+  //     it, which is not a documented or discoverable workflow.
+  //
+  // Invoicing is what turns a planned amount into a receivable, so it runs
+  // FIRST: a row can now go SCHEDULED → INVOICED → DUE within a single pass
+  // when its due date has already arrived (e.g. a back-dated plan).
+  //
+  // Only ACTIVE plans are invoiced. A DRAFT plan is not yet a commitment and a
+  // PAUSED/CANCELLED one must not start billing.
+  try {
+    const invoiceHorizon = new Date(today);
+    invoiceHorizon.setUTCDate(invoiceHorizon.getUTCDate() + INVOICE_LEAD_DAYS);
+    const toInvoice = await prisma.feeInstallment.findMany({
+      where: {
+        tenant_id: tenantId,
+        deleted_at: null,
+        status: 'SCHEDULED',
+        due_on: { lte: invoiceHorizon },
+        fee_plan: { status: 'ACTIVE', deleted_at: null },
+      },
+      select: { id: true, status: true },
+      take: 5000,
+    });
+    for (const i of toInvoice) {
+      try {
+        assertOrThrow(feeInstallmentFsm, i.status as FeeInstallmentStatus, 'INVOICED', SYSTEM_ROLE);
+        const wr = await prisma.feeInstallment.updateMany({
+          // Status folded into the WHERE for the same stale-snapshot reason as
+          // every other transition in this job.
+          where: { id: i.id, tenant_id: tenantId, status: 'SCHEDULED' },
+          data: {
+            status: 'INVOICED',
+            updated_by_id: SYSTEM_ACTOR,
+            version: { increment: 1 },
+          },
+        });
+        if (wr.count === 1) scheduled_to_invoiced += 1;
+      } catch (err) {
+        errors += 1;
+        logger.warn({ err, installmentId: i.id, tenantId }, 'billing.daily: SCHEDULED→INVOICED failed');
+      }
+    }
+  } catch (err) {
+    errors += 1;
+    logger.error({ err, tenantId }, 'billing.daily: SCHEDULED→INVOICED scan failed');
+  }
+
   // 1. INVOICED → DUE
   try {
     const due = await prisma.feeInstallment.findMany({
@@ -118,9 +189,19 @@ async function processTenant(tenantId: string): Promise<{
         assertOrThrow(feeInstallmentFsm, i.status as FeeInstallmentStatus, 'DUE', SYSTEM_ROLE);
         // SEC-burst: scope every write by (id, tenant_id) so a poisoned/
         // swapped id can never mutate another tenant under the superuser
-        // cron connection. assert count === 1.
+        // cron connection.
+        // SVT-FIN-2026-08 — `status` in the WHERE. The scan above can return
+        // 5000 rows and the loop then makes 5000 sequential round-trips, so
+        // `i.status` is a snapshot that goes stale the moment a student pays.
+        // Without this predicate the cron overwrote a freshly PAID installment
+        // back to DUE: a settled row re-entered the dunning pipeline, the plan
+        // could never reach COMPLETED, and once late fees are enabled step 3
+        // would charge a late fee on money already received. The FSM assert
+        // does not catch it — it is asked about the stale status, not the
+        // current one. A 0-row result now means "someone else moved it", which
+        // is a no-op, not an error.
         const wr = await prisma.feeInstallment.updateMany({
-          where: { id: i.id, tenant_id: tenantId },
+          where: { id: i.id, tenant_id: tenantId, status: 'INVOICED' },
           data: {
             status: 'DUE',
             updated_by_id: SYSTEM_ACTOR,
@@ -153,8 +234,9 @@ async function processTenant(tenantId: string): Promise<{
     for (const i of overdue) {
       try {
         assertOrThrow(feeInstallmentFsm, i.status as FeeInstallmentStatus, 'OVERDUE', SYSTEM_ROLE);
+        // SVT-FIN-2026-08 — same stale-snapshot guard as step 1.
         const wr = await prisma.feeInstallment.updateMany({
-          where: { id: i.id, tenant_id: tenantId },
+          where: { id: i.id, tenant_id: tenantId, status: 'DUE' },
           data: {
             status: 'OVERDUE',
             updated_by_id: SYSTEM_ACTOR,
@@ -277,9 +359,14 @@ async function processTenant(tenantId: string): Promise<{
       const derived = derivePlanStatusFromInstallments(p.installments.map((i) => i.status));
       if (derived === 'COMPLETED') {
         try {
-          assertOrThrow(feePlanFsm, 'ACTIVE', 'COMPLETED', SYSTEM_ROLE);
-          await prisma.feePlan.updateMany({
-            where: { id: p.id, tenant_id: tenantId },
+          // SVT-FIN-2026-08 — assert the from-state we actually read, and fold
+          // it into the WHERE. This was hardcoded 'ACTIVE' with no status
+          // predicate, so a plan an admin CANCELLED between the scan and this
+          // write was flipped to COMPLETED — one terminal state overwriting
+          // another, with no edge between them in the machine.
+          assertOrThrow(feePlanFsm, p.status, 'COMPLETED', SYSTEM_ROLE);
+          const pwr = await prisma.feePlan.updateMany({
+            where: { id: p.id, tenant_id: tenantId, status: p.status },
             data: {
               status: 'COMPLETED',
               ends_on: today,
@@ -287,6 +374,10 @@ async function processTenant(tenantId: string): Promise<{
               version: { increment: 1 },
             },
           });
+          if (pwr.count !== 1) {
+            // Lost the race; the plan moved on. Not an error, just not ours.
+            continue;
+          }
           await writeAudit({
             tenantId,
             actorId: SYSTEM_ACTOR,
@@ -307,7 +398,7 @@ async function processTenant(tenantId: string): Promise<{
     logger.error({ err, tenantId }, 'billing.daily: plan completion scan failed');
   }
 
-  return { invoiced_to_due, due_to_overdue, late_fees_applied, plans_completed, errors };
+  return { scheduled_to_invoiced, invoiced_to_due, due_to_overdue, late_fees_applied, plans_completed, errors };
 }
 
 export async function runBillingDaily(): Promise<JobOutcome> {
@@ -317,6 +408,7 @@ export async function runBillingDaily(): Promise<JobOutcome> {
   });
 
   let totals = {
+    scheduled_to_invoiced: 0,
     invoiced_to_due: 0,
     due_to_overdue: 0,
     late_fees_applied: 0,
@@ -334,6 +426,7 @@ export async function runBillingDaily(): Promise<JobOutcome> {
       // crashes — but the scope wrap ensures any future un-caught throw is
       // attributable to the right tenant.
       const r = await withTenantScope(t.id, 'billing.daily', () => processTenant(t.id));
+      totals.scheduled_to_invoiced += r.scheduled_to_invoiced;
       totals.invoiced_to_due += r.invoiced_to_due;
       totals.due_to_overdue += r.due_to_overdue;
       totals.late_fees_applied += r.late_fees_applied;

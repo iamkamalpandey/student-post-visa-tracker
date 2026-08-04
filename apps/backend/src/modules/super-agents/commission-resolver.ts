@@ -25,7 +25,27 @@ export type ResolveOpts = {
 };
 
 export type ResolveResult = {
+  /**
+   * Convenience float for comparisons and display ONLY. Never use it for money
+   * arithmetic — see commissionPctExact.
+   */
   commissionPct: number;
+  /**
+   * SVT-FIN-2026-08 — the rate as an exact decimal string, straight from the
+   * Prisma.Decimal column with no float in between. `commissionPct` above is a
+   * `number`, and the caller was doing `resolved.commissionPct.toFixed(2)` —
+   * that is `Number.prototype.toFixed`, not `Decimal.prototype.toFixed`, so
+   * the only float in the whole commission money path sat between the DB
+   * Decimal and the BigInt scaler. It happens to be lossless for the current
+   * Decimal(5,2) domain, but widening the column to three decimals would have
+   * started truncating rates silently. Callers computing money must use this.
+   */
+  commissionPctExact: string;
+  /**
+   * The currency the RULE is configured in. Note this is not necessarily the
+   * currency a commission computed from it is denominated in — see the
+   * FX discussion in recalculator.ts.
+   */
   currency: string;
   ruleId: string | null;
 };
@@ -98,6 +118,7 @@ export async function resolveCommissionRate(
   if (!best) return null;
   return {
     commissionPct: Number(best.commission_pct.toString()),
+    commissionPctExact: best.commission_pct.toString(),
     currency: best.currency,
     ruleId: best.id,
   };

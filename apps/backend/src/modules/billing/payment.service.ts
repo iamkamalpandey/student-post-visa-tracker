@@ -49,7 +49,8 @@ import {
   allocateFifo,
   recomputeInstallmentAmounts,
 } from './pricing.js';
-import { feeInstallmentFsm, paymentFsm, refundFsm } from './fsm-def.js';
+import { feeInstallmentFsm, paymentFsm, refundFsm, assertSettlement } from './fsm-def.js';
+import { reverseCreditsForSource } from './credit.service.js';
 
 type DB = PrismaClient | Prisma.TransactionClient;
 type Role = 'ADMIN' | 'COUNSELLOR' | 'VIEWER';
@@ -144,15 +145,27 @@ export async function recordPayment(ctx: Ctx, input: RecordPaymentRequest) {
 
     // Resolve target installments + lock them. We use SELECT … FOR UPDATE so a
     // concurrent payment can't double-allocate the same balance.
-    let targets: Array<{ id: string; balance_minor: bigint; net_minor: bigint; currency: string; status: FeeInstallmentStatus }>;
+    let targets: Array<{ id: string; balance_minor: bigint; net_minor: bigint; paid_minor: bigint; currency: string; status: FeeInstallmentStatus }>;
     if (input.allocations && input.allocations.length > 0) {
       const ids = input.allocations.map((a) => a.fee_installment_id);
+      // SVT-FIN-2026-08 (FIN-P0-1) — reject duplicate installment ids up
+      // front. The `targets.length !== ids.length` check below happens to
+      // catch this today (ANY() de-duplicates), but only as a side effect of
+      // how Postgres answers the query. Two allocation rows against the same
+      // installment must be a named error, not an accident of set semantics.
+      const seen = new Set<string>();
+      for (const id of ids) {
+        if (seen.has(id)) {
+          throw BadRequest(`Duplicate allocation for installment ${id}; combine them into one line`);
+        }
+        seen.add(id);
+      }
       // Postgres array binding via Prisma raw. Status filter excludes
       // terminal rows (WAIVED / CANCELLED / REFUNDED) — defence in depth on
       // top of balance/amount checks below; previously a CANCELLED row with
       // non-zero balance would silently accept money.
       targets = await tx.$queryRaw<typeof targets>`
-        SELECT id, balance_minor, net_minor, currency, status
+        SELECT id, balance_minor, net_minor, paid_minor, currency, status
         FROM fee_installments
         WHERE id = ANY(${ids}::uuid[])
           AND tenant_id = ${tenantId}::uuid
@@ -166,7 +179,7 @@ export async function recordPayment(ctx: Ctx, input: RecordPaymentRequest) {
     } else {
       // FIFO mode: pull all open installments for this enrollment, oldest first.
       targets = await tx.$queryRaw<typeof targets>`
-        SELECT i.id, i.balance_minor, i.net_minor, i.currency, i.status
+        SELECT i.id, i.balance_minor, i.net_minor, i.paid_minor, i.currency, i.status
         FROM fee_installments i
         JOIN fee_plans p ON p.id = i.fee_plan_id
         WHERE p.enrollment_id = ${enrollment.id}::uuid
@@ -204,8 +217,21 @@ export async function recordPayment(ctx: Ctx, input: RecordPaymentRequest) {
         }
         allocs.push({ fee_installment_id: a.fee_installment_id, amount_minor: a.amount_minor });
       }
-      // Any unallocated remainder → overflow credit.
+      // SVT-FIN-2026-08 — CONSERVATION OF VALUE, restated inside the
+      // transaction. recordPayment already rejects sum > gross before the tx
+      // opens, so this is defence in depth rather than a missing check: it
+      // keeps the invariant next to the code that depends on it, so a future
+      // refactor that reorders or drops the pre-flight check cannot silently
+      // let `overflow` go negative and fall through the `overflow > 0n` guard
+      // below. sum(allocations) may be LESS than gross (the remainder becomes
+      // a StudentCredit) but it may never exceed it.
       const sum = allocs.reduce((s, a) => s + a.amount_minor, 0n);
+      if (sum > input.gross_minor) {
+        throw UnprocessableEntity(
+          `Allocations total ${sum} but the payment is only ${input.gross_minor}. Allocations may not exceed the amount received.`,
+        );
+      }
+      // Any unallocated remainder → overflow credit.
       overflow = input.gross_minor - sum;
     } else {
       const fifo = allocateFifo({
@@ -228,15 +254,36 @@ export async function recordPayment(ctx: Ctx, input: RecordPaymentRequest) {
         },
       });
       const target = targets.find((t) => t.id === a.fee_installment_id)!;
-      const newPaid = (target.net_minor - target.balance_minor) + a.amount_minor;
+      // SVT-FIN-2026-08 (FIN-P0-3) — use the STORED paid_minor. This used to
+      // reconstruct it as (net_minor - balance_minor), which is only correct
+      // while `balance == net - paid` holds exactly. The moment any write
+      // clamped a balance, that identity broke and every subsequent payment
+      // inherited a wrong starting figure — an arithmetic error compounding
+      // across the installment's whole life. Read the column; don't re-derive
+      // a value the database already stores.
+      const newPaid = target.paid_minor + a.amount_minor;
       const recomputed = recomputeInstallmentAmounts({
         gross_minor: target.net_minor, // gross treated as net here (we're cumulative)
         adjustments_sum_minor: 0n,
         paid_minor: newPaid,
       });
-      const nextStatus: FeeInstallmentStatus =
-        recomputed.balance_minor === 0n ? 'PAID' : 'PARTIAL';
-      assertOrThrow(feeInstallmentFsm, target.status, nextStatus, role);
+      // SVT-FIN-2026-08 (FIN-P0-4) — the per-line balance check and the
+      // conservation check above make overpayment unreachable here. Assert it
+      // rather than trusting it: if a future edit reopens the hole, this fails
+      // the transaction instead of quietly clamping the excess to zero.
+      if (recomputed.overpaid_minor !== 0n) {
+        throw Conflict(
+          `Allocation would overpay installment ${target.id} by ${recomputed.overpaid_minor}`,
+        );
+      }
+      // SVT-FIN-2026-08 — assertSettlement walks SCHEDULED → INVOICED → PAID
+      // instead of 422-ing on a payment that arrives before the invoicing
+      // cron. See fsm-def.ts for why the direct edge stays absent.
+      const nextStatus: FeeInstallmentStatus = assertSettlement(
+        target.status,
+        recomputed.balance_minor === 0n ? 'PAID' : 'PARTIAL',
+        role,
+      );
       await tx.feeInstallment.update({
         where: { id: target.id },
         data: {
@@ -249,6 +296,7 @@ export async function recordPayment(ctx: Ctx, input: RecordPaymentRequest) {
       });
       // Mutate the local target snapshot so subsequent loop iterations see fresh balance.
       target.balance_minor = recomputed.balance_minor;
+      target.paid_minor = newPaid;
       target.status = nextStatus;
     }
 
@@ -355,6 +403,20 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
     // Delete allocation rows (audit retains the original Payment row).
     await tx.paymentAllocation.deleteMany({ where: { payment_id: paymentId, tenant_id: tenantId } });
 
+    // SVT-FIN-2026-08 (FIN-P0-2) — a void means "this payment never happened",
+    // so any StudentCredit it minted must go with it. Previously the
+    // allocations were reversed but the overpayment credit survived: the
+    // student kept spending power created by a payment the books no longer
+    // recognised. Runs inside this transaction so the reversal and the void
+    // commit together, and throws if the credit has already been partly spent
+    // rather than clawing back money that has settled other installments.
+    const reversedCredits = await reverseCreditsForSource(tx, {
+      tenantId,
+      sourceRefId: paymentId,
+      actorId,
+      reason: `Payment voided: ${input.reason}`,
+    });
+
     // SVT-AUDIT-SEC-2026-06 (backlog rank 6) — in-tx status guard so two
     // concurrent voids can't both reverse the same allocations. before.status
     // was read outside this tx; gating the flip on it still holding means the
@@ -371,7 +433,8 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
     if (flip.count !== 1) {
       throw Conflict('Payment was modified concurrently');
     }
-    return tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
+    const row = await tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
+    return { row, reversedCredits };
   });
 
   await writeAudit(ctx as never, {
@@ -379,10 +442,18 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
     entityType: 'payment',
     entityId: paymentId,
     before: { status: before.status },
-    after: { status: 'VOIDED', reason: input.reason },
+    after: {
+      status: 'VOIDED',
+      reason: input.reason,
+      // Named explicitly so the trail shows the credit went with the void.
+      reversed_credit_ids: updated.reversedCredits.map((c) => c.id),
+      reversed_credit_minor: updated.reversedCredits
+        .reduce((s, c) => s + c.amount_minor, 0n)
+        .toString(),
+    },
   });
 
-  return updated;
+  return updated.row;
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +961,22 @@ export async function applyAdjustment(
       paid_minor: i.paid_minor,
     });
 
+    // SVT-FIN-2026-08 (FIN-P0-4) — the balance cap above bounds a debt-erasing
+    // adjustment at exactly the outstanding balance, so net can land on paid
+    // but never below it, and never below zero. Both clamps must therefore be
+    // inert on this path. If either fires, the cap has been bypassed and money
+    // is about to be erased without a record — refuse the write.
+    if (recomputed.overpaid_minor !== 0n) {
+      throw UnprocessableEntity(
+        `Adjustment would leave installment ${i.id} overpaid by ${recomputed.overpaid_minor}; refund or reverse the payment first.`,
+      );
+    }
+    if (recomputed.over_adjusted_minor !== 0n) {
+      throw UnprocessableEntity(
+        `Adjustments would drive net below zero by ${recomputed.over_adjusted_minor} on installment ${i.id}.`,
+      );
+    }
+
     // Status implications:
     //   - WAIVER: status → WAIVED (FSM-gated, ADMIN + reason).
     //   - Other negative adjustments closing balance → PAID.
@@ -899,20 +986,12 @@ export async function applyAdjustment(
       assertOrThrow(feeInstallmentFsm, i.status, 'WAIVED', role, input.reason_text);
       nextStatus = 'WAIVED';
     } else if (recomputed.balance_minor === 0n && i.status !== 'PAID') {
-      // SVT-QA-2026-08 (BILL-M8) — SCHEDULED → PAID is not a declared edge
-      // (an installment must be invoiced before it can be settled), so
-      // fully discounting a still-SCHEDULED installment used to 422 with
-      // "no legal FSM transition" — a dead end for a perfectly reasonable
-      // admin action. Route it through the legal two-hop path
-      // SCHEDULED → INVOICED → PAID, asserting BOTH edges so the machine
-      // stays the single source of truth.
-      if (i.status === 'SCHEDULED') {
-        assertOrThrow(feeInstallmentFsm, i.status, 'INVOICED', role);
-        assertOrThrow(feeInstallmentFsm, 'INVOICED', 'PAID', role);
-      } else {
-        assertOrThrow(feeInstallmentFsm, i.status, 'PAID', role);
-      }
-      nextStatus = 'PAID';
+      // SVT-QA-2026-08 (BILL-M8) — SCHEDULED → PAID is not a declared edge, so
+      // fully discounting a still-SCHEDULED installment used to 422. The
+      // two-hop walk that fixed it now lives in assertSettlement (fsm-def.ts)
+      // so payments, credit applications and adjustments all settle the same
+      // way instead of each carrying their own copy.
+      nextStatus = assertSettlement(i.status, 'PAID', role);
     }
 
     await tx.feeInstallment.update({

@@ -4,6 +4,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { runIdempotent } from '../../shared/idempotencyHandler.js';
 import * as planSvc from './plan.service.js';
 import * as paySvc from './payment.service.js';
+import * as creditSvc from './credit.service.js';
 
 export const planController = {
   // POST /api/v1/billing/plans                 (admin / counsellor)
@@ -187,6 +188,47 @@ export const adjustmentController = {
       const id = req.params['id']!;
       await runIdempotent(req, res, { scope: 'billing.adjustment.apply' }, () =>
         paySvc.applyAdjustment(req as never, id, req.body),
+      );
+    } catch (e) { next(e); }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Student credits (SVT-FIN-2026-08)
+// ---------------------------------------------------------------------------
+export const creditController = {
+  // GET /api/v1/billing/credits
+  async list(req: Request, res: Response, next: NextFunction) {
+    try {
+      const out = await creditSvc.listCredits(req as never, req.query as never);
+      res.json({ data: out.credits, summary: out.summary, page: { total: out.credits.length } });
+    } catch (e) { next(e); }
+  },
+
+  // GET /api/v1/billing/credits/:id
+  async get(req: Request, res: Response, next: NextFunction) {
+    try {
+      const row = await creditSvc.getCredit(req as never, req.params['id']!);
+      res.json({ data: row });
+    } catch (e) { next(e); }
+  },
+
+  // POST /api/v1/billing/credits/:id/apply — money-mover, idempotent.
+  async apply(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params['id']!;
+      await runIdempotent(req, res, { scope: 'billing.credit.apply' }, () =>
+        creditSvc.applyCredit(req as never, id, req.body),
+      );
+    } catch (e) { next(e); }
+  },
+
+  // POST /api/v1/billing/credits/:id/reverse — retires an unspent credit.
+  async reverse(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params['id']!;
+      await runIdempotent(req, res, { scope: 'billing.credit.reverse' }, () =>
+        creditSvc.reverseCredit(req as never, id, req.body),
       );
     } catch (e) { next(e); }
   },

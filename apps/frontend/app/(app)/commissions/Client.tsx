@@ -225,89 +225,95 @@ function toBigIntSafe(v: bigint | string | number): bigint {
 }
 
 // ---------------------------------------------------------------------------
-// Summary strip — 4 headline buckets. We coalesce currencies to the most
-// frequent one when the API returns mixed; the per-institution breakdown is
-// already on the table itself, this strip is a glanceable totaliser.
+// Summary strip — headline buckets, ONE ROW PER CURRENCY.
+//
+// SVT-FIN-2026-08 — two problems fixed here.
+//
+// 1. The strip was permanently blank. It read `summary.totals` and
+//    `row.buckets`, neither of which the API sends; every card rendered "—".
+//
+// 2. The fallback it fell through to summed `bucket.total_minor` across ALL
+//    currencies into one number and then labelled that number with whichever
+//    currency code appeared on the most rows. That is the same
+//    "one total, rows[0].currency" pattern that already shipped once in the
+//    outstanding aggregate. A comment claimed it avoided "silently mixing
+//    currencies"; it did exactly that. USD 10,000 + GBP 5,000 would have
+//    displayed as "$15,000.00".
+//
+// Money is only ever aggregated within a single ISO code, so the strip now
+// renders a row of cards per currency and names the currency when there is
+// more than one.
 // ---------------------------------------------------------------------------
 
-type StripBucket = { status: 'PENDING' | 'CLAIMED' | 'INVOICED' | 'PAID'; total: bigint; currency: string };
+type StripBucket = { status: 'PENDING' | 'CLAIMED' | 'INVOICED' | 'PAID'; total: bigint };
+type StripRow = { currency: string; buckets: StripBucket[] };
 
-function deriveStrip(summary: CommissionSummaryResponse | undefined): StripBucket[] {
-  const empty: StripBucket[] = [
-    { status: 'PENDING', total: 0n, currency: '' },
-    { status: 'CLAIMED', total: 0n, currency: '' },
-    { status: 'INVOICED', total: 0n, currency: '' },
-    { status: 'PAID', total: 0n, currency: '' },
-  ];
-  if (!summary) return empty;
-
-  // Prefer the explicit `totals` block when the backend provides it.
-  if (summary.totals) {
-    return empty.map((b) => {
-      const t = summary.totals?.[b.status];
-      if (!t) return b;
-      return { status: b.status, total: toBigIntSafe(t.total_minor), currency: t.currency || '' };
-    });
+function deriveStrip(summary: CommissionSummaryResponse | undefined): StripRow[] {
+  const byCurrency = new Map<string, Record<StripBucket['status'], bigint>>();
+  for (const row of summary?.data ?? []) {
+    const cur = row.currency || '';
+    if (!cur) continue;
+    const slot = byCurrency.get(cur) ?? { PENDING: 0n, CLAIMED: 0n, INVOICED: 0n, PAID: 0n };
+    slot.PENDING += toBigIntSafe(row.pending_total_minor);
+    slot.CLAIMED += toBigIntSafe(row.claimed_total_minor);
+    slot.INVOICED += toBigIntSafe(row.invoiced_total_minor);
+    slot.PAID += toBigIntSafe(row.paid_total_minor);
+    byCurrency.set(cur, slot);
   }
-
-  // Otherwise reduce per-institution buckets. We pick the dominant currency
-  // (most rows) so the headline number stays meaningful for single-currency
-  // operators while not silently mixing currencies.
-  const tally: Record<string, { total: bigint; currencies: Map<string, number> }> = {
-    PENDING: { total: 0n, currencies: new Map() },
-    CLAIMED: { total: 0n, currencies: new Map() },
-    INVOICED: { total: 0n, currencies: new Map() },
-    PAID: { total: 0n, currencies: new Map() },
-  };
-  for (const row of summary.data ?? []) {
-    for (const bucket of row.buckets ?? []) {
-      const slot = tally[bucket.status as keyof typeof tally];
-      if (!slot) continue;
-      slot.total += toBigIntSafe(bucket.total_minor);
-      const c = row.currency || '';
-      slot.currencies.set(c, (slot.currencies.get(c) ?? 0) + 1);
-    }
-  }
-  return empty.map((b) => {
-    const slot = tally[b.status];
-    if (!slot) return b;
-    let dominant = '';
-    let max = -1;
-    for (const [cur, n] of slot.currencies) {
-      if (n > max) { dominant = cur; max = n; }
-    }
-    return { status: b.status, total: slot.total, currency: dominant };
-  });
+  return [...byCurrency.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([currency, totals]) => ({
+      currency,
+      buckets: [
+        { status: 'PENDING' as const, total: totals.PENDING },
+        { status: 'CLAIMED' as const, total: totals.CLAIMED },
+        { status: 'INVOICED' as const, total: totals.INVOICED },
+        { status: 'PAID' as const, total: totals.PAID },
+      ],
+    }));
 }
 
 function SummaryStrip({ summary, loading }: { summary: CommissionSummaryResponse | undefined; loading: boolean }) {
   const t = useTranslations('commissions.list.summary');
   if (loading) return <LoadingSkeleton variant="stat-grid" />;
-  const strip = deriveStrip(summary);
+  const rows = deriveStrip(summary);
+  if (rows.length === 0) return null;
+  const showCurrencyLabel = rows.length > 1;
   return (
-    <Box
-      sx={{
-        display: 'grid',
-        gap: 2,
-        gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', lg: 'repeat(4, 1fr)' },
-      }}
-    >
-      {strip.map((b) => (
-        <Card key={b.status} variant="outlined">
-          <CardContent>
-            <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 0.6 }}>
-              {b.status}
+    <Stack spacing={2}>
+      {rows.map((row) => (
+        <Box key={row.currency}>
+          {showCurrencyLabel ? (
+            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+              {row.currency}
             </Typography>
-            <Typography variant="h5" sx={{ fontWeight: 700, mt: 0.5 }}>
-              {b.currency ? formatMoney(b.total, b.currency) : '—'}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {t('totalCaption', { label: b.status.toLowerCase() })}
-            </Typography>
-          </CardContent>
-        </Card>
+          ) : null}
+          <Box
+            sx={{
+              display: 'grid',
+              gap: 2,
+              gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', lg: 'repeat(4, 1fr)' },
+            }}
+          >
+            {row.buckets.map((b) => (
+              <Card key={`${row.currency}-${b.status}`} variant="outlined">
+                <CardContent>
+                  <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: 0.6 }}>
+                    {b.status}
+                  </Typography>
+                  <Typography variant="h5" sx={{ fontWeight: 700, mt: 0.5 }}>
+                    {formatMoney(b.total, row.currency)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {t('totalCaption', { label: b.status.toLowerCase() })}
+                  </Typography>
+                </CardContent>
+              </Card>
+            ))}
+          </Box>
+        </Box>
       ))}
-    </Box>
+    </Stack>
   );
 }
 
