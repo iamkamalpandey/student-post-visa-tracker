@@ -686,16 +686,26 @@ class AuthService {
 
     const newHash = await hashPassword(next);
 
+    // SVT-QA-2026-08 — also stamp sessions_valid_from so live access tokens
+    // (up to 15-min TTL) are rejected by the authenticate middleware within
+    // one cache cycle instead of surviving the change.
+    const now = new Date();
     await adminDb.$transaction([
       adminDb.user.update({
         where: { id: userId },
-        data: { password_hash: newHash, password_changed_at: new Date() },
+        data: {
+          password_hash: newHash,
+          password_changed_at: now,
+          sessions_valid_from: now,
+        },
       }),
       adminDb.refreshToken.updateMany({
         where: { user_id: userId, revoked_at: null },
-        data: { revoked_at: new Date() },
+        data: { revoked_at: now },
       }),
     ]);
+    const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+    invalidateSessionsValidFrom(userId);
 
     await writeAudit({
       action: 'auth.password.changed',

@@ -321,20 +321,26 @@ export const usersService = {
     // SVT-SEC-2026-05 — admin-driven password reset still flows through HIBP.
     await ensurePasswordNotPwned(newPassword, { tenantId, userId: id });
     // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+    // SVT-QA-2026-08 — stamp sessions_valid_from so admin-driven reset also
+    // invalidates any live access token for the target user.
+    const now = new Date();
     const wr = await prisma.user.updateMany({
       where: { id, tenant_id: tenantId, deleted_at: null },
       data: {
         password_hash: await hashPassword(newPassword),
-        password_changed_at: new Date(),
+        password_changed_at: now,
         failed_login_count: 0,
         locked_until: null,
+        sessions_valid_from: now,
       },
     });
     if (wr.count !== 1) throw NotFound('User not found');
     await prisma.refreshToken.updateMany({
       where: { user_id: id, revoked_at: null },
-      data: { revoked_at: new Date() },
+      data: { revoked_at: now },
     });
+    const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+    invalidateSessionsValidFrom(id);
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — admin password reset is an
     // account-takeover-adjacent action (the admin sets a credential they then
     // know). NEVER log the password or its hash; record only that the reset
@@ -355,10 +361,21 @@ export const usersService = {
       select: { id: true },
     });
     if (!exists) throw NotFound('User not found');
-    const result = await prisma.refreshToken.updateMany({
-      where: { user_id: id, revoked_at: null },
-      data: { revoked_at: new Date() },
-    });
+    // SVT-QA-2026-08 — stamp sessions_valid_from alongside refresh revoke so
+    // access tokens fall over within one cache cycle, not the full 15-min TTL.
+    const now = new Date();
+    const result = await prisma.$transaction([
+      prisma.user.update({
+        where: { id },
+        data: { sessions_valid_from: now },
+      }),
+      prisma.refreshToken.updateMany({
+        where: { user_id: id, revoked_at: null },
+        data: { revoked_at: now },
+      }),
+    ]).then((rows) => rows[1] as { count: number });
+    const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+    invalidateSessionsValidFrom(id);
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — force session revocation is an
     // admin action against another principal's live sessions; record it with
     // the number of sessions revoked for forensic review.
@@ -443,10 +460,23 @@ export const usersService = {
     // continue without going through fresh authentication — otherwise the
     // target's MFA-gated step-up checks would silently pass (no MFA enrolled =
     // pass-through in requireMfa).
-    await prisma.refreshToken.updateMany({
-      where: { user_id: targetUserId, revoked_at: null },
-      data: { revoked_at: new Date() },
-    });
+    // SVT-QA-2026-08 — also stamp sessions_valid_from so live access tokens
+    // for the target user are rejected within one cache cycle instead of
+    // surviving to their 15-min TTL. Force-disable is a security event that
+    // must invalidate every credential of any type immediately.
+    const now = new Date();
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: targetUserId },
+        data: { sessions_valid_from: now },
+      }),
+      prisma.refreshToken.updateMany({
+        where: { user_id: targetUserId, revoked_at: null },
+        data: { revoked_at: now },
+      }),
+    ]);
+    const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+    invalidateSessionsValidFrom(targetUserId);
 
     await writeAudit({
       action: 'auth.mfa.force_disabled_by_admin',

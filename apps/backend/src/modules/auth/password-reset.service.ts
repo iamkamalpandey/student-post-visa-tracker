@@ -253,6 +253,8 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
   // Hash + persist + invalidate refresh tokens, atomically.
   const newHash = await hashPassword(newPassword);
   const now = new Date();
+  // SVT-QA-2026-08 — stamp sessions_valid_from so live access tokens are
+  // rejected by authenticate middleware within one cache cycle.
   await adminDb.$transaction([
     adminDb.user.update({
       where: { id: row.user_id },
@@ -261,6 +263,7 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
         password_changed_at: now,
         failed_login_count: 0,
         locked_until: null,
+        sessions_valid_from: now,
       },
     }),
     adminDb.passwordResetToken.update({
@@ -276,6 +279,8 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
       data: { revoked_at: now },
     }),
   ]);
+  const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+  invalidateSessionsValidFrom(row.user_id);
 
   await writeAudit({
     action: 'auth.password_reset.consumed',

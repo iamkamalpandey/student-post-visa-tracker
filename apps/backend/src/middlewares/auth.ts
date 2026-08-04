@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../shared/jwt.js';
 import { Unauthorized, Forbidden, ServiceUnavailable } from '../shared/errors.js';
-import { prisma } from '../config/db.js';
+import { prisma, prismaAdmin } from '../config/db.js';
 import { logger } from '../config/logger.js';
 import type { Role } from '@spv/zod-schemas';
 
@@ -27,6 +27,44 @@ async function bumpIdleStamp(userId: string): Promise<void> {
   });
 }
 
+// SVT-QA-2026-08 — sessions_valid_from cache. Every authenticated request
+// otherwise costs a DB hit to check whether the token was invalidated by a
+// password change / MFA disable / admin revoke. A short-TTL per-user cache
+// keeps the hot path cheap while still bounding the window a revoked token
+// can survive to `SESSIONS_CACHE_TTL_MS` milliseconds after the flip.
+//
+// Fail-closed on DB error: if we can't answer "was this session revoked?"
+// we cannot prove the token is still valid, and pretending otherwise is a
+// worse posture than a brief 503. Legitimate users retry; a stolen-token
+// attacker cannot ride a Postgres blip.
+//
+// Invalidated by the 6 revocation flows via `invalidateSessionsValidFrom`.
+const SESSIONS_CACHE_TTL_MS = 30_000;
+const sessionsValidFromCache = new Map<string, { validFromMs: number; cachedAt: number }>();
+
+/** Called by revocation flows (auth.service, users.service, mfa.service, etc.). */
+export function invalidateSessionsValidFrom(userId: string): void {
+  sessionsValidFromCache.delete(userId);
+}
+
+async function getSessionsValidFromMs(userId: string): Promise<number> {
+  const now = Date.now();
+  const cached = sessionsValidFromCache.get(userId);
+  if (cached && now - cached.cachedAt < SESSIONS_CACHE_TTL_MS) {
+    return cached.validFromMs;
+  }
+  // Read via adminDb (BYPASSRLS) so a tenant-context-less path (this
+  // middleware runs BEFORE tenantContext) can still resolve the user's
+  // revocation stamp.
+  const row = await prismaAdmin.user.findUnique({
+    where: { id: userId },
+    select: { sessions_valid_from: true },
+  });
+  const validFromMs = row?.sessions_valid_from ? row.sessions_valid_from.getTime() : 0;
+  sessionsValidFromCache.set(userId, { validFromMs, cachedAt: now });
+  return validFromMs;
+}
+
 export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
     const header = req.header('authorization');
@@ -50,6 +88,26 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     } catch (err) {
       logger.error({ err, jti: claims.jti }, 'JTI denylist lookup failed — refusing access (fail-closed)');
       return next(ServiceUnavailable('Auth denylist unavailable; retry shortly'));
+    }
+    // SVT-QA-2026-08 — session-wide revoke check. The JTI denylist above
+    // covers `/auth/logout`; this covers changePassword, confirmPasswordReset,
+    // admin resetPassword, self disableMfa, admin adminDisableMfa, and
+    // revokeAllSessions — all of which invalidate every live token issued to
+    // the user by stamping `sessions_valid_from`. Tokens issued before that
+    // stamp are rejected here even if they haven't hit their TTL.
+    try {
+      const validFromMs = await getSessionsValidFromMs(claims.sub);
+      // verifyAccessToken always populates `iat`; the type is optional only
+      // because the same shape doubles as the sign() input. Coerce to 0
+      // defensively — any token missing iat is treated as immediately
+      // revoked when sessions_valid_from is set.
+      const iatMs = (claims.iat ?? 0) * 1000;
+      if (validFromMs > 0 && iatMs < validFromMs) {
+        return next(Unauthorized('Session revoked'));
+      }
+    } catch (err) {
+      logger.error({ err, sub: claims.sub }, 'sessions_valid_from lookup failed — refusing access (fail-closed)');
+      return next(ServiceUnavailable('Auth session store unavailable; retry shortly'));
     }
     req.user = claims;
     // SVT-SEC-IDLE-2026-05 — bump RefreshToken.last_used_at on every authenticated

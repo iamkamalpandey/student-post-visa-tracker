@@ -186,10 +186,27 @@ export async function disableMfa(
   // Step-up auth: never allow MFA disable on a session alone.
   const ok = await verifyPassword(user.password_hash, currentPassword);
   if (!ok) throw Forbidden('Password verification failed');
-  await prisma.user.update({
-    where: { id: userId },
-    data: { mfa_enabled: false, mfa_secret_enc: null, mfa_recovery_hashes: null },
-  });
+  // SVT-QA-2026-08 — disabling MFA is a security-posture downgrade; force
+  // all live sessions (access + refresh) to re-authenticate to prevent a
+  // stolen-token attacker from silently benefiting from the weaker posture.
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: userId },
+      data: {
+        mfa_enabled: false,
+        mfa_secret_enc: null,
+        mfa_recovery_hashes: null,
+        sessions_valid_from: now,
+      },
+    }),
+    prisma.refreshToken.updateMany({
+      where: { user_id: userId, revoked_at: null },
+      data: { revoked_at: now },
+    }),
+  ]);
+  const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
+  invalidateSessionsValidFrom(userId);
   await writeAudit({
     action: 'auth.mfa.disabled',
     entityType: 'user',

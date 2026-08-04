@@ -16,6 +16,12 @@ export type AccessTokenClaims = {
   tid: string; // tenant id
   role: Role;
   jti: string;
+  // SVT-QA-2026-08 — surfaced so authenticate middleware can compare against
+  // User.sessions_valid_from for session-wide access-token revoke. Optional
+  // on the shared type because the same shape is also used as the INPUT to
+  // signAccessToken(), where jose stamps iat itself via .setIssuedAt().
+  // Always present after verifyAccessToken().
+  iat?: number; // seconds since epoch (jose default from setIssuedAt())
 };
 
 // SVT-WAVE-JWT-ROTATE-2026-05 — graceful key rotation via an in-memory keyset.
@@ -119,6 +125,10 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
     tid: String(payload['tid']),
     role: String(payload['role']) as Role,
     jti: String(payload.jti),
+    // payload.iat is guaranteed present because signAccessToken sets it via
+    // .setIssuedAt(); jose typing has it optional so we default to 0 (would
+    // fail any sessions_valid_from > epoch check, which is the safer bias).
+    iat: typeof payload.iat === 'number' ? payload.iat : 0,
   };
 }
 
