@@ -100,4 +100,14 @@ documentsRouter.patch(
   validate(VerifyDocumentRequest),
   verifyHandler,
 );
-documentsRouter.delete('/:id', uuidParam('id'), requireRole('ADMIN'), deleteHandler);
+// SVT-QA-2026-08 — pattern-consistency: every other document mutation on
+// this router carries requireStudentOwnershipViaChild. DELETE was ADMIN-only
+// so the ownership check is a no-op today (ADMIN bypasses), but any future
+// role loosening would silently drop the guard. Fix it now.
+documentsRouter.delete(
+  '/:id',
+  uuidParam('id'),
+  requireRole('ADMIN'),
+  requireStudentOwnershipViaChild('document', 'id'),
+  deleteHandler,
+);

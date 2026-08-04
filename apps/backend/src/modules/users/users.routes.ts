@@ -63,12 +63,16 @@ usersRouter.post(
 
 // SVT-SEC-MFA-FORCE-DISABLE-2026-05 — admin-driven MFA unbrick when a tenant
 // admin loses BOTH their TOTP device AND every recovery code. Without this
-// route the only recovery is direct psql access. requireMfa is mounted so a
-// captured ADMIN session alone cannot clear another user's second factor.
+// route the only recovery is direct psql access.
+// SVT-QA-2026-08 — was `requireMfa` (bare, pass-through when the acting
+// admin is not enrolled). A stolen access token for a non-enrolled admin
+// could therefore wipe any other user's MFA without a fresh TOTP. Upgraded
+// to `{enrollmentRequired: true}` to match every other privileged mutation
+// on this router. Legacy admins must enrol MFA before using this endpoint.
 usersRouter.post(
   '/:id/mfa/disable',
   requireRole('ADMIN'),
-  requireMfa,
+  requireMfa({ enrollmentRequired: true }),
   uuidParam('id'),
   validate(AdminDisableMfaRequest),
   usersController.adminDisableMfa,

@@ -240,8 +240,19 @@ export async function updateFee(ctx: Ctx, leadId: string, feeId: string, input: 
   if (input.due_on !== undefined) data.due_on = new Date(input.due_on);
   if (input.status !== undefined) data.status = input.status;
   if (input.notes !== undefined) data.notes = input.notes ?? null;
-  const updated = await db.crmLeadFee.update({ where: { id: feeId }, data });
-  await writeAudit({ action: 'crm_lead.fee.updated', entityType: 'crm_lead_fee', entityId: feeId, actorId, tenantId, after: { status: updated.status, amount_minor: updated.amount_minor } } as never);
+  // SVT-QA-2026-08 — atomic If-Match. The prior read-then-write pattern let
+  // two concurrent PATCHes with the same If-Match: "3" both pass the version
+  // check (both saw version=3), both write, both bump version — silent
+  // last-writer-wins on every field including money-shape (`amount_minor`).
+  // updateMany with the expected version in the where forces exactly one to
+  // win; the loser gets 412 like the initial guard intends.
+  const result = await db.crmLeadFee.updateMany({
+    where: { id: feeId, lead_id: leadId, tenant_id: tenantId, deleted_at: null, version: expected },
+    data,
+  });
+  if (result.count !== 1) throw Conflict(`Version mismatch — row was modified concurrently`);
+  const updated = await getFee(db, tenantId, leadId, feeId);
+  await writeAudit({ action: 'crm_lead.fee.updated', entityType: 'crm_lead_fee', entityId: feeId, actorId, tenantId, after: { status: (updated as FeeRow).status, amount_minor: (updated as FeeRow).amount_minor } } as never);
   return toFee(updated as FeeRow);
 }
 

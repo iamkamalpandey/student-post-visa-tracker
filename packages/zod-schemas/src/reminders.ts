@@ -16,6 +16,10 @@ export const ReminderTypeEnum = z.enum([
   'DOCUMENT_EXPIRY',
   'ENROLLMENT_DECISION_DUE',
   'COMMISSION_CLAIM_DUE',
+  // SVT-QA-2026-08 — the scanner inserts this type (SVT-COMPLIANCE-REMINDERS-
+  // 2026-06) but the wire enum omitted it, so any PATCH to a compliance-check
+  // reminder returned 422 and downstream typed consumers couldn't case-analyse.
+  'COMPLIANCE_CHECK_DUE',
   'CUSTOM',
 ]);
 export type ReminderType = z.infer<typeof ReminderTypeEnum>;

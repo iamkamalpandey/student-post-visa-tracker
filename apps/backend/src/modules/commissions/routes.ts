@@ -21,6 +21,8 @@ import {
 } from '@spv/zod-schemas';
 
 import { requireRole } from '../../middlewares/auth.js';
+import { requireMfa } from '../../middlewares/requireMfa.js';
+import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { validate } from '../../middlewares/validate.js';
 import { BadRequest } from '../../shared/errors.js';
 
@@ -59,11 +61,20 @@ commissionsRouter.get('/summary', ctl.summaryHandler);
 commissionsRouter.get('/:id', requireUuidId, ctl.getByIdHandler);
 
 // State-machine writes — admin only.
-commissionsRouter.post('/:id/claim', requireUuidId, adminOnly, ctl.claimHandler);
+// SVT-QA-2026-08 — commission FSM transitions are money-movers (mark-paid
+// recognises revenue; waive erases outstanding debt; dispute/resolve-dispute
+// flip liability sums). Every neighbouring money-mover in the billing router
+// carries requireMfa({enrollmentRequired: true}) + requireIdempotencyKey;
+// commissions previously carried neither. Bringing them into line closes a
+// SOC2-observable gap where a stolen ADMIN token could touch revenue with
+// no fresh TOTP + double-fire on retry.
+const moneyMoverGuards = [requireMfa({ enrollmentRequired: true }), requireIdempotencyKey];
+commissionsRouter.post('/:id/claim', requireUuidId, adminOnly, ...moneyMoverGuards, ctl.claimHandler);
 commissionsRouter.post(
   '/:id/invoice',
   requireUuidId,
   adminOnly,
+  ...moneyMoverGuards,
   validate(InvoiceRequest),
   ctl.invoiceHandler,
 );
@@ -71,6 +82,7 @@ commissionsRouter.post(
   '/:id/mark-paid',
   requireUuidId,
   adminOnly,
+  ...moneyMoverGuards,
   validate(MarkPaidRequest),
   ctl.markPaidHandler,
 );
@@ -78,6 +90,7 @@ commissionsRouter.post(
   '/:id/dispute',
   requireUuidId,
   adminOnly,
+  ...moneyMoverGuards,
   validate(DisputeRequest),
   ctl.disputeHandler,
 );
@@ -85,10 +98,11 @@ commissionsRouter.post(
   '/:id/resolve-dispute',
   requireUuidId,
   adminOnly,
+  ...moneyMoverGuards,
   validate(ResolveDisputeRequest),
   ctl.resolveDisputeHandler,
 );
-commissionsRouter.post('/:id/waive', requireUuidId, adminOnly, ctl.waiveHandler);
+commissionsRouter.post('/:id/waive', requireUuidId, adminOnly, ...moneyMoverGuards, ctl.waiveHandler);
 
 // Admin manual edit (monetary correction + notes only).
 commissionsRouter.patch(

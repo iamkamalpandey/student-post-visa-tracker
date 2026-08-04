@@ -172,8 +172,12 @@ export async function claim(req: Request, id: string) {
     throw Conflict(`Cannot claim from status ${before.status}; only PENDING is allowed`);
   }
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // SVT-QA-2026-08 — status guard closes the TOCTOU between the read-check
+  // above and this write. Two concurrent transitions both passing the
+  // `before.status === '<expected>'` check would otherwise both write and
+  // both bump `version`, with the second audit row's `before` snapshot lying.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: { id, tenant_id: tid, deleted_at: null, status: before.status },
     data: {
       status: 'CLAIMED',
       claimed_on: todayDateOnly(),

@@ -60,6 +60,7 @@ export const REMINDER_TYPES: ReminderType[] = [
   'DOCUMENT_EXPIRY',
   'ENROLLMENT_DECISION_DUE',
   'COMMISSION_CLAIM_DUE',
+  'COMPLIANCE_CHECK_DUE',
 ];
 
 export const REMINDER_STATUSES: ReminderStatus[] = [
@@ -83,6 +84,7 @@ export const REMINDER_TYPE_COLORS: Record<ReminderType, { bg: string; fg: string
   DOCUMENT_EXPIRY:         { bg: '#F3E5F5', fg: '#6A1B9A' }, // purple
   ENROLLMENT_DECISION_DUE: { bg: '#FFF3E0', fg: '#E65100' }, // orange
   COMMISSION_CLAIM_DUE:    { bg: '#ECEFF1', fg: '#37474F' }, // blue-grey
+  COMPLIANCE_CHECK_DUE:    { bg: '#FCE4EC', fg: '#AD1457' }, // pink — regulator-clock
 };
 
 export function prettifyType(type: string): string {

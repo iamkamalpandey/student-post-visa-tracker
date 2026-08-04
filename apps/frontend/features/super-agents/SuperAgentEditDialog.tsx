@@ -120,7 +120,12 @@ export default function SuperAgentEditDialog({ open, row, onClose }: Props) {
     mutationFn: async (values: FormValues) => {
       const payload = toPayload(values);
       if (isEdit && row) {
-        const res = await api.patch(`/super-agents/${row.id}`, payload);
+        // SVT-QA-2026-08 — super-agent is a versioned resource (row.version)
+        // and every other super-agent PATCH path in the app already sends the
+        // If-Match header. This dialog silently clobbered concurrent edits.
+        const res = await api.patch(`/super-agents/${row.id}`, payload, {
+          headers: { 'If-Match': `"${row.version}"` },
+        });
         return res.data as SuperAgentRow;
       }
       const res = await api.post('/super-agents', payload);
@@ -134,6 +139,14 @@ export default function SuperAgentEditDialog({ open, row, onClose }: Props) {
       onClose();
     },
     onError: (err: unknown) => {
+      // SVT-QA-2026-08 — surface the 412 conflict distinctly so the user
+      // knows to reload rather than assuming a generic "save failed".
+      if (err instanceof ApiError && err.status === 412) {
+        enqueueSnackbar('Someone else updated this record — please reload and retry.', {
+          variant: 'warning',
+        });
+        return;
+      }
       const message = err instanceof ApiError ? err.detail || err.title : 'Save failed';
       enqueueSnackbar(message, { variant: 'error' });
     },

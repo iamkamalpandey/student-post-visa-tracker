@@ -60,9 +60,14 @@ authRouter.patch(
 // pivot. When MFA is enrolled we require an X-MFA-Code header in addition
 // to the current_password supplied in the body. Pre-MFA users keep the
 // existing password-only flow (requireMfa pass-through).
+// SVT-QA-2026-08 — attach authLimiter so a stolen access token can't be
+// used to brute-force `current_password` via a rapid endpoint loop. Every
+// other password/MFA endpoint carries this limiter; change-password was the
+// missing case.
 authRouter.post(
   '/change-password',
   authenticate,
+  authLimiter,
   requireMfa,
   validate(ChangePasswordRequest),
   authController.changePassword,
