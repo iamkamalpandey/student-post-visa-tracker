@@ -169,3 +169,11 @@ services:
       # Next.js inlines NEXT_PUBLIC_* at build time → scope must include BUILD.
       - { key: NEXT_PUBLIC_API_BASE_URL, scope: RUN_AND_BUILD_TIME, value: "${backend.PUBLIC_URL}/api/v1" }
       - { key: NEXT_PUBLIC_APP_NAME, scope: RUN_AND_BUILD_TIME, value: "Student Post-Visa Tracker" }
+      # SVT-QA-2026-08 — customer-facing support email surfaced on /legal/support
+      # and /legal/terms. Without this the page falls back to the literal
+      # "support@example.com" placeholder — which reads as a live-but-unreachable
+      # address to end users. Set to the mailbox that actually receives support
+      # traffic for this tenant. Optional NEXT_PUBLIC_STATUS_URL overrides the
+      # default in-app /status page (Statuspage / Better Stack / etc.).
+      - { key: NEXT_PUBLIC_SUPPORT_EMAIL, scope: RUN_AND_BUILD_TIME, type: SECRET }
+      # - { key: NEXT_PUBLIC_STATUS_URL, scope: RUN_AND_BUILD_TIME, value: "https://status.example.com" }

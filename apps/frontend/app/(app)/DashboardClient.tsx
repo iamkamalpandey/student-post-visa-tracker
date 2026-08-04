@@ -621,8 +621,17 @@ export default function DashboardClient() {
   const pipelineTotal = pipelineSegments.reduce((a, b) => a + b.count, 0);
 
   // ----- Today header ----------------------------------------------------
-  const today = useMemo(
-    () =>
+  // SVT-QA-2026-08 — `new Date()` inside a useMemo runs during SSR too; the
+  // server rendered `today` in the deployment's timezone (typically UTC) while
+  // the client re-computed in the user's timezone. Across a midnight boundary
+  // (or where fmt.timezone diverges from the server default) that produced
+  // different strings and tripped React #418 (hydration mismatch), which in
+  // turn delayed event-handler attachment and manifested as the reported
+  // "first click doesn't register" behaviour. Defer to a post-mount effect so
+  // the SSR HTML never contains a locale-dependent date fragment.
+  const [today, setToday] = useState<string>('');
+  useEffect(() => {
+    setToday(
       new Intl.DateTimeFormat(fmt.locale, {
         weekday: 'long',
         day: 'numeric',
@@ -630,8 +639,8 @@ export default function DashboardClient() {
         year: 'numeric',
         timeZone: fmt.timezone,
       }).format(new Date()),
-    [fmt.locale, fmt.timezone],
-  );
+    );
+  }, [fmt.locale, fmt.timezone]);
 
   const givenName = user?.given_name?.trim() || t('welcomeFallback');
   const userInitials = initials(user?.given_name ?? undefined, user?.family_name ?? undefined);

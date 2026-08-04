@@ -99,11 +99,60 @@ Applied fixes from `docs/SPVT-QA-AUDIT.md` panel findings. Delivered as 5 commit
 2. In DO dashboard on the `backend` service, set:
    - `METRICS_TOKEN` (>=16 chars) — the deploy will now fail-boot without it. Generate: `openssl rand -hex 24`.
    - `SEED_ADMIN_EMAIL` + `SEED_ADMIN_PASSWORD` (SAME values as the migrate job). Backend `env.ts` `superRefine` requires these at boot in production even though the actual insert only runs in the migrate job — the backend just validates their presence.
-3. Push to `main` → DO runs migrate + seed + build + deploy.
-4. Verify `/api/v1/health/livez` returns 200; verify `/api/v1/metrics` with `Authorization: Bearer <METRICS_TOKEN>` returns text/plain.
-5. Test login end-to-end (admin credentials from SEED_ADMIN_*).
-6. Verify `/leads` shows the visa-accepted queue populated from V2.
-7. Verify `/legal/privacy` sub-processor register link → `/sub-processors` (was 404 pre-fix).
-8. Verify locale switcher shows English / العربية / हिन्दी / नेपाली.
-9. Verify /breach-incidents Mark reported / Mark closed now show confirmation dialog.
-10. Verify convert-lead-to-student navigates to `/students/:id` on success.
+3. In DO dashboard on the `frontend` service, set:
+   - `NEXT_PUBLIC_SUPPORT_EMAIL` — the mailbox that actually receives support traffic for this tenant. Without it, `/legal/support` and `/legal/terms` show the literal `support@example.com` placeholder, which reads as live-but-unreachable to end users.
+   - Optionally `NEXT_PUBLIC_STATUS_URL` if you front the platform with a third-party status provider (Statuspage, Better Stack) instead of the built-in `/status`.
+4. Push to `main` → DO runs migrate + seed + build + deploy.
+5. Verify `/api/v1/health/livez` returns 200; verify `/api/v1/metrics` with `Authorization: Bearer <METRICS_TOKEN>` returns text/plain.
+6. Test login end-to-end (admin credentials from SEED_ADMIN_*).
+7. Verify `/leads` shows the visa-accepted queue populated from V2.
+8. Verify `/legal/privacy` sub-processor register link → `/sub-processors` (was 404 pre-fix).
+9. Verify locale switcher shows English / العربية / हिन्दी / नेपाली.
+10. Verify /breach-incidents Mark reported / Mark closed now show confirmation dialog.
+11. Verify convert-lead-to-student navigates to `/students/:id` on success.
+12. Verify `/legal/support` shows your real support email (not `support@example.com`).
+13. Verify `/legal/privacy` now shows a draft/counsel-review banner matching `/legal/terms`.
+14. Verify the audit log's Verifier card no longer shows a raw psql SQL snippet.
+15. Verify a fresh DSAR row's "Requested" column reads "now" (not "in 1 second").
+
+## Post-QA-audit follow-ups (commit `2b03515` + this update)
+
+Applied after an external QA-audit run against the live app. Grouped by verdict.
+
+### CONFIRMED + FIXED
+
+| Finding | File(s) | Fix |
+|---|---|---|
+| Commissions 422 on default list | [zod-schemas/commissions.ts](packages/zod-schemas/src/commissions.ts), [commissions/service.ts](apps/backend/src/modules/commissions/service.ts) | Added `page` (coerce optional int min 1) to `CommissionListQuery`; service implements offset-based pagination (`.skip((page-1)*limit).take(limit)`) when `page` supplied, keeps cursor-based flow for other callers. |
+| Insurance panel 404 on every student | [InsuranceSection.tsx](apps/frontend/features/students/profile/InsuranceSection.tsx) | 4 routes were singular (`/insurance`) but backend mounts plural (`/insurances`). Fixed list, delete, patch, create. |
+| Nationality auto-fill blocks form submit | [PhoneField.tsx](apps/frontend/components/PhoneField.tsx) | `react-international-phone` emits bare `+977`-style calling code on country change; that value fails E.164 validation server-side and silently blocks the submit (error surfaces below the fold on scroll). Normalized code-only state to empty in PhoneField's onChange wrapper — fix covers all 11 use sites. |
+| Consent register spammed with 45 duplicate rows | [consent/service.ts](apps/backend/src/modules/consent/service.ts) | Added same-tuple ACTIVE-row dedup on POST /consents (tenant + subject + purpose + lawful_basis + granted, revoked_at IS NULL). State transitions (granted flip, revoke-then-regrant) still write fresh rows. |
+| Tenants page shows internal file path to end users | [admin/tenants/Client.tsx](apps/frontend/app/(app)/admin/tenants/Client.tsx) | Removed `middlewares/tenantContext.ts` reference from customer-facing alert copy; kept the substantive RLS-binding explanation. |
+| Audit page shows raw psql SQL to end users | [audit/Client.tsx](apps/frontend/app/(app)/audit/Client.tsx) | Dropped the `VERIFY_SQL` constant and the psql code block; rewrote copy to point at the Verify chain button. |
+| Privacy Policy has no counsel-review banner (Terms does) | [legal/privacy/page.tsx](apps/frontend/app/(legal)/legal/privacy/page.tsx) | Added matching `<Alert severity="warning">` using the shared `legal.common.draftBanner` i18n key. |
+| DSAR row's "Requested" reads "in 1 second" for a just-created row | [lib/format.ts](apps/frontend/lib/format.ts) | `formatRelative` used raw `(then - now)` diff so a server timestamp a few seconds ahead of the client clock rendered as future-tense. Clamped `|diff| < 30_000` to "now" in both directions. |
+| Silent bounce to `/login` on refresh-failure with no warning | [lib/auth.tsx](apps/frontend/lib/auth.tsx) | `AUTH_LOGOUT_EVENT` handler now enqueues a warning snackbar ("Your session expired — please sign in again" for `refresh-failed`, "Signed out — please sign in again" for `unauthorized`). |
+| Support email surfaces `support@example.com` placeholder | [.do/app.yaml](.do/app.yaml) | Added `NEXT_PUBLIC_SUPPORT_EMAIL` as SECRET on the frontend service. Set the actual mailbox in the DO dashboard. |
+| React #418 hydration + "first click doesn't register" | [DashboardClient.tsx](apps/frontend/app/(app)/DashboardClient.tsx) | Root cause: `useMemo` computed `today` with `new Date()` + user-preference timezone, so SSR produced the server's TZ formatting and client hydration re-computed in the user's TZ — mismatch on midnight boundaries or non-UTC user prefs. Deferred to a post-mount `useEffect` so the SSR HTML never carries a locale-dependent date fragment. |
+
+### CONFIRMED but INTENTIONAL / OPERATOR
+
+- **H1 Terms of Service DRAFT** — the counsel-review banner is deliberate. Kept until legal counsel signs off.
+- **H4 `support@example.com` fallback** — code fix is the yaml above; operator must set the actual value in the DO dashboard.
+- **D3 10,557 real applicant rows visible** — V2 sync data by design. Access control review needed (only ADMIN + tenant users can reach the URL); if the tenant is meant to be a QA tenant, use a fresh non-production V2 fork.
+
+### FALSE (misread or already fixed)
+
+- **F1 Sidebar missing Breach/Sub-processors** — [AppShell.tsx](apps/frontend/components/AppShell.tsx) `COMPLIANCE_NAV` already contains all 5 items behind a collapsible group. Not a bug.
+- **G1 No MFA anywhere** — MFA is fully implemented: enrol / verify / disable + step-up gates on every money-mover + peer-account mutation. See §4.1 of [SPVT-FEATURES-AND-USER-FLOWS.md](docs/SPVT-FEATURES-AND-USER-FLOWS.md).
+- **H2 Privacy sub-processors link broken** — fixed earlier in commit `54da9c8`.
+- **B2 Notifications panel invisible title/close** — [NotificationsBell.tsx:277-289](apps/frontend/components/NotificationsBell.tsx) `<Toolbar>` renders visible `<Typography>Your reminders</Typography>` and a Close `<IconButton>`. Not a bug.
+
+### CANNOT REPRODUCE / DEFERRED
+
+- **H5 `/status` page renders app error** — [/status page](apps/frontend/app/(public)/status/page.tsx) has a try/catch fallback around the backend fetch and the `status` i18n namespace exists at `messages/en.json:673`. The reported crash is env-specific (possibly the QA session hit it before the backend `/api/v1/public/status` route was deployed). Retest after this deploy.
+- **J8 intermittent 401 on refresh** — one-off; the single-flight guard in [api.ts](apps/frontend/lib/api.ts) already covers concurrent-refresh races. Needs a repro to diagnose further (could be a DO cold-start hitting the refresh cookie's TTL exactly).
+- **C4 Audit log 0 entries despite activity** — backend writes audit correctly at [auth.service.ts:357](apps/backend/src/modules/auth/auth.service.ts) (`action: 'auth.login.success'`). Suspect a fresh-deploy tenant with no writes yet OR the QA session filtered aggressively. Retest after this deploy.
+- **A3 Sign-in button color inconsistency** — needs a design pass; not code-verifiable.
+- **J10 "Restoring your session…" theme mismatch** — [ProtectedLayout.tsx](apps/frontend/components/ProtectedLayout.tsx) uses `bgcolor: 'background.default'` which is theme-aware post-hydration but not pre-hydration. Real fix requires a blocking `<head>` script that sets `<html data-theme="…">` before React runs. Deferred as design polish.
+- **J11 mobile responsive pass** — automation environment couldn't verify. Needs manual device pass or Playwright viewport override.

@@ -13,6 +13,7 @@ import {
 import { useRouter } from 'next/navigation';
 import type { AuthUserResponse, TokenResponse } from '@spv/api-types';
 import { useQueryClient } from '@tanstack/react-query';
+import { useSnackbar } from 'notistack';
 import { ApiError, AUTH_LOGOUT_EVENT, api, setAccessToken, refreshSession } from './api';
 
 const SESSION_USER_KEY = 'spv:auth:user';
@@ -60,6 +61,7 @@ function writeSessionUser(user: AuthUserResponse | null): void {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
   const [user, setUser] = useState<AuthUserResponse | null>(null);
   const [accessToken, setAccessTokenState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -181,13 +183,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Listen for forced-logout events broadcast from api.ts.
   useEffect(() => {
-    const handler = () => {
+    const handler = (e: Event) => {
       applyToken(null);
       applyUser(null);
+      // SVT-QA-2026-08 — surface a visible reason for the bounce so a
+      // counsellor mid-task doesn't experience the app "randomly" throwing
+      // them back to the login screen. `refresh-failed` = the silent refresh
+      // attempt failed (expired refresh cookie, revoked family, or the
+      // backend was unreachable long enough for the cookie to lapse).
+      const reason =
+        e instanceof CustomEvent
+          ? ((e.detail as { reason?: string } | null | undefined)?.reason ?? 'unauthorized')
+          : 'unauthorized';
+      const message =
+        reason === 'refresh-failed'
+          ? 'Your session expired — please sign in again.'
+          : 'Signed out — please sign in again.';
+      enqueueSnackbar(message, { variant: 'warning', autoHideDuration: 6000 });
     };
     window.addEventListener(AUTH_LOGOUT_EVENT, handler);
     return () => window.removeEventListener(AUTH_LOGOUT_EVENT, handler);
-  }, [applyToken, applyUser]);
+  }, [applyToken, applyUser, enqueueSnackbar]);
 
   const value = useMemo<AuthContextValue>(
     () => ({ user, accessToken, isLoading, login, logout, refresh }),
