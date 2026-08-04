@@ -67,16 +67,37 @@ describe('detectMime — happy path per format', () => {
     expect(r.detected).toBe('image/heic');
   });
 
-  it('accepts ZIP magic when hint is docx', () => {
-    const b = Buffer.concat([buf(0x50, 0x4b, 0x03, 0x04), Buffer.alloc(64)]);
+  // SVT-QA-2026-08 (DOCS-H5) — these two used to pass a BARE ZIP header and
+  // assert acceptance, which encoded the vulnerability: the sniffer trusted
+  // the client's Content-Type, so any archive (including a zip bomb) could be
+  // stored and later served labelled as an Office document. The sniffer now
+  // verifies the OOXML container shape from the raw bytes, so the fixtures
+  // carry the entry names a real package has.
+  it('accepts a genuine docx container when hint is docx', () => {
+    const b = Buffer.concat([
+      buf(0x50, 0x4b, 0x03, 0x04),
+      Buffer.from('[Content_Types].xml\0word/document.xml\0_rels/.rels', 'ascii'),
+    ]);
     const r = detectMime(b, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     expect(r.allowed).toBe(true);
+    expect(r.detected).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
   });
 
-  it('accepts ZIP magic when hint is xlsx', () => {
-    const b = Buffer.concat([buf(0x50, 0x4b, 0x03, 0x04), Buffer.alloc(64)]);
+  it('accepts a genuine xlsx container when hint is xlsx', () => {
+    const b = Buffer.concat([
+      buf(0x50, 0x4b, 0x03, 0x04),
+      Buffer.from('[Content_Types].xml\0xl/workbook.xml\0_rels/.rels', 'ascii'),
+    ]);
     const r = detectMime(b, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(r.allowed).toBe(true);
+    expect(r.detected).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  });
+
+  it('rejects a bare ZIP that merely CLAIMS to be docx', () => {
+    const b = Buffer.concat([buf(0x50, 0x4b, 0x03, 0x04), Buffer.alloc(64)]);
+    const r = detectMime(b, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(r.allowed).toBe(false);
+    expect(r.detected).toBeNull();
   });
 });
 

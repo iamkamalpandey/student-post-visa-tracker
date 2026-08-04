@@ -197,6 +197,12 @@ const prismaMock = makePrismaMock();
 
 vi.mock('../src/config/db.js', () => ({
   prisma: prismaMock,
+  prismaAdmin: {
+    // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
+    // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
+    // fails CLOSED when the lookup throws. null = "no revocation on record".
+    user: { findUnique: async () => ({ sessions_valid_from: null }) },
+  },
   disconnectDb: async () => undefined,
 }));
 

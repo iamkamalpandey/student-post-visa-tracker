@@ -37,6 +37,10 @@ const auditCalls: Array<Record<string, unknown>> = [];
 
 vi.mock('../src/config/db.js', () => {
   const prisma = {
+    // SVT-QA-2026-08 — disabling MFA now revokes the refresh-token family so a
+    // session established under the stronger posture cannot outlive the
+    // downgrade. See mfa.service.disableMfa.
+    refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         store.users.find((u) => u.id === where.id) ?? null),

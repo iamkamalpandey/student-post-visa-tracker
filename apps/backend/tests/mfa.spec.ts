@@ -35,8 +35,18 @@ vi.mock('../src/config/db.js', () => {
         return u;
       }),
     },
+    // SVT-QA-2026-08 — disabling MFA now revokes the refresh-token family too.
+    // Previously it only cleared the secret, so a session that was established
+    // under the stronger posture kept working unchanged after the downgrade.
+    refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
   };
-  return { prisma, disconnectDb: async () => undefined };
+  return {
+    prisma,
+    // `authenticate` reads User.sessions_valid_from through the BYPASS-RLS
+    // client; null = "no revocation on record".
+    prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } },
+    disconnectDb: async () => undefined,
+  };
 });
 
 vi.mock('../src/shared/audit.js', () => ({

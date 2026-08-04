@@ -74,7 +74,7 @@ vi.mock('../src/config/db.js', () => {
     }),
   };
   prisma['$extends'] = vi.fn(function () { return prisma; });
-  return { prisma, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({

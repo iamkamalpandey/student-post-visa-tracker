@@ -418,11 +418,21 @@ export async function resolveDispute(
       `Cannot resolve a claim in status ${before.status}; resolve only works on DISPUTED`,
     );
   }
+  // SVT-QA-2026-08 (BILL-M2) — a claim can be disputed straight from PENDING
+  // or CLAIMED, i.e. before `invoice` ever ran. Resolving then landed it in
+  // INVOICED with `invoice_no = NULL`, which every downstream reconciliation
+  // surface treats as impossible (INVOICED rows are assumed to carry a
+  // number). Mint one on the way through when it is missing so the invariant
+  // "INVOICED ⇒ has invoice_no" actually holds.
+  const invoiceNo = before.invoice_no ?? (await nextInvoiceNumber(req, tid));
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // Status guard closes the TOCTOU against a concurrent resolve/waive.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: { id, tenant_id: tid, deleted_at: null, status: 'DISPUTED' },
     data: {
       status: 'INVOICED',
+      invoice_no: invoiceNo,
+      invoiced_on: before.invoiced_on ?? todayDateOnly(),
       dispute_reason: null,
       updated_by_id: sub,
       version: { increment: 1 },
@@ -452,9 +462,24 @@ export async function waive(req: Request, id: string) {
   const { tid, sub } = user(req);
   const before = await loadForTransition(req, id);
   if (before.status === 'WAIVED') throw Conflict('Claim is already WAIVED');
+  // SVT-QA-2026-08 (BILL-H1) — PAID is terminal and must not be waivable.
+  // `commissionFsm` declares this (PAID has no outbound edges) but this
+  // function never consulted it, so an already-PAID claim — carrying
+  // received_minor, paid_on and payment_reference — could be flipped to
+  // WAIVED. `summary()` groups by status, so the recognised revenue silently
+  // dropped out of the paid pivot while the payment columns stayed populated:
+  // money that was actually collected disappeared from the P&L with no
+  // reversing entry. Clawing back a paid commission is a dispute, not a waive.
+  if (before.status === 'PAID') {
+    throw Conflict('Cannot waive a PAID claim — raise a dispute to reverse the payment first');
+  }
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // Status guard closes the TOCTOU between the check above and this write.
   const wr = await db(req).commissionClaim.updateMany({
-    where: { id, tenant_id: tid, deleted_at: null },
+    where: {
+      id, tenant_id: tid, deleted_at: null,
+      status: { notIn: ['PAID', 'WAIVED'] },
+    },
     data: {
       status: 'WAIVED',
       updated_by_id: sub,

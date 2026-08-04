@@ -1902,7 +1902,15 @@ model FinanceItem {
   due_on                DateTime?        @db.Date
   paid_on               DateTime?        @db.Date
   status                FinanceStatus    @default(PENDING)
+  // SVT-QA-2026-08 (LEAD-H5) — partial-payment amount. A CrmLeadFee marked
+  // PAID for less than its full amount used to migrate into a FinanceItem
+  // that claimed the whole amount was collected; the shortfall vanished.
+  paid_amount_minor     BigInt?
   reference             String?
+  // SVT-QA-2026-08 (BILL-H3) — optimistic concurrency. The controller already
+  // parsed If-Match into an `expected` version, but there was no column to
+  // guard against, so concurrent money edits silently last-writer-wins.
+  version               Int              @default(1)
   created_at            DateTime         @default(now()) @db.Timestamptz
   updated_at            DateTime         @updatedAt @db.Timestamptz
 
@@ -3206,7 +3214,12 @@ model CrmLead {
   fees           CrmLeadFee[]
 
   @@unique([tenant_id, v2_lead_id], name: "crm_lead_v2_dedup")
-  @@unique([tenant_id, phone_number], name: "crm_lead_phone_uq")
+  // SVT-QA-2026-08 (LEAD-H6) — phone_number was UNIQUE per tenant. Real V2
+  // data shares one mobile across family members applying together, so the
+  // second sibling's ingest hit P2002 and the whole lead (plus every child
+  // row) was silently dropped from the post-visa queue on every sync.
+  // Identity comes from (tenant_id, v2_lead_id); phone keeps a plain index.
+  @@index([tenant_id, phone_number])
   @@index([tenant_id, is_archived])
   @@index([tenant_id, assigned_to_id])
   @@index([tenant_id, last_name, first_name])
@@ -3685,6 +3698,11 @@ model CrmLeadFee {
   paid_amount_minor BigInt?
   notes             String?
   seeded_from_v2    Boolean   @default(false)
+  // SVT-QA-2026-08 (LEAD-H7) — stable dedup key for auto-seeded fees. The
+  // previous key was (lead_id, session_label), and session_label embeds the
+  // V2 course NAME — so a cosmetic rename upstream produced a duplicate
+  // seeded fee on the next sync. v2_course_id survives renames.
+  v2_course_id      Int?
   version           Int       @default(1)
   created_at        DateTime  @default(now()) @db.Timestamptz
   created_by_id     String?   @db.Uuid

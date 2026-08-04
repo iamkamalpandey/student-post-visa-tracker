@@ -12,7 +12,7 @@ import {
   Uuid,
 } from '@spv/zod-schemas';
 
-import { requireRole } from '../../middlewares/auth.js';
+import { requireLeadOwnership, requireRole } from '../../middlewares/auth.js';
 import { requireIdempotencyKey } from '../../shared/idempotencyHandler.js';
 import { validate } from '../../middlewares/validate.js';
 import { v2SyncLimiter } from '../../middlewares/rateLimit.js';
@@ -59,7 +59,11 @@ crmLeadsRouter.get('/courses-report', ctl.coursesReportHandler);
 crmLeadsRouter.post('/sync', requireRole('ADMIN'), v2SyncLimiter, validate(z.object({}).strict()), ctl.syncHandler);
 
 crmLeadsRouter.get('/:id', requireUuidId, ctl.getByIdHandler);
-crmLeadsRouter.patch('/:id', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), validate(UpdateCrmLeadRequest), ctl.updateHandler);
+// SVT-QA-2026-08 (LEAD-H2) — every lead mutation is now ownership-gated.
+// Previously any COUNSELLOR could PATCH any lead in the tenant (including
+// reassigning it to themselves) and then mutate its money rows. ADMIN
+// bypasses; unassigned leads stay open so the shared intake queue works.
+crmLeadsRouter.patch('/:id', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), validate(UpdateCrmLeadRequest), ctl.updateHandler);
 
 // Convert a lead → managed Student (ADMIN). Body = ConvertLeadToStudentRequest (admin
 // confirms a payload pre-filled from the lead on the client).
@@ -73,8 +77,10 @@ crmLeadsRouter.post('/:id/convert', requireUuidId, requireRole('ADMIN'), require
 // so a retry replays the cached body instead of creating a duplicate row, and
 // gate the waive handler with a strict-empty validator (was missing) so a
 // rogue body can't slip through the "no schema" gap.
-crmLeadsRouter.post('/:id/fees', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(CreateCrmLeadFeeRequest), ctl.createFeeHandler);
-crmLeadsRouter.patch('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(UpdateCrmLeadFeeRequest), ctl.updateFeeHandler);
-crmLeadsRouter.post('/:id/fees/:feeId/pay', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(MarkCrmFeePaidRequest), ctl.markFeePaidHandler);
-crmLeadsRouter.post('/:id/fees/:feeId/waive', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, validate(z.object({}).strict()), ctl.waiveFeeHandler);
-crmLeadsRouter.delete('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireIdempotencyKey, ctl.deleteFeeHandler);
+// SVT-QA-2026-08 (LEAD-H2) — fee mutations are the money surface of a lead;
+// they get the same ownership gate as the lead itself.
+crmLeadsRouter.post('/:id/fees', requireUuidId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), requireIdempotencyKey, validate(CreateCrmLeadFeeRequest), ctl.createFeeHandler);
+crmLeadsRouter.patch('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), requireIdempotencyKey, validate(UpdateCrmLeadFeeRequest), ctl.updateFeeHandler);
+crmLeadsRouter.post('/:id/fees/:feeId/pay', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), requireIdempotencyKey, validate(MarkCrmFeePaidRequest), ctl.markFeePaidHandler);
+crmLeadsRouter.post('/:id/fees/:feeId/waive', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), requireIdempotencyKey, validate(z.object({}).strict()), ctl.waiveFeeHandler);
+crmLeadsRouter.delete('/:id/fees/:feeId', requireUuidId, requireUuidFeeId, requireRole('ADMIN', 'COUNSELLOR'), requireLeadOwnership(), requireIdempotencyKey, ctl.deleteFeeHandler);

@@ -481,42 +481,100 @@ export async function convertLeadToStudent(
     SCHEDULED: 'PENDING', DUE: 'PENDING', OVERDUE: 'OVERDUE', PAID: 'PAID', WAIVED: 'WAIVED',
   };
   let feesMigrated = 0;
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    // Link lead → student, guarded against a concurrent double-convert: only link
-    // if still unlinked. If another request won the race, the 409 rolls the tx back.
-    const linked = await tx.crmLead.updateMany({
-      where: { id: leadId, tenant_id: tenantId, student_id: null },
-      data: { student_id: student.id, converted_at: new Date(), converted_by_id: actorId },
-    });
-    if (linked.count === 0) {
-      throw Conflict('Lead was just linked to a student by another request');
-    }
-    const leadFees = await tx.crmLeadFee.findMany({
-      where: { lead_id: leadId, tenant_id: tenantId, deleted_at: null },
-      select: { id: true, session_label: true, amount_minor: true, currency: true, due_on: true, status: true, paid_at: true },
-    });
-    for (const lf of leadFees) {
-      await tx.financeItem.create({
+  // SVT-QA-2026-08 (LEAD-C1) — compensating cleanup for the just-created
+  // Student. `createStudent` runs OUTSIDE this transaction because it holds an
+  // advisory lock to allocate the SPV-YYYY-NNNNNN code and wraps that in its
+  // own tx; nesting it here would serialise unrelated creates. The consequence
+  // was an orphan: if THIS tx then failed (concurrent linker won the
+  // updateMany race, a FinanceItem insert violated a constraint, connection
+  // dropped mid-commit) the Student row was already durable, unlinked, and
+  // unreachable through any UI. Worse, the dedup guard then matched that
+  // orphan on retry, forcing `acknowledge_duplicate: true`, which minted a
+  // SECOND orphan — one more per attempt, each consuming a student code.
+  //
+  // Fix: on any failure of the linking tx, soft-delete the student we just
+  // created before rethrowing. The cleanup is best-effort and never masks the
+  // original error — a failure to clean up is logged loudly with the orphan's
+  // id so an operator can reconcile.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      // Link lead → student, guarded against a concurrent double-convert: only link
+      // if still unlinked. If another request won the race, the 409 rolls the tx back.
+      const linked = await tx.crmLead.updateMany({
+        where: { id: leadId, tenant_id: tenantId, student_id: null },
         data: {
-          tenant_id: tenantId,
           student_id: student.id,
-          category: 'TUITION',
-          description: lf.session_label,
-          amount_minor: lf.amount_minor,
-          currency: lf.currency,
-          due_on: lf.due_on,
-          paid_on: lf.paid_at,
-          status: feeStatusMap[lf.status] ?? 'PENDING',
+          converted_at: new Date(),
+          converted_by_id: actorId,
+          // SVT-QA-2026-08 (LEAD-M1) — a converted lead is done; leaving it
+          // ACTIVE kept it in the open work queue and in financeSummary's
+          // lead_count even though its fees had moved to the student ledger.
+          spv_status: 'COMPLETED',
         },
       });
-      await tx.crmLeadFee.update({
-        where: { id: lf.id },
-        data: { deleted_at: new Date(), deleted_by_id: actorId },
+      if (linked.count === 0) {
+        throw Conflict('Lead was just linked to a student by another request');
+      }
+      const leadFees = await tx.crmLeadFee.findMany({
+        where: { lead_id: leadId, tenant_id: tenantId, deleted_at: null },
+        select: {
+          id: true, session_label: true, amount_minor: true, currency: true,
+          due_on: true, status: true, paid_at: true, paid_amount_minor: true,
+        },
       });
-      feesMigrated += 1;
+      for (const lf of leadFees) {
+        await tx.financeItem.create({
+          data: {
+            tenant_id: tenantId,
+            student_id: student.id,
+            category: 'TUITION',
+            description: lf.session_label,
+            amount_minor: lf.amount_minor,
+            currency: lf.currency,
+            due_on: lf.due_on,
+            paid_on: lf.paid_at,
+            // SVT-QA-2026-08 (LEAD-H5) — carry the partial-payment amount.
+            // Without this a fee marked PAID for 2,500 of 10,000 migrated as
+            // a fully-settled 10,000 item and the 7,500 shortfall silently
+            // left the books.
+            paid_amount_minor: lf.paid_amount_minor,
+            status: feeStatusMap[lf.status] ?? 'PENDING',
+          },
+        });
+        await tx.crmLeadFee.update({
+          where: { id: lf.id },
+          data: { deleted_at: new Date(), deleted_by_id: actorId },
+        });
+        feesMigrated += 1;
+      }
+      // SVT-QA-2026-08 (LEAD-M1) — the lead's open follow-ups are obsolete
+      // once it is converted; leaving them PENDING kept the reminder
+      // staircase firing against a lead nobody works anymore.
+      await tx.crmFollowUp.updateMany({
+        where: { lead_id: leadId, tenant_id: tenantId, deleted_at: null },
+        data: { deleted_at: new Date() },
+      });
+    });
+  } catch (err) {
+    try {
+      await db.student.updateMany({
+        where: { id: student.id, tenant_id: tenantId, deleted_at: null },
+        data: { deleted_at: new Date() },
+      });
+      logger.warn(
+        { leadId, studentId: student.id, studentCode: student.student_code },
+        'convertLeadToStudent: link tx failed — rolled back the orphaned student',
+      );
+    } catch (cleanupErr) {
+      // Loud: an operator must reconcile this student code by hand.
+      logger.error(
+        { err: cleanupErr, leadId, studentId: student.id, studentCode: student.student_code },
+        'convertLeadToStudent: ORPHAN STUDENT — link tx failed AND cleanup failed; manual reconciliation required',
+      );
     }
-  });
+    throw err;
+  }
 
   // Reconciliation: if the admin matched/picked an app-catalog Program, enrol the
   // new student into it (institution derived from the Program; createForStudent

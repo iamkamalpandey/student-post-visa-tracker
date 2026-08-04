@@ -30,6 +30,11 @@ export const CreateFinanceRequest = z
     invoice_no: z.string().max(80).optional(),
     due_on: Iso8601Date.optional(),
     paid_on: Iso8601Date.optional(),
+    // SVT-QA-2026-08 (LEAD-H5) — how much was ACTUALLY collected, when that
+    // differs from `amount_minor`. A PAID item with a lower paid_amount_minor
+    // is a partial settlement; leaving it implicit is how the lead→student
+    // convert used to lose the shortfall.
+    paid_amount_minor: Money.optional(),
     status: FinanceStatusEnum.default('PENDING'),
     reference: z.string().max(120).optional(),
   })

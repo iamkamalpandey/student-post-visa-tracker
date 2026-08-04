@@ -827,6 +827,22 @@ export async function applyAdjustment(
     const i = inst[0];
     if (!i) throw NotFound('Installment not found');
 
+    // SVT-QA-2026-08 (BILL-H6) — refuse adjustments against a terminal
+    // installment. The row-lock query had no status filter and LATE_FEE had
+    // no balance cap, so a LATE_FEE could be applied to an already-WAIVED
+    // (or CANCELLED/REFUNDED) installment: `net_minor` and `balance_minor`
+    // mutated while the status-preservation branch below kept the terminal
+    // status. The result was a WAIVED row showing money owed. Because
+    // `getOutstanding` only scans INVOICED/DUE/OVERDUE/PARTIAL, that phantom
+    // balance never surfaced in an aggregate — it just silently drifted the
+    // plan detail view and the invoice PDF away from the ledger, forever.
+    const TERMINAL_FOR_ADJUSTMENT: FeeInstallmentStatus[] = ['WAIVED', 'CANCELLED', 'REFUNDED'];
+    if (TERMINAL_FOR_ADJUSTMENT.includes(i.status)) {
+      throw Conflict(
+        `Cannot adjust an installment in terminal status ${i.status}. Reverse the terminal transition first.`,
+      );
+    }
+
     // SVT-WAVE-BILLING-SEC-P0-F1 — debt-erasing kinds may not exceed the
     // installment's current balance. Otherwise a counsellor could mint a
     // DISCOUNT larger than the actual outstanding amount (creating a
@@ -882,8 +898,20 @@ export async function applyAdjustment(
     if (input.kind === 'WAIVER') {
       assertOrThrow(feeInstallmentFsm, i.status, 'WAIVED', role, input.reason_text);
       nextStatus = 'WAIVED';
-    } else if (recomputed.balance_minor === 0n && i.status !== 'PAID' && i.status !== 'WAIVED' && i.status !== 'CANCELLED' && i.status !== 'REFUNDED') {
-      assertOrThrow(feeInstallmentFsm, i.status, 'PAID', role);
+    } else if (recomputed.balance_minor === 0n && i.status !== 'PAID') {
+      // SVT-QA-2026-08 (BILL-M8) — SCHEDULED → PAID is not a declared edge
+      // (an installment must be invoiced before it can be settled), so
+      // fully discounting a still-SCHEDULED installment used to 422 with
+      // "no legal FSM transition" — a dead end for a perfectly reasonable
+      // admin action. Route it through the legal two-hop path
+      // SCHEDULED → INVOICED → PAID, asserting BOTH edges so the machine
+      // stays the single source of truth.
+      if (i.status === 'SCHEDULED') {
+        assertOrThrow(feeInstallmentFsm, i.status, 'INVOICED', role);
+        assertOrThrow(feeInstallmentFsm, 'INVOICED', 'PAID', role);
+      } else {
+        assertOrThrow(feeInstallmentFsm, i.status, 'PAID', role);
+      }
       nextStatus = 'PAID';
     }
 

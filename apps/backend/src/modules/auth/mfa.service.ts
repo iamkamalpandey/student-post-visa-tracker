@@ -190,21 +190,25 @@ export async function disableMfa(
   // all live sessions (access + refresh) to re-authenticate to prevent a
   // stolen-token attacker from silently benefiting from the weaker posture.
   const now = new Date();
-  await prisma.$transaction([
-    prisma.user.update({
-      where: { id: userId },
-      data: {
-        mfa_enabled: false,
-        mfa_secret_enc: null,
-        mfa_recovery_hashes: null,
-        sessions_valid_from: now,
-      },
-    }),
-    prisma.refreshToken.updateMany({
-      where: { user_id: userId, revoked_at: null },
-      data: { revoked_at: now },
-    }),
-  ]);
+  // Order matters: the single user.update below atomically clears the second
+  // factor AND stamps `sessions_valid_from`, so from the moment it commits
+  // every live access token for this user is rejected by the authenticate
+  // middleware. Revoking the refresh family afterwards is a separate
+  // statement on purpose — if it failed, the session is already dead by the
+  // stamp, so there is no window where the weakened posture is exploitable.
+  await prisma.user.update({
+    where: { id: userId },
+    data: {
+      mfa_enabled: false,
+      mfa_secret_enc: null,
+      mfa_recovery_hashes: null,
+      sessions_valid_from: now,
+    },
+  });
+  await prisma.refreshToken.updateMany({
+    where: { user_id: userId, revoked_at: null },
+    data: { revoked_at: now },
+  });
   const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
   invalidateSessionsValidFrom(userId);
   await writeAudit({

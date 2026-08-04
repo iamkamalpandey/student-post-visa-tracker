@@ -364,16 +364,19 @@ export const usersService = {
     // SVT-QA-2026-08 — stamp sessions_valid_from alongside refresh revoke so
     // access tokens fall over within one cache cycle, not the full 15-min TTL.
     const now = new Date();
-    const result = await prisma.$transaction([
-      prisma.user.update({
-        where: { id },
-        data: { sessions_valid_from: now },
-      }),
-      prisma.refreshToken.updateMany({
-        where: { user_id: id, revoked_at: null },
-        data: { revoked_at: now },
-      }),
-    ]).then((rows) => rows[1] as { count: number });
+    // SVT-RLS-2026-05 — tenant_id in the where on BOTH writes (defence in
+    // depth on top of the existence check above).
+    // Stamp first: once `sessions_valid_from` lands, every live access token
+    // for the target is rejected by the authenticate middleware, so the
+    // refresh revoke that follows can never leave an exploitable window.
+    await prisma.user.updateMany({
+      where: { id, tenant_id: tenantId },
+      data: { sessions_valid_from: now },
+    });
+    const result = await prisma.refreshToken.updateMany({
+      where: { user_id: id, revoked_at: null },
+      data: { revoked_at: now },
+    });
     const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
     invalidateSessionsValidFrom(id);
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — force session revocation is an
@@ -465,16 +468,16 @@ export const usersService = {
     // surviving to their 15-min TTL. Force-disable is a security event that
     // must invalidate every credential of any type immediately.
     const now = new Date();
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: targetUserId },
-        data: { sessions_valid_from: now },
-      }),
-      prisma.refreshToken.updateMany({
-        where: { user_id: targetUserId, revoked_at: null },
-        data: { revoked_at: now },
-      }),
-    ]);
+    // SVT-RLS-2026-05 — tenant_id in the where on BOTH writes.
+    // Stamp first (see revokeAllSessions for the ordering rationale).
+    await prisma.user.updateMany({
+      where: { id: targetUserId, tenant_id: tenantId },
+      data: { sessions_valid_from: now },
+    });
+    await prisma.refreshToken.updateMany({
+      where: { user_id: targetUserId, revoked_at: null },
+      data: { revoked_at: now },
+    });
     const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
     invalidateSessionsValidFrom(targetUserId);
 

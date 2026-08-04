@@ -106,7 +106,7 @@ vi.mock('../src/config/db.js', () => {
     $transaction: vi.fn(async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma)),
     $executeRaw: vi.fn(async () => 1),
   };
-  return { prisma, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 function filter(where: Record<string, unknown>): MsgRow[] {

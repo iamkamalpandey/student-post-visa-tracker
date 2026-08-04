@@ -148,6 +148,77 @@ Applied after an external QA-audit run against the live app. Grouped by verdict.
 - **H2 Privacy sub-processors link broken** — fixed earlier in commit `54da9c8`.
 - **B2 Notifications panel invisible title/close** — [NotificationsBell.tsx:277-289](apps/frontend/components/NotificationsBell.tsx) `<Toolbar>` renders visible `<Typography>Your reminders</Typography>` and a Close `<IconButton>`. Not a bug.
 
+## Brutal-audit rounds 3–4 — deep flow audit (lead pipeline, documents, money paths)
+
+Four parallel audits traced the CRM-lead→student pipeline, the documents
+pipeline, every money-touching path, and the frontend flows end to end. The
+findings below were verified against code and fixed across two commits:
+
+- **`44e8040`** (round 3): DOCS-C1, BILL-C1, LEAD-H3, LEAD-H4, LEAD-M2,
+  LEAD-M3, COMM-H2.
+- **round 4** (this commit): LEAD-C1, LEAD-H1, LEAD-H2, LEAD-H5, LEAD-H6,
+  LEAD-H7, LEAD-M1, DOCS-H1…H5, BILL-H1, BILL-H3, BILL-H4, BILL-H6, BILL-M2,
+  BILL-M8, plus the regression suite and the fixture completion described at
+  the end of this section.
+
+Regression coverage lives in `tests/qa-2026-08-guards.spec.ts` (new) plus
+additions to `tests/crm-convert-dedup.spec.ts` and
+`tests/billing-plan-service.spec.ts`.
+
+### CRITICAL — fixed
+
+| ID | Defect | Fix |
+|---|---|---|
+| DOCS-C1 | **Every image upload was un-downloadable.** `sha256` was computed on the raw client buffer, but `stripExifIfImage` re-encodes JPEG/PNG/WEBP/HEIC via sharp before storage. The download-side integrity check re-hashed the *stored* bytes and threw `Stored file failed integrity check`. sharp is a hard dependency, so this fired on every image in production. | Hash `safeBuffer` (post-strip) so the recorded digest matches what is stored. |
+| BILL-C1 | **Cross-currency totals were fabricated.** `getOutstanding` summed `balance_minor` across every open installment and labelled the total with `rows[0].currency`. A student with USD + GBP enrollments was reported as owing the arithmetic sum, denominated in whichever row sorted first — and that number drove dunning decisions. | Returns `{ by_currency: [...] }`, grouped per ISO currency. FE `Outstanding` type + `PlanSummaryCard` updated to match. |
+| LEAD-C1 | **Orphaned Student rows on convert.** `createStudent` runs outside the linking transaction (it holds an advisory lock for SPV-code allocation). If that tx then failed, the student was already durable, unlinked and unreachable — and the dedup guard matched the orphan on retry, forcing `acknowledge_duplicate`, which minted another orphan per attempt. | Compensating soft-delete of the just-created student in a `catch`, with a loud `error` log naming the student code if cleanup itself fails. |
+
+### HIGH — fixed
+
+| ID | Defect | Fix |
+|---|---|---|
+| LEAD-H2 | Any COUNSELLOR could PATCH any lead in the tenant — including reassigning `assigned_to_id` to themselves — then add/edit/pay/waive/delete its fees. Docs promised per-record ownership; leads had no gate. | New `requireLeadOwnership()` middleware (ADMIN bypasses; unassigned leads stay open for the shared intake queue) on `PATCH /leads/:id` and all five fee routes. |
+| LEAD-H3 | Soft-deleting a mis-converted student permanently bricked the lead: the guard fired on any non-null `student_id` regardless of `deleted_at`, and no API could reset the link. | Guard joins `student.deleted_at` and blocks only while the linked student is live. |
+| LEAD-H4 | `PATCH /leads/:id/fees/:feeId` accepted a bare currency change. `1234500` USD-cents ($12,345.00) re-labelled JPY became ¥1,234,500 — a 100× error with no validation. | `superRefine` on `UpdateCrmLeadFeeRequest`: changing `currency` requires restating `amount_minor`. |
+| LEAD-H5 | Partial payments vanished on convert. `CrmLeadFee.paid_amount_minor` had no counterpart on `FinanceItem`, so a fee PAID for 2,500 of 10,000 migrated as fully settled. | Added `FinanceItem.paid_amount_minor` (migration `20991231235999`), carried through the convert and exposed on the finance API. |
+| LEAD-H6 | `@@unique([tenant_id, phone_number])` on `crm_leads` silently dropped family members sharing a mobile: the second sibling's ingest hit P2002 and every child row was skipped, on every sync, forever. | Dropped the unique constraint (migration `20991231236000`); identity remains `(tenant_id, v2_lead_id)`, phone keeps a plain index. |
+| LEAD-H7 | Renaming a course in V2 produced duplicate seeded fees, because the idempotency key was `(lead_id, session_label)` and the label embeds the course name. | Added `CrmLeadFee.v2_course_id` + partial unique index on `(lead_id, v2_course_id)` with backfill (migration `20991231236001`); ingest seeds it. |
+| LEAD-H1 | `requireIdempotencyKey` was mounted on pay/waive/update/delete but the handlers ignored the key, so retries re-executed instead of replaying — duplicate audit rows and spurious 409s. | Routed those handlers through `runIdempotent` with distinct scopes. |
+| DOCS-H1 | Route allowed `ADMIN + COUNSELLOR` with an ownership gate; the service then threw `Admin role required`, so an assigned counsellor who passed both middlewares still got 403. | Route + ownership is now the authority; `force_override` (bypasses the terminal-state FSM) stays ADMIN-only. |
+| DOCS-H2 | Minting a signed download URL wrote no audit row — only actual byte-serving did. Signed URLs could be enumerated with no trace. | `document.download_url_minted` audit event carrying a hash of the nonce (never the nonce itself). |
+| DOCS-H3 | Verification had no optimistic lock. The `version` column existed but nothing bumped or checked it, so concurrent VERIFIED/REJECTED decisions silently last-writer-wins on a compliance-material field. | `version` folded into the WHERE and incremented; loser gets 409. |
+| DOCS-H4 | Compensating storage delete swallowed its error, leaving untracked objects that retention can never sweep (PII + cost). | Logs at `error` with tenant/key/doc id for manual reconciliation. |
+| DOCS-H5 | OOXML sniff trusted the client's `Content-Type`: any ZIP could be stored and served as `.docx`/`.xlsx`. | Verifies the container from raw bytes — requires `[Content_Types].xml` plus the matching `word/`/`xl/` part namespace, and rejects ambiguous archives. Scans entry names in place, so it cannot be turned into a decompression bomb. |
+| BILL-H1 | `waive` never consulted the FSM, so an already-PAID commission could be waived. `summary()` groups by status, so recognised revenue disappeared from the paid pivot while the payment columns stayed populated. | PAID rejected explicitly (clawback is a dispute); write guarded with `status notIn ['PAID','WAIVED']`. |
+| BILL-H3 | `FinanceItem.update` accepted an If-Match `expected` from the controller but discarded it, and the model had no `version` column — the optimistic-concurrency contract was theatre. | Added `FinanceItem.version` (migration `20991231235999`); folded into the WHERE and incremented, 412 on mismatch. |
+| BILL-H4 | `FinanceItem` status was copied straight from the payload — `PAID → PENDING`, `REFUNDED → PAID` all allowed. Un-settling an item left its reminders permanently DISMISSED, so it fell off the collections queue silently. | Explicit transition table; terminal states are terminal, `PAID → REFUNDED` is the only settled-state exit. |
+| BILL-H6 | `applyAdjustment` locked the installment with no status filter and LATE_FEE had no cap, so a fee could be applied to a WAIVED/CANCELLED/REFUNDED row: balances mutated while the status stayed terminal. `getOutstanding` never scans those statuses, so the phantom balance drifted the plan view and invoice PDF away from the ledger unnoticed. | Terminal statuses rejected up front. |
+
+### MEDIUM — fixed
+
+| ID | Defect | Fix |
+|---|---|---|
+| LEAD-M1 | A converted lead stayed `ACTIVE` with open follow-ups — still in the work queue, still counted by `financeSummary`, still firing reminders. | Convert sets `spv_status = COMPLETED` and closes open follow-ups inside the same tx. |
+| LEAD-M2 | `pay`/`waive` only blocked `PAID`, and generic PATCH could set `status` — bypassing `paid_at`, `paid_amount_minor`, reminder dismissal and the correct audit action. Re-waiving bumped `version` and wrote a bogus audit row on a frozen record. | `status` removed from `UpdateCrmLeadFeeRequest`; PAID **and** WAIVED rejected by pay/waive/edit; atomic guards use `notIn`. |
+| LEAD-M3 | `deleteFee` had no atomic guard — concurrent deletes both wrote, both bumped version, both fanned out audit + reminder dismissal. | `updateMany` with `deleted_at: null`; the loser returns early and skips the fanout. |
+| BILL-M2 | A claim disputed from PENDING/CLAIMED resolved into `INVOICED` with `invoice_no = NULL`, breaking the "INVOICED ⇒ has invoice_no" invariant every reconciliation surface assumes. | `resolveDispute` mints an invoice number when one is missing, and guards the write on `status = DISPUTED`. |
+| BILL-M8 | Fully discounting a SCHEDULED installment 422'd, because `SCHEDULED → PAID` is not a declared FSM edge. | Routed through the legal two-hop `SCHEDULED → INVOICED → PAID`, asserting both edges. |
+| COMM-H2 | `commissions.invoice_no` had no unique index — the retry loop in `nextInvoiceNumber` guarded a race with no backstop. | Partial unique index on `(tenant_id, invoice_no)` (migration `20991231235998`). |
+
+### Test-fixture blast radius (worth recording)
+
+Adding the session-wide revoke check to `authenticate` made every authenticated
+request depend on `prismaAdmin.user.findUnique`. 20+ fixtures mock
+`../src/config/db.js` and did not export `prismaAdmin`, so the middleware's
+(correct) fail-closed branch turned them into 503s. The fix was to complete the
+fixtures — each now exports an explicit admin stub returning
+`{ sessions_valid_from: null }`, i.e. "no revocation on record", which is the
+state those tests always implicitly assumed. The middleware was **not**
+weakened: reading the stamp through the BYPASS-RLS client is required because
+`authenticate` runs before `tenantContext` sets the tenant GUC, and under the
+`spv_app` role a plain read would be filtered to null and the check would
+silently no-op.
+
 ### CANNOT REPRODUCE / DEFERRED
 
 - **H5 `/status` page renders app error** — [/status page](apps/frontend/app/(public)/status/page.tsx) has a try/catch fallback around the backend fetch and the `status` i18n namespace exists at `messages/en.json:673`. The reported crash is env-specific (possibly the QA session hit it before the backend `/api/v1/public/status` route was deployed). Retest after this deploy.

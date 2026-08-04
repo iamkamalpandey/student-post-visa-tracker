@@ -158,14 +158,24 @@ export async function updateFeeHandler(req: Request, res: Response, next: NextFu
   }
 }
 
+// SVT-QA-2026-08 (LEAD-H1) — the routes below all mount
+// `requireIdempotencyKey`, which makes the header MANDATORY and therefore
+// promises replay semantics. Only createFee and convert actually honoured it;
+// pay / waive / delete accepted the key and then ignored it, so a retry
+// re-executed the operation instead of replaying the cached response. The
+// atomic status guards in the service masked the worst outcome for `pay`, but
+// `waive` and `delete` still produced duplicate audit rows and version churn,
+// and a client that never received the first response saw a spurious 409 on
+// its retry. Routing them through `runIdempotent` makes the contract real.
 export async function markFeePaidHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const user = requireUser(req);
     const id = req.params['id']!;
     const feeId = req.params['feeId']!;
     const body = req.body as MarkCrmFeePaidRequest;
-    const updated = await service.markFeePaid({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId, body);
-    res.json(updated);
+    await runIdempotent(req, res, { scope: 'crm-lead-fees.pay' }, () =>
+      service.markFeePaid({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId, body),
+    );
   } catch (err) {
     next(err);
   }
@@ -176,8 +186,9 @@ export async function waiveFeeHandler(req: Request, res: Response, next: NextFun
     const user = requireUser(req);
     const id = req.params['id']!;
     const feeId = req.params['feeId']!;
-    const updated = await service.waiveFee({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId);
-    res.json(updated);
+    await runIdempotent(req, res, { scope: 'crm-lead-fees.waive' }, () =>
+      service.waiveFee({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId),
+    );
   } catch (err) {
     next(err);
   }
@@ -188,8 +199,12 @@ export async function deleteFeeHandler(req: Request, res: Response, next: NextFu
     const user = requireUser(req);
     const id = req.params['id']!;
     const feeId = req.params['feeId']!;
-    await service.deleteFee({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId);
-    res.status(204).end();
+    await runIdempotent(req, res, { scope: 'crm-lead-fees.delete' }, async () => {
+      await service.deleteFee({ db: dbFor(req), tenantId: user.tid, actorId: user.sub }, id, feeId);
+      // runIdempotent caches + returns a body; a bare 204 has nothing to
+      // replay, so return a small deterministic receipt instead.
+      return { deleted: true, fee_id: feeId };
+    });
   } catch (err) {
     next(err);
   }

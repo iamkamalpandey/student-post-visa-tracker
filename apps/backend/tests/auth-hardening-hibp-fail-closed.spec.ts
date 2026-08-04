@@ -36,6 +36,14 @@ const STUB_ENV: Record<string, string> = {
   KMS_KEK_BASE64: 'a'.repeat(48),
   REFRESH_TOKEN_PEPPER: '0'.repeat(64),
   CORRELATION_HMAC_KEY: '0'.repeat(64),
+  // SVT-QA-2026-08 — these became prod-required after this fixture was
+  // written (env.ts superRefine). Under NODE_ENV=production the validator
+  // calls process.exit(1) when they're absent, which aborts the worker before
+  // a single assertion runs — so the whole file failed for a reason that had
+  // nothing to do with HIBP.
+  LOG_HMAC_KEY_BASE64: Buffer.alloc(32, 1).toString('base64'),
+  METRICS_TOKEN: 'm'.repeat(24),
+  RESEND_WEBHOOK_SECRET: 'whsec_'.concat('r'.repeat(24)),
 };
 
 function stubBaseEnv(): void {

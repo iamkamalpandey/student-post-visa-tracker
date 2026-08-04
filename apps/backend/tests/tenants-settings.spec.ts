@@ -28,8 +28,20 @@ vi.mock('../src/config/db.js', () => {
         return t;
       }),
     },
+    // SVT-QA-2026-08 — the tenants service routes every read/write through
+    // `withTenantTx`, which opens a transaction and `set_config`s the
+    // app.tenant_id GUC before touching the row (the tenants-table RLS policy
+    // requires it). The fixture must therefore model both primitives; without
+    // them every case failed with "prisma.$transaction is not a function".
+    $transaction: vi.fn(async (fn: unknown) =>
+      typeof fn === 'function' ? (fn as (tx: unknown) => unknown)(prisma) : fn),
+    $executeRaw: vi.fn(async () => 1),
   };
-  return { prisma, disconnectDb: async () => undefined };
+  return {
+    prisma,
+    prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } },
+    disconnectDb: async () => undefined,
+  };
 });
 
 vi.mock('../src/shared/audit.js', () => ({ writeAudit: vi.fn(async () => undefined) }));

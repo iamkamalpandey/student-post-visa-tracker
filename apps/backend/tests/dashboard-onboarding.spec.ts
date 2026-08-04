@@ -91,12 +91,18 @@ vi.mock('../src/config/db.js', () => {
         return store.stages.filter((s) => whereMatches(s as unknown as Record<string, unknown>, where)).length;
       }),
     },
+    // SVT-QA-2026-08 (K3) — the checklist grew from 8 to 10 steps: an empty
+    // visa-type catalogue and an empty Art. 30 sub-processor register are both
+    // onboarding gaps a tenant should be nudged about. Default 0 = incomplete,
+    // which is what the pre-existing assertions expect for these new steps.
+    visaType: { count: vi.fn(async () => 0) },
+    subProcessor: { count: vi.fn(async () => 0) },
     accessTokenDenylist: { findUnique: vi.fn(async () => null) },
     $extends: vi.fn(function (this: unknown) { return prisma; }),
     $transaction: vi.fn(async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma)),
     $executeRaw: vi.fn(async () => 1),
   };
-  return { prisma, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 // /summary handler imports the expiry job — onboarding doesn't use it, but the
@@ -343,7 +349,12 @@ describe('GET /api/v1/dashboard/onboarding', () => {
       .get('/api/v1/dashboard/onboarding')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.data.steps).toHaveLength(8);
+    // SVT-QA-2026-08 (K3) — grew from 8 to 10 steps. The two new items surface
+    // empty compliance registers: a tenant tracking students through a visa
+    // lifecycle with no visa-type catalogue is misconfigured, and GDPR Art. 30
+    // requires the sub-processor register to be populated. Both counts are 0 in
+    // this fixture, so they stay incomplete while the original 8 complete.
+    expect(res.body.data.steps).toHaveLength(10);
     expect(res.body.data.complete_count).toBe(8);
     expect(res.body.data.steps.map((s: { id: string }) => s.id)).toEqual([
       'tenant_settings',
@@ -354,6 +365,8 @@ describe('GET /api/v1/dashboard/onboarding', () => {
       'lifecycle_stages_seeded',
       'billing_decision',
       'mfa_enabled_for_admin',
+      'first_visa_type',
+      'first_sub_processor',
     ]);
     res.body.data.steps.forEach((s: { id: string; action_url: string; label: string }) => {
       expect(typeof s.label).toBe('string');

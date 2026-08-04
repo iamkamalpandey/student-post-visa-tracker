@@ -19,7 +19,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { writeAudit } from '../../shared/audit.js';
-import { BadRequest, Forbidden, NotFound, UnprocessableEntity } from '../../shared/errors.js';
+import { BadRequest, Conflict, Forbidden, NotFound, UnprocessableEntity } from '../../shared/errors.js';
+import { logger } from '../../config/logger.js';
 import { assertOrThrow } from '../../shared/fsm.js';
 import { documentFsm, type DocVerification } from './fsm-def.js';
 
@@ -223,7 +224,19 @@ export async function createDocument(ctx: ServiceContext, args: CreateDocumentAr
     });
   } catch (err) {
     // Compensating delete: orphaned object would otherwise sit in storage.
-    await getStorage().delete(storageKey).catch(() => undefined);
+    // SVT-QA-2026-08 (DOCS-H4) — a swallowed failure here is invisible, and
+    // the object becomes permanently untracked: retention only sweeps rows
+    // it can see in `documents`, so an orphan carries PII forever and grows
+    // the storage bill silently. Log it loudly enough that an operator can
+    // reconcile the key by hand (and so Sentry captures it via the logger).
+    await getStorage()
+      .delete(storageKey)
+      .catch((cleanupErr: unknown) => {
+        logger.error(
+          { err: cleanupErr, tenantId, storageKey, docId },
+          'documents.create: ORPHANED STORAGE OBJECT — DB insert failed AND compensating delete failed; manual reconciliation required',
+        );
+      });
     throw err;
   }
 
@@ -284,6 +297,22 @@ export async function signedDownload(ctx: ServiceContext, docId: string) {
   }
 
   const { nonce, expiresAt } = issueNonce(doc.id, ctx.user.sub);
+  // SVT-QA-2026-08 (DOCS-H2) — audit the INTENT to download, not just the
+  // byte-serving step. Previously only `streamDownload` wrote an audit row, so
+  // a user could mint signed URLs for every document they can see and leave no
+  // trace unless they actually consumed them. Access-review evidence needs the
+  // mint event. The nonce itself is never logged — only a short hash of it, so
+  // the audit row can be correlated with the later `document.downloaded` entry
+  // without the log becoming a credential store.
+  await writeAudit({
+    tenantId, actorId: ctx.user.sub, action: 'document.download_url_minted',
+    entityType: 'Document', entityId: doc.id,
+    after: {
+      nonce_hash: createHash('sha256').update(nonce).digest('hex').slice(0, 16),
+      expires_at: expiresAt.toISOString(),
+    },
+    ip: ctx.ip, ua: ctx.ua, requestId: ctx.requestId,
+  });
   return {
     url: `/api/v1/documents/${doc.id}/stream?nonce=${nonce}`,
     expiresAt: expiresAt.toISOString(),
@@ -360,7 +389,14 @@ export async function verify(
     reason?: string;
   },
 ) {
-  if (ctx.user.role !== 'ADMIN') throw Forbidden('Admin role required');
+  // SVT-QA-2026-08 (DOCS-H1) — route/service contract mismatch. The route
+  // (documents.routes.ts) allows ADMIN + COUNSELLOR and gates the counsellor
+  // with `requireStudentOwnershipViaChild('document','id')`, which is the
+  // intended policy: the assigned counsellor verifies their own caseload's
+  // documents. The service then unconditionally threw 'Admin role required',
+  // so an assigned counsellor who passed both route middlewares still got 403.
+  // The route + ownership guard is now the authority. `force_override` — which
+  // bypasses the terminal-state FSM guard — stays ADMIN-only below.
   const tenantId = ctx.user.tid;
 
   const existing = await ctx.db.document.findFirst({
@@ -376,6 +412,13 @@ export async function verify(
   const next = decision.verification as DocVerification;
   const override = decision.force_override === true;
   if (override) {
+    // SVT-QA-2026-08 (DOCS-H1) — overriding a TERMINAL verification decision
+    // is the privileged half of this endpoint and stays ADMIN-only, even
+    // though the ordinary PENDING → decision path is open to the assigned
+    // counsellor.
+    if (ctx.user.role !== 'ADMIN') {
+      throw Forbidden('Admin role required to override a terminal verification decision');
+    }
     const reason = (decision.reason ?? '').trim();
     if (reason.length < 10) {
       throw UnprocessableEntity(
@@ -390,15 +433,27 @@ export async function verify(
   }
 
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
+  // SVT-QA-2026-08 (DOCS-H3) — optimistic lock. The `version` column existed
+  // in the schema but no writer ever bumped it and no reader guarded on it, so
+  // two reviewers deciding VERIFIED and REJECTED concurrently both passed the
+  // FSM check against the same PENDING snapshot and both wrote — last write
+  // silently won on a compliance-material field. Folding the observed version
+  // into the WHERE lets exactly one win; the loser gets 409 and re-reads.
   const wr = await ctx.db.document.updateMany({
-    where: { id: docId, tenant_id: tenantId, deleted_at: null },
+    where: {
+      id: docId, tenant_id: tenantId, deleted_at: null,
+      version: existing.version,
+    },
     data: {
       verification: decision.verification,
       verified_at: new Date(),
       verified_by_id: ctx.user.sub,
+      version: { increment: 1 },
     },
   });
-  if (wr.count !== 1) throw NotFound('Document not found');
+  if (wr.count !== 1) {
+    throw Conflict('Document was modified by another request; reload and retry.');
+  }
   const updated = await ctx.db.document.findFirstOrThrow({
     where: { id: docId, tenant_id: tenantId },
   });

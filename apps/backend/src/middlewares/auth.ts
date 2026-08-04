@@ -270,3 +270,45 @@ export function requireStudentOwnershipViaChild(
     }
   };
 }
+
+/**
+ * SVT-QA-2026-08 (LEAD-H2) — per-record ownership gate for CRM leads.
+ *
+ * The docs promise "COUNSELLOR can only mutate records assigned to them", and
+ * every student sub-resource enforces it via `requireStudentOwnership`. The
+ * lead routes had no equivalent, so ANY counsellor in the tenant could PATCH
+ * any lead — including reassigning `assigned_to_id` to themselves — and then
+ * add, edit, pay, waive or delete that lead's fees. The audit log recorded who
+ * did it, but nothing stopped them: a colleague on leave could return to find
+ * their book rewritten.
+ *
+ * Semantics mirror the student gate:
+ *   - ADMIN bypasses.
+ *   - An UNASSIGNED lead (`assigned_to_id IS NULL`) is open to any counsellor.
+ *     Leads land unassigned from the V2 sync and the shared queue is how they
+ *     get picked up; locking those out would break intake.
+ *   - An ASSIGNED lead is mutable only by its assignee.
+ *   - A missing lead yields the same Forbidden as a foreign one, so the gate
+ *     cannot be used to probe which lead ids exist.
+ */
+export function requireLeadOwnership(idParam = 'id') {
+  return async (req: Request, _res: Response, next: NextFunction) => {
+    try {
+      if (!req.user) throw Unauthorized();
+      if (req.user.role === 'ADMIN') return next();
+      const id = req.params[idParam];
+      if (!id) return next(Forbidden('Missing lead id'));
+      const lead = await prisma.crmLead.findFirst({
+        where: { id, tenant_id: req.user.tid, deleted_at: null },
+        select: { assigned_to_id: true },
+      });
+      if (!lead) return next(Forbidden('Not authorised for this lead'));
+      if (lead.assigned_to_id !== null && lead.assigned_to_id !== req.user.sub) {
+        return next(Forbidden('Not authorised for this lead'));
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+}

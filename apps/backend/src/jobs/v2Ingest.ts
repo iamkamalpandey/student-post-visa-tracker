@@ -365,7 +365,15 @@ export async function ingestForTenant(tenantId: string): Promise<IngestResult> {
 
   // ── 11. Seed post-visa fee schedule (SPVT-owned) from visa-accepted lead-courses ──
   // Hybrid: only when the course has a fee amount AND the lead-course has a start
-  // date to anchor due_on. Idempotent via crm_lead_fees_seed_uq; never clobbers edits.
+  // date to anchor due_on. Never clobbers edits.
+  //
+  // SVT-QA-2026-08 (LEAD-H7) — idempotency now keys on `crm_lead_fees_seed_course_uq`
+  // (lead_id, v2_course_id) instead of the legacy (lead_id, session_label) index.
+  // session_label embeds the V2 course NAME, so renaming a course upstream
+  // ("MBA" → "Master of Business Administration") produced a label that matched
+  // nothing, skipDuplicates did not skip, and a SECOND seeded fee appeared for
+  // the same lead+course — duplicate money rows created by a cosmetic edit.
+  // v2_course_id is stable across renames.
   const visaAccepted = dump.leadCourses.filter(
     (lc) => leadCourseStateEnum(lc.stateV2, lc.state) === 'visa_accepted' && lc.startDate,
   );
@@ -379,6 +387,7 @@ export async function ingestForTenant(tenantId: string): Promise<IngestResult> {
         tx.crmLeadFee.createMany({
           data: [{
             tenant_id: tenantId, lead_id: leadId,
+            v2_course_id: lc.courseId,
             session_label: course?.name ? `${course.name} — Session 1` : 'V2 session fee',
             amount_minor: amount,
             currency: (course?.feeCurrency ?? env.V2_INGEST_DEFAULT_CURRENCY).slice(0, 3).toUpperCase(),

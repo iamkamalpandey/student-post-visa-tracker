@@ -68,7 +68,10 @@ function startsWith(buf: Buffer, sig: number[]): boolean {
  * Sniff the MIME from the first 12 bytes of the buffer.
  * Returns null if no signature matches.
  */
-function sniff(buf: Buffer, hint: string): string | null {
+// Exported for unit coverage (tests/qa-2026-08-guards.spec.ts pins the OOXML
+// container checks). Callers should prefer `detectMime`, which also enforces
+// the allow-list.
+export function sniff(buf: Buffer, hint: string): string | null {
   // %PDF-
   if (startsWith(buf, [0x25, 0x50, 0x44, 0x46, 0x2d])) return 'application/pdf';
 
@@ -100,15 +103,43 @@ function sniff(buf: Buffer, hint: string): string | null {
 
   // OOXML / ZIP: PK\x03\x04
   if (startsWith(buf, [0x50, 0x4b, 0x03, 0x04])) {
-    // We cannot definitively distinguish docx vs xlsx without decompressing
-    // the central directory and inspecting [Content_Types].xml. We trust the
-    // header hint, but only when it is one of the two accepted OOXML types.
-    if (hint === OOXML_DOCX) return OOXML_DOCX;
-    if (hint === OOXML_XLSX) return OOXML_XLSX;
+    // SVT-QA-2026-08 (DOCS-H5) — do NOT trust the client's header hint alone.
+    // Previously any ZIP whatsoever passed as .docx/.xlsx purely because the
+    // caller said so, so an arbitrary archive (or a nested zip bomb) was
+    // stored and later served labelled as an Office document. Recipients get
+    // a corrupt-file error at best; at worst their Office client is asked to
+    // parse attacker-controlled archive structure.
+    //
+    // We now verify the OOXML container shape from the raw bytes. A real
+    // OOXML package always contains a `[Content_Types].xml` entry, and the
+    // part namespace differs by document type (`word/` vs `xl/`). Those
+    // filenames appear as literal ASCII in the local file headers and the
+    // central directory, so a substring scan is sufficient and — unlike
+    // actually inflating the archive — cannot be turned into a decompression
+    // bomb. The claimed type must ALSO match what the container says.
+    const looksOoxml = bufferIncludesAscii(buf, '[Content_Types].xml');
+    if (!looksOoxml) return null;
+    const hasWordParts = bufferIncludesAscii(buf, 'word/');
+    const hasExcelParts = bufferIncludesAscii(buf, 'xl/');
+    if (hint === OOXML_DOCX && hasWordParts && !hasExcelParts) return OOXML_DOCX;
+    if (hint === OOXML_XLSX && hasExcelParts && !hasWordParts) return OOXML_XLSX;
     return null;
   }
 
   return null;
+}
+
+/**
+ * ASCII substring scan over raw bytes.
+ *
+ * Used to inspect ZIP entry names without inflating the archive — entry names
+ * are stored uncompressed in both the local file headers and the central
+ * directory, so they are directly visible in the byte stream. Deliberately
+ * avoids `buf.toString()` on the whole buffer for large uploads: `indexOf`
+ * with a Buffer needle scans in place.
+ */
+function bufferIncludesAscii(buf: Buffer, needle: string): boolean {
+  return buf.indexOf(Buffer.from(needle, 'ascii')) !== -1;
 }
 
 export interface DetectResult {

@@ -48,6 +48,15 @@ vi.mock('../src/config/db.js', () => ({
         store.user && store.user.id === where.id ? store.user : null),
     },
   },
+  // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
+  // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
+  // fails CLOSED on a lookup error, so this export must exist.
+  prismaAdmin: {
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        store.user && store.user.id === where.id ? store.user : null),
+    },
+  },
   disconnectDb: async () => undefined,
 }));
 

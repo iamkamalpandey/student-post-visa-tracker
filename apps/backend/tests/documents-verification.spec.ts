@@ -132,10 +132,28 @@ describe('documents.verify() FSM', () => {
     ).rejects.toMatchObject({ status: 422 });
   });
 
-  it('non-ADMIN cannot call verify (403)', async () => {
+  // SVT-QA-2026-08 (DOCS-H1) — the service used to throw 403 for ANY non-ADMIN,
+  // which contradicted the route: `documents.routes.ts` allows ADMIN +
+  // COUNSELLOR and gates the counsellor with
+  // `requireStudentOwnershipViaChild('document','id')`. The assigned counsellor
+  // is meant to verify their own caseload's documents; they passed both route
+  // middlewares and then hit a hard 403 anyway. The route + ownership gate is
+  // now the authority for the ordinary decision path.
+  it('assigned COUNSELLOR can record an ordinary verification decision', async () => {
     const { ctx } = makeCtx('COUNSELLOR');
-    await expect(verify(ctx, DOC_ID, { verification: 'VERIFIED' })).rejects.toMatchObject({
-      status: 403,
-    });
+    const updated = await verify(ctx, DOC_ID, { verification: 'VERIFIED' });
+    expect((updated as { verification: string }).verification).toBe('VERIFIED');
+  });
+
+  // The privileged half — overriding a TERMINAL decision — stays ADMIN-only.
+  it('non-ADMIN cannot force_override a terminal decision (403)', async () => {
+    const { ctx } = makeCtx('COUNSELLOR');
+    await expect(
+      verify(ctx, DOC_ID, {
+        verification: 'VERIFIED',
+        force_override: true,
+        reason: 'a sufficiently long override reason',
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

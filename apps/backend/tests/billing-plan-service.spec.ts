@@ -331,8 +331,14 @@ describe('plan.service pause/resume', () => {
   });
 });
 
+// SVT-QA-2026-08 (BILL-C1) — getOutstanding returns a PER-CURRENCY array.
+// It previously summed every open installment regardless of currency and
+// labelled the single total with `rows[0].currency`, so a student with a USD
+// and a GBP enrollment was reported as owing the arithmetic sum of both,
+// denominated in whichever row happened to sort first. Real money, wrong
+// number, no warning. Nothing may ever net across ISO currencies.
 describe('plan.service getOutstanding', () => {
-  it('sums INVOICED/DUE/OVERDUE/PARTIAL balances for a student', async () => {
+  it('sums INVOICED/DUE/OVERDUE/PARTIAL balances per currency', async () => {
     const p = await createFeePlan(ctx, {
       enrollment_id: ENROLLMENT,
       cadence: 'MONTHLY',
@@ -345,15 +351,38 @@ describe('plan.service getOutstanding', () => {
       i.status = 'INVOICED';
     }
     const o = await getOutstanding(ctx, { enrollment_id: ENROLLMENT });
-    expect(BigInt(o.total_minor)).toBe(3000n);
-    expect(o.by_status['INVOICED']).toBe('3000');
-    expect(o.oldest_due_on).toBe('2026-09-01');
-    expect(o.currency).toBe('USD');
+    expect(o.by_currency).toHaveLength(1);
+    const usd = o.by_currency[0]!;
+    expect(usd.currency).toBe('USD');
+    expect(BigInt(usd.total_minor)).toBe(3000n);
+    expect(usd.by_status['INVOICED']).toBe('3000');
+    expect(usd.oldest_due_on).toBe('2026-09-01');
   });
 
-  it('returns zero when no open installments', async () => {
+  it('keeps currencies separate instead of netting them into one total', async () => {
+    const p = await createFeePlan(ctx, {
+      enrollment_id: ENROLLMENT,
+      cadence: 'MONTHLY',
+      total_minor: 3000n,
+      installment_count: 3,
+      starts_on: '2026-09-01',
+    });
+    const mine = store.installments.filter((x) => x.fee_plan_id === p.id);
+    for (const i of mine) i.status = 'INVOICED';
+    // Re-denominate one installment: a genuinely multi-currency portfolio.
+    mine[0]!.currency = 'GBP';
+
     const o = await getOutstanding(ctx, { enrollment_id: ENROLLMENT });
-    expect(BigInt(o.total_minor)).toBe(0n);
-    expect(o.oldest_due_on).toBeNull();
+    const byCode = Object.fromEntries(o.by_currency.map((b) => [b.currency, b]));
+    expect(Object.keys(byCode).sort()).toEqual(['GBP', 'USD']);
+    expect(BigInt(byCode['GBP']!.total_minor)).toBe(1000n);
+    expect(BigInt(byCode['USD']!.total_minor)).toBe(2000n);
+    // The old code would have reported 3000 "USD" here.
+    expect(o.by_currency.some((b) => BigInt(b.total_minor) === 3000n)).toBe(false);
+  });
+
+  it('returns an empty array when no open installments', async () => {
+    const o = await getOutstanding(ctx, { enrollment_id: ENROLLMENT });
+    expect(o.by_currency).toEqual([]);
   });
 });

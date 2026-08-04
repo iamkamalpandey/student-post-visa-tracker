@@ -358,6 +358,20 @@ function makePrismaMock() {
     commissionClaim: wrappedClaim,
     idempotencyRecord: idemDelegate,
     accessTokenDenylist: { findUnique: vi.fn(async () => null) },
+    // SVT-QA-2026-08 — commission FSM transitions are money-movers and now
+    // carry `requireMfa({ enrollmentRequired: true })`, which resolves the
+    // acting user through `prisma.user.findUnique`. Without this delegate the
+    // lookup threw and the middleware failed CLOSED with 503 (correct
+    // behaviour, wrong fixture). The admin is enrolled; `verifyTotp` is
+    // shimmed below so '123456' is the one accepted code.
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        tenant_id: TENANT_A,
+        mfa_enabled: true,
+        mfa_secret_enc: Buffer.from('TESTSECRET', 'utf8'),
+      })),
+    },
     auditLog: {
       findFirst: vi.fn(async () => null),
       create: vi.fn(async () => ({})),
@@ -376,8 +390,29 @@ function makePrismaMock() {
 
 const prismaMock = makePrismaMock();
 
+// SVT-QA-2026-08 — monotonic 6-digit TOTP codes so no two requests in this
+// suite present the same code to the anti-replay cache. See the auth.totp mock.
+let mfaCodeSeq = 100_000;
+function freshMfaCode(): string {
+  mfaCodeSeq += 1;
+  return String(mfaCodeSeq);
+}
+
 vi.mock('../src/config/db.js', () => ({
   prisma: prismaMock,
+  // SVT-QA-2026-08 — `authenticate` resolves `User.sessions_valid_from` for the
+  // session-wide access-token revoke check, and does so through the BYPASS-RLS
+  // client because it runs BEFORE tenantContext sets the app.tenant_id GUC
+  // (under the spv_app role a plain `prisma` read would be filtered to null and
+  // the revoke check would silently no-op). The middleware fails CLOSED with
+  // 503 when that lookup throws, so a fixture missing this export turns every
+  // authenticated request in the suite into a 503.
+  prismaAdmin: {
+    // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
+    // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
+    // fails CLOSED when the lookup throws. null = "no revocation on record".
+    user: { findUnique: async () => ({ sessions_valid_from: null }) },
+  },
   disconnectDb: async () => undefined,
 }));
 
@@ -395,6 +430,20 @@ vi.mock('../src/shared/audit.js', () => ({
       after: ev.after,
     });
   }),
+}));
+
+// SVT-QA-2026-08 — TOTP shim for the step-up gate now mounted on every
+// commission money-mover.
+//
+// Unlike billing-mfa-step-up.spec.ts (which pins a single valid code), this
+// suite fires the SAME logical request twice to prove Idempotency-Key replay.
+// `requireMfa` runs BEFORE `requireIdempotencyKey` in the middleware chain, so
+// the second call still reaches the step-up check — and reusing one code would
+// trip the anti-replay cache, masking the idempotency behaviour we are actually
+// asserting. So the shim accepts any well-formed 6-digit code and each request
+// draws a fresh one from `freshMfaCode()`.
+vi.mock('../src/modules/auth/auth.totp.js', () => ({
+  verifyTotp: vi.fn((_secret: string, code: string) => /^\d{6}$/.test(code)),
 }));
 
 vi.mock('../src/shared/encryption.js', () => ({
@@ -419,6 +468,9 @@ vi.mock('../src/shared/hashing.js', async () => {
 
 const { commissionsRouter } = await import('../src/modules/commissions/routes.js');
 const { authenticate } = await import('../src/middlewares/auth.js');
+const { __resetMfaThrottleForTests, __resetMfaReplayCacheForTests } = await import(
+  '../src/middlewares/requireMfa.js'
+);
 const { tenantContext } = await import('../src/middlewares/tenantContext.js');
 const { errorHandler, notFoundHandler } = await import('../src/middlewares/errorHandler.js');
 const { signAccessToken } = await import('../src/shared/jwt.js');
@@ -452,6 +504,13 @@ beforeAll(() => {
 
 beforeEach(() => {
   resetStore();
+  // SVT-QA-2026-08 — every commission FSM transition is now MFA-gated, and
+  // `requireMfa` caps step-up attempts at 10/min/user. This suite fires ~20
+  // mutating requests as the same ADMIN, so without a reset the later half
+  // would 429 on the throttle rather than exercise the route. Also wipe the
+  // anti-replay store so a fresh code is never mistaken for a reused one.
+  __resetMfaThrottleForTests();
+  __resetMfaReplayCacheForTests();
 });
 
 describe('GET /api/v1/commissions', () => {
@@ -479,7 +538,9 @@ describe('state machine', () => {
     const seeded = seedPendingClaim();
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/claim`)
-      .set('Authorization', `Bearer ${tok}`);
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode());
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('CLAIMED');
     expect(res.body.claimed_on).toBeTruthy();
@@ -496,6 +557,7 @@ describe('state machine', () => {
         .post(`/api/v1/commissions/${seeded.id}/invoice`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
         .send({});
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('INVOICED');
@@ -514,6 +576,7 @@ describe('state machine', () => {
       .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
       .set('Authorization', `Bearer ${tok}`)
       .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({ paid_on: '2026-05-14', payment_reference: 'WIRE-12345' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('PAID');
@@ -529,6 +592,7 @@ describe('state machine', () => {
       .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
       .set('Authorization', `Bearer ${tok}`)
       .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({ paid_on: '2026-05-14', received_minor: '90000' }); // claimed 100000, $100 short
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('PAID');
@@ -547,6 +611,7 @@ describe('state machine', () => {
       .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
       .set('Authorization', `Bearer ${tok}`)
       .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({ paid_on: '2026-05-14' });
     const paid = auditCalls.find((c) => c.action === 'commission_claim.paid') as
       | { after?: { received_minor?: unknown; variance_minor?: unknown } }
@@ -562,6 +627,8 @@ describe('state machine', () => {
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/dispute`)
       .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({ dispute_reason: 'Wrong amount' });
     expect(res.status).toBe(409);
     expect(res.body.title).toBe('Conflict');
@@ -574,6 +641,8 @@ describe('state machine', () => {
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/dispute`)
       .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({ dispute_reason: 'Counterparty disputes the calculation' });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('DISPUTED');
@@ -585,7 +654,9 @@ describe('state machine', () => {
     seeded.status = 'CLAIMED';
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/waive`)
-      .set('Authorization', `Bearer ${tok}`);
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode());
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('WAIVED');
   });
@@ -597,7 +668,9 @@ describe('role gating', () => {
     const seeded = seedPendingClaim();
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/claim`)
-      .set('Authorization', `Bearer ${tok}`);
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode());
     expect(res.status).toBe(403);
   });
 
@@ -606,7 +679,9 @@ describe('role gating', () => {
     const seeded = seedPendingClaim();
     const res = await request(app)
       .post(`/api/v1/commissions/${seeded.id}/claim`)
-      .set('Authorization', `Bearer ${tok}`);
+      .set('Authorization', `Bearer ${tok}`)
+      .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode());
     expect(res.status).toBe(403);
   });
 });
@@ -620,6 +695,7 @@ describe('validation', () => {
       .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
       .set('Authorization', `Bearer ${tok}`)
       .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
       .send({});
     expect(res.status).toBe(422);
     expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
@@ -639,6 +715,7 @@ describe('idempotency', () => {
         .post(`/api/v1/commissions/${seeded.id}/invoice`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', idemKey)
+      .set('X-MFA-Code', freshMfaCode())
         .send({});
       expect(first.status).toBe(200);
       expect(first.body.status).toBe('INVOICED');
@@ -653,6 +730,7 @@ describe('idempotency', () => {
         .post(`/api/v1/commissions/${seeded.id}/invoice`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', idemKey)
+      .set('X-MFA-Code', freshMfaCode())
         .send({});
       expect(second.status).toBe(200);
       expect(second.headers['idempotent-replayed']).toBe('true');
@@ -717,6 +795,7 @@ describe('resolve-dispute', () => {
         .post(`/api/v1/commissions/${seeded.id}/resolve-dispute`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
         .send({});
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('INVOICED');
@@ -741,6 +820,7 @@ describe('resolve-dispute', () => {
           .post(`/api/v1/commissions/${seeded.id}/resolve-dispute`)
           .set('Authorization', `Bearer ${tok}`)
           .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
           .send({});
         expect(res.status).toBe(409);
         expect(res.body.title).toBe('Conflict');
@@ -763,6 +843,7 @@ describe('resolve-dispute', () => {
         .post(`/api/v1/commissions/${seeded.id}/resolve-dispute`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', idemKey)
+      .set('X-MFA-Code', freshMfaCode())
         .send({ resolution_notes: 'Counterparty agreed after review.' });
       expect(first.status).toBe(200);
       expect(first.body.status).toBe('INVOICED');
@@ -772,6 +853,7 @@ describe('resolve-dispute', () => {
         .post(`/api/v1/commissions/${seeded.id}/resolve-dispute`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', idemKey)
+      .set('X-MFA-Code', freshMfaCode())
         .send({ resolution_notes: 'Counterparty agreed after review.' });
       expect(second.status).toBe(200);
       expect(second.headers['idempotent-replayed']).toBe('true');
@@ -795,16 +877,20 @@ describe('audit row sequence', () => {
 
       await request(app)
         .post(`/api/v1/commissions/${seeded.id}/claim`)
-        .set('Authorization', `Bearer ${tok}`);
+        .set('Authorization', `Bearer ${tok}`)
+        .set('Idempotency-Key', randomUUID())
+        .set('X-MFA-Code', freshMfaCode());
       await request(app)
         .post(`/api/v1/commissions/${seeded.id}/invoice`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
         .send({});
       await request(app)
         .post(`/api/v1/commissions/${seeded.id}/mark-paid`)
         .set('Authorization', `Bearer ${tok}`)
         .set('Idempotency-Key', randomUUID())
+      .set('X-MFA-Code', freshMfaCode())
         .send({ paid_on: '2026-05-14' });
 
       const actions = auditCalls.filter((c) => c.entityId === seeded.id).map((c) => c.action);

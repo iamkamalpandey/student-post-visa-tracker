@@ -93,7 +93,7 @@ vi.mock('../src/config/db.js', () => {
     $executeRaw: vi.fn(async () => 1),
     $queryRaw: vi.fn(async () => [{ entry_hash: null }]),
   };
-  return { prisma, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 const { authenticate } = await import('../src/middlewares/auth.js');

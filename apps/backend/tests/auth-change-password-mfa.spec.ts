@@ -57,6 +57,19 @@ vi.mock('../src/config/db.js', () => ({
     accessTokenDenylist: { findUnique: vi.fn(async () => null) },
     refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
   },
+  // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
+  // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
+  // fails CLOSED on a lookup error, so this export must exist.
+  prismaAdmin: {
+    user: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        store.user && store.user.id === where.id ? store.user : null),
+      update: vi.fn(async () => ({})),
+    },
+    refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    $transaction: vi.fn(async (ops: unknown) =>
+      Array.isArray(ops) ? Promise.all(ops) : ops),
+  },
   disconnectDb: async () => undefined,
 }));
 
