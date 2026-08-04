@@ -105,8 +105,19 @@ async function resolveMoney(
 ): Promise<bigint | undefined> {
   const minorRaw = pick(row, minorKey);
   if (minorRaw !== undefined) {
-    if (!/^-?\d+$/.test(minorRaw)) {
-      errors.push({ field: minorKey, message: 'must be an integer (minor units)' });
+    // SVT-FIN-2026-08 — the regex here used to be /^-?\d+$/, accepting a
+    // leading minus. The importer writes straight to Prisma without re-running
+    // the API schema (which does enforce .nonnegative()), so a CSV row carrying
+    // tuition_total_minor = -100000000 was written verbatim — and an ACCEPTED
+    // enrollment then auto-created a commission claim of -10000000, which
+    // summary() summed into outstanding_total_minor as a fabricated credit
+    // netting against real receivables. Tuition is never negative; a refund or
+    // discount is modelled as an adjustment, not as negative tuition.
+    if (!/^\d+$/.test(minorRaw)) {
+      errors.push({
+        field: minorKey,
+        message: 'must be a non-negative integer (minor units)',
+      });
       return undefined;
     }
     return BigInt(minorRaw);
@@ -128,6 +139,12 @@ async function resolveMoney(
   const v = majorToMinor(majorRaw, cur.minor_unit);
   if (v === null) {
     errors.push({ field: majorKey, message: 'invalid decimal amount' });
+    return undefined;
+  }
+  // SVT-FIN-2026-08 — same rule as the minor-unit branch above: tuition is
+  // never negative, and this path also bypasses the API schema's .nonnegative().
+  if (v < 0n) {
+    errors.push({ field: majorKey, message: 'must be a non-negative amount' });
     return undefined;
   }
   return v;

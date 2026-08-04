@@ -594,8 +594,23 @@ that only reports confirmations is not an audit.
   an explicit product decision, not a silent code change.
 - **CRM lead fees have no PARTIAL state**, so a part payment is recorded as
   `PAID` with a smaller `paid_amount_minor` and the shortfall leaves the books.
-- **No CHECK constraints on `commission_claims.amount_minor` / `basis_minor` /
-  `enrollments.tuition_total_minor`**, and the CSV importer accepts a leading
-  `-`, bypassing the API schema's `.nonnegative()`.
 - **A reconciliation job** asserting the invariants across a live tenant still
   needs a working Postgres to be written against.
+
+### Follow-up in the same wave — non-negative money constraints
+
+Migration `20991231236004_money_nonneg_checks` adds `NOT VALID` CHECK
+constraints to the three money columns that never had one
+(`enrollments.tuition_total_minor`, `commission_claims.amount_minor`,
+`commission_claims.basis_minor`, plus `received_minor`) and the missing
+paid-vs-billed cap on `crm_lead_fees`. `NOT VALID` means they bind every future
+write immediately without scanning history, so the migration takes no long lock
+and cannot fail on legacy rows — those are a data-quality question to answer
+separately rather than something to silently rewrite.
+
+The matching application-layer hole is closed too: the enrollment CSV mapper's
+regex was `/^-?\d+$/`, accepting a leading minus and writing straight to Prisma
+without re-running the API schema's `.nonnegative()`. A tuition of
+`-100000000` auto-created a commission claim of `-10000000` that `summary()`
+summed into `outstanding_total_minor` as a fabricated credit netting against
+real receivables. Both the minor-unit and major-unit branches now reject it.
