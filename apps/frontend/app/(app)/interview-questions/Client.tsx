@@ -298,15 +298,26 @@ export default function InterviewQuestionsPage() {
                             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{row.sort_order}</Typography>
                           </TableCell>
                           <TableCell>
+                            {/* SVT-A11Y-2026-08 — a bare Switch in a table row
+                                has no label, so a screen reader announces
+                                "checkbox" with no indication of WHAT it
+                                toggles. Name it from the row. */}
                             <Switch
                               size="small"
                               checked={row.is_active}
+                              inputProps={{
+                                'aria-label': `Toggle active for question: ${row.question_text.slice(0, 60)}`,
+                              }}
                               onChange={(_, v) => toggleActiveMutation.mutate({ id: row.id, is_active: v })}
                               disabled={toggleActiveMutation.isPending}
                             />
                           </TableCell>
                           <TableCell align="right">
-                            <IconButton size="small" onClick={(e) => setRowMenu({ anchor: e.currentTarget, row })}>
+                            <IconButton
+                              size="small"
+                              aria-label="More actions for this question"
+                              onClick={(e) => setRowMenu({ anchor: e.currentTarget, row })}
+                            >
                               <MoreVertOutlinedIcon fontSize="small" />
                             </IconButton>
                           </TableCell>

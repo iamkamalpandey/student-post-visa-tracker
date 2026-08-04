@@ -108,7 +108,14 @@ export default function LegalLayout({ children }: { children: ReactNode }) {
         }}
       >
         <Container maxWidth="md">
-          <Typography variant="caption" color="text.secondary">
+          {/* SVT-QA-2026-08 — this is a client component on a PUBLIC route, so
+              it is server-rendered too. If the year ticks over between the SSR
+              render and hydration (New Year's Eve, or a server in a different
+              zone), the text differs and React logs a hydration mismatch.
+              `suppressHydrationWarning` is the sanctioned escape hatch for
+              exactly this case — a value that is legitimately time-dependent
+              and cosmetic. The client value wins, which is the correct one. */}
+          <Typography variant="caption" color="text.secondary" suppressHydrationWarning>
             &copy; {new Date().getFullYear()} {APP_NAME}
           </Typography>
         </Container>

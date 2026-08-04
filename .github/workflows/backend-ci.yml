@@ -114,6 +114,19 @@ jobs:
       - name: Prisma generate
         run: pnpm --filter backend prisma:generate
 
+      # SVT-QA-2026-08 — apply the REAL migrations, not `db push`.
+      #
+      # Two things this buys, both previously untested anywhere:
+      #   1. The ~50 migration files are exercised on every push. Before this,
+      #      a broken migration was only discovered during a production deploy.
+      #   2. The RLS policies, triggers and hash-chain functions live in
+      #      raw-SQL migrations that `prisma db push` SKIPS entirely. Without
+      #      this step, tests/rls-enforcement.integration.spec.ts has no
+      #      policies to assert against and fails loudly (by design) rather
+      #      than passing vacuously.
+      - name: Prisma migrate deploy (exercises every migration + creates RLS policies)
+        run: pnpm --filter backend prisma:migrate:deploy
+
       - name: Lint
         run: pnpm --filter backend lint
 

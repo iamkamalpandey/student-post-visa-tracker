@@ -87,17 +87,30 @@ export type RowActionsProps = {
   onEdit?: () => void;
   onDelete?: () => void;
   canWrite: boolean;
+  /**
+   * SVT-A11Y-2026-08 — what these buttons act on, e.g. "contact Jane Doe" or
+   * "passport identification". Used to build the accessible name so a screen
+   * reader announces "Edit contact Jane Doe" instead of a bare "button" — and,
+   * critically, so a table of ten rows doesn't present ten identically-named
+   * "Edit" buttons with no way to tell them apart. WCAG 2.2 SC 4.1.2.
+   *
+   * Optional so existing call sites keep working; they degrade to the generic
+   * "Edit"/"Delete" name, which is still a name (the previous code had none).
+   */
+  itemLabel?: string;
 };
 
 /** Inline edit / delete icon-buttons rendered in the trailing cell of each row. */
-export function RowActions({ onEdit, onDelete, canWrite }: RowActionsProps) {
+export function RowActions({ onEdit, onDelete, canWrite, itemLabel }: RowActionsProps) {
   if (!canWrite) return <span aria-hidden>—</span>;
+  const suffix = itemLabel ? ` ${itemLabel}` : '';
   return (
     <Stack direction="row" spacing={0.5} justifyContent="flex-end">
       {onEdit ? (
         <Tooltip title="Edit">
           <IconButton
             size="small"
+            aria-label={`Edit${suffix}`}
             onClick={(e) => {
               e.stopPropagation();
               onEdit();
@@ -112,6 +125,7 @@ export function RowActions({ onEdit, onDelete, canWrite }: RowActionsProps) {
           <IconButton
             size="small"
             color="error"
+            aria-label={`Delete${suffix}`}
             onClick={(e) => {
               e.stopPropagation();
               onDelete();

@@ -96,8 +96,14 @@ function TrendStrip({
   // Pivot rows into per-day {sent, failed} totals.
   const byDay = new Map<string, { sent: number; failed: number }>();
   // Fill the trailing 7 days so empty days still render.
+  //
+  // SVT-QA-2026-08 — anchor every key off ONE `now`. Calling `new Date()`
+  // inside the loop meant the seven keys could straddle a UTC midnight if the
+  // loop happened to run across it, so a server-returned `r.day` could match
+  // no bucket and that day's bar would silently vanish from the trend strip.
+  const now = new Date();
   for (let i = 6; i >= 0; i -= 1) {
-    const d = new Date();
+    const d = new Date(now);
     d.setUTCDate(d.getUTCDate() - i);
     const key = d.toISOString().slice(0, 10);
     byDay.set(key, { sent: 0, failed: 0 });
@@ -368,7 +374,14 @@ export default function OutboxClient() {
           />
         ) : null}
         <Tooltip title="Refresh">
-          <IconButton onClick={() => void qc.invalidateQueries({ queryKey: ['admin', 'outbox'] })} size="small">
+          {/* SVT-A11Y-2026-08 — a Tooltip supplies a description, NOT an
+              accessible name. Without aria-label a screen reader announces
+              only "button". WCAG 2.2 SC 4.1.2 (Name, Role, Value). */}
+          <IconButton
+            aria-label="Refresh outbox"
+            onClick={() => void qc.invalidateQueries({ queryKey: ['admin', 'outbox'] })}
+            size="small"
+          >
             <RefreshOutlinedIcon />
           </IconButton>
         </Tooltip>

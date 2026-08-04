@@ -260,6 +260,7 @@ export default function FeeListDialog({
                         <TableCell align="right">
                           <IconButton
                             size="small"
+                            aria-label="Delete fee"
                             onClick={() => setPendingDeleteFeeId(f.id)}
                           >
                             <DeleteOutlineIcon fontSize="small" />

@@ -30,6 +30,7 @@ import { assertOrThrow } from '../../shared/fsm.js';
 import { dsarFsm } from './fsm-def.js';
 import { getStorage } from '../documents/storage.js';
 import { decryptField } from '../../shared/encryption.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type {
   CreateDSARRequest,
@@ -686,7 +687,21 @@ function documentExportLink(docId: string): string {
 }
 
 // SVT-WAVE-PRIV-C1-2026-05 — collect every Student-owned row.
-async function buildStudentBundle(studentId: string, tenantId: string): Promise<Record<string, unknown>> {
+//
+// SVT-QA-2026-08 (DSAR-H1) — takes the tenant-scoped client explicitly. This
+// used to issue ~35 reads against the raw `prisma` singleton with no
+// `app.tenant_id` GUC set. Every WHERE carries `tenant_id`, so it works today
+// under the BYPASSRLS `doadmin` role — but under the `spv_app` runtime role
+// the RLS policies would filter every one of them to zero rows and the Art. 15
+// export would silently return an EMPTY bundle. That is a compliance-visible
+// correctness break, not a defence-in-depth nicety: the subject receives a
+// bundle claiming we hold no data on them. `exportBundle` now opens a single
+// `withTenantTx` and threads the transactional client through.
+async function buildStudentBundle(
+  db: Prisma.TransactionClient,
+  studentId: string,
+  tenantId: string,
+): Promise<Record<string, unknown>> {
   const where = { student_id: studentId, tenant_id: tenantId };
 
   // We pull in raw Prisma rows — they include the *_enc Buffers. The
@@ -711,24 +726,24 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
     entityTags,
     commsThreads,
   ] = await Promise.all([
-    prisma.student.findFirst({ where: { id: studentId, tenant_id: tenantId } }),
-    prisma.studentAddress.findMany({ where }),
-    prisma.studentIdentification.findMany({ where }),
-    prisma.studentVisa.findMany({ where }),
-    prisma.studentRegulatorIdentifier.findMany({ where }),
-    prisma.enrollment.findMany({ where }),
-    prisma.complianceCheck.findMany({ where }),
-    prisma.engagementCheck.findMany({ where }),
-    prisma.studentEmployment.findMany({ where }),
-    prisma.studentDependent.findMany({ where }),
-    prisma.studentContact.findMany({ where }),
-    prisma.studentSponsorship.findMany({ where }),
-    prisma.document.findMany({ where }),
-    prisma.academicQualification.findMany({ where }),
-    prisma.languageTestResult.findMany({ where }),
-    prisma.note.findMany({ where: { entity_type: 'student', entity_id: studentId, tenant_id: tenantId } }),
-    prisma.entityTag.findMany({ where: { entity_type: 'student', entity_id: studentId, tenant_id: tenantId } }),
-    prisma.commsThread.findMany({ where: { student_id: studentId, tenant_id: tenantId } }),
+    db.student.findFirst({ where: { id: studentId, tenant_id: tenantId } }),
+    db.studentAddress.findMany({ where }),
+    db.studentIdentification.findMany({ where }),
+    db.studentVisa.findMany({ where }),
+    db.studentRegulatorIdentifier.findMany({ where }),
+    db.enrollment.findMany({ where }),
+    db.complianceCheck.findMany({ where }),
+    db.engagementCheck.findMany({ where }),
+    db.studentEmployment.findMany({ where }),
+    db.studentDependent.findMany({ where }),
+    db.studentContact.findMany({ where }),
+    db.studentSponsorship.findMany({ where }),
+    db.document.findMany({ where }),
+    db.academicQualification.findMany({ where }),
+    db.languageTestResult.findMany({ where }),
+    db.note.findMany({ where: { entity_type: 'student', entity_id: studentId, tenant_id: tenantId } }),
+    db.entityTag.findMany({ where: { entity_type: 'student', entity_id: studentId, tenant_id: tenantId } }),
+    db.commsThread.findMany({ where: { student_id: studentId, tenant_id: tenantId } }),
   ]);
 
   if (!student) throw NotFound(`Student ${studentId} not found in tenant`);
@@ -745,7 +760,7 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
   // Pull comms messages across all of the subject's threads.
   let commsMessages: Array<Record<string, unknown>> = [];
   if (commsThreads.length > 0) {
-    const rows = await prisma.commsMessage.findMany({
+    const rows = await db.commsMessage.findMany({
       where: { thread_id: { in: commsThreads.map((t) => t.id) } },
       take: 50_000, // SVT-SYNC-2026-06: bound DSAR export to prevent OOM on large tenants.
       orderBy: { created_at: 'asc' },
@@ -771,7 +786,7 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
   // student's originating lead (crm_lead.student_id) and its children hold subject
   // PII the native tables don't carry (guardians, payments, remarks, call/visit/
   // follow-up history, education + test history). Include them when a lead exists.
-  const crmLead = await prisma.crmLead.findFirst({ where: { student_id: studentId, tenant_id: tenantId } });
+  const crmLead = await db.crmLead.findFirst({ where: { student_id: studentId, tenant_id: tenantId } });
   let crm: Record<string, unknown> | null = null;
   if (crmLead) {
     const leadWhere = { lead_id: crmLead.id, tenant_id: tenantId };
@@ -781,19 +796,19 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
       crmApplications, crmLeadCourses, crmCourseHistory, crmAssignments,
       crmQualifications, crmLanguageTests, crmFees,
     ] = await Promise.all([
-      prisma.crmGuardian.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmPayment.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmRemark.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmCallHistory.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmFollowUp.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmVisit.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmApplication.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmLeadCourse.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmLeadCourseHistory.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmAssignment.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmQualification.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmLanguageTest.findMany({ where: leadWhere, take: TAKE }),
-      prisma.crmLeadFee.findMany({ where: leadWhere, take: TAKE }),
+      db.crmGuardian.findMany({ where: leadWhere, take: TAKE }),
+      db.crmPayment.findMany({ where: leadWhere, take: TAKE }),
+      db.crmRemark.findMany({ where: leadWhere, take: TAKE }),
+      db.crmCallHistory.findMany({ where: leadWhere, take: TAKE }),
+      db.crmFollowUp.findMany({ where: leadWhere, take: TAKE }),
+      db.crmVisit.findMany({ where: leadWhere, take: TAKE }),
+      db.crmApplication.findMany({ where: leadWhere, take: TAKE }),
+      db.crmLeadCourse.findMany({ where: leadWhere, take: TAKE }),
+      db.crmLeadCourseHistory.findMany({ where: leadWhere, take: TAKE }),
+      db.crmAssignment.findMany({ where: leadWhere, take: TAKE }),
+      db.crmQualification.findMany({ where: leadWhere, take: TAKE }),
+      db.crmLanguageTest.findMany({ where: leadWhere, take: TAKE }),
+      db.crmLeadFee.findMany({ where: leadWhere, take: TAKE }),
     ]);
     crm = {
       lead: crmLead,
@@ -846,10 +861,16 @@ async function buildStudentBundle(studentId: string, tenantId: string): Promise<
   };
 }
 
-async function buildUserBundle(userId: string, tenantId: string): Promise<Record<string, unknown>> {
+// SVT-QA-2026-08 (DSAR-H1) — same tenant-scoped-client contract as
+// buildStudentBundle above; see that comment for why.
+async function buildUserBundle(
+  db: Prisma.TransactionClient,
+  userId: string,
+  tenantId: string,
+): Promise<Record<string, unknown>> {
   const [user, refreshTokens, consents, audit] = await Promise.all([
-    prisma.user.findFirst({ where: { id: userId, tenant_id: tenantId } }),
-    prisma.refreshToken.findMany({
+    db.user.findFirst({ where: { id: userId, tenant_id: tenantId } }),
+    db.refreshToken.findMany({
       where: { user_id: userId, tenant_id: tenantId },
       // Metadata only — never expose the actual token_hash, which is a
       // privileged credential reference even after hashing.
@@ -864,10 +885,10 @@ async function buildUserBundle(userId: string, tenantId: string): Promise<Record
         last_used_at: true,
       },
     }),
-    prisma.consentRecord.findMany({
+    db.consentRecord.findMany({
       where: { tenant_id: tenantId, subject_type: 'user', subject_id: userId },
     }),
-    prisma.auditLog.findMany({
+    db.auditLog.findMany({
       where: { tenant_id: tenantId, actor_id: userId },
       orderBy: { created_at: 'desc' },
       // Soft cap so an extremely active admin doesn't generate a multi-GB
@@ -921,14 +942,20 @@ export async function exportSubject(opts: {
   subjectId: string;
   tenantId: string;
 }): Promise<{ storageKey: string; downloadUrl: string; expiresAt: Date; sizeBytes: number }> {
-  let bundle: Record<string, unknown>;
-  if (opts.subjectType === 'student') {
-    bundle = await buildStudentBundle(opts.subjectId, opts.tenantId);
-  } else if (opts.subjectType === 'user') {
-    bundle = await buildUserBundle(opts.subjectId, opts.tenantId);
-  } else {
+  // SVT-QA-2026-08 (DSAR-H1) — one tenant-scoped transaction for the whole
+  // bundle. Beyond making the reads RLS-correct under `spv_app`, this also
+  // gives the export a CONSISTENT SNAPSHOT: previously the ~35 reads ran as
+  // independent statements, so a concurrent write mid-export could produce a
+  // bundle where, say, the document list and the enrolment list disagreed.
+  // An Art. 15 response should be a coherent point-in-time answer.
+  if (opts.subjectType !== 'student' && opts.subjectType !== 'user') {
     throw UnprocessableEntity(`Cannot export subject_type=${opts.subjectType}`);
   }
+  const bundle: Record<string, unknown> = await withTenantTx(opts.tenantId, async (tx) =>
+    opts.subjectType === 'student'
+      ? buildStudentBundle(tx, opts.subjectId, opts.tenantId)
+      : buildUserBundle(tx, opts.subjectId, opts.tenantId),
+  );
   bundle['__dsar_id__'] = opts.dsarId;
   bundle['__dsar_type__'] = opts.dsarType;
 

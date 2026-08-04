@@ -1,7 +1,7 @@
 // Refactored to SVT form-pattern
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslations } from 'next-intl';
@@ -130,6 +130,10 @@ export default function CalendarPage() {
   const [enabledKinds, setEnabledKinds] = useState<Set<ExpiryKind>>(
     () => new Set<ExpiryKind>(KINDS),
   );
+  // SVT-QA-2026-08 — see `todayKey` below: the month cursor also seeds from the
+  // wall clock. Kept as a lazy initializer (it only affects WHICH month is
+  // shown, not per-cell markup that must match a server render) but pinned to
+  // UTC so it agrees with the UTC-keyed day cells it drives.
   const [cursor, setCursor] = useState<Date>(() => startOfMonth(new Date()));
 
   const expiriesQuery = useQuery<ExpiryRow[]>({
@@ -167,11 +171,20 @@ export default function CalendarPage() {
   const monthLabel =
     fmt.date(`${monthStart.getUTCFullYear()}-${String(monthStart.getUTCMonth() + 1).padStart(2, '0')}-01`) ||
     monthStart.toLocaleString('default', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-  const todayKey = ymd(new Date(Date.UTC(
-    new Date().getUTCFullYear(),
-    new Date().getUTCMonth(),
-    new Date().getUTCDate(),
-  )));
+  // SVT-QA-2026-08 — `todayKey` drives the "is today" cell border and font
+  // weight, i.e. it renders into markup. Computing it during render means the
+  // value can differ between the initial render and a subsequent one if the
+  // clock crosses UTC midnight in between, producing a hydration mismatch of
+  // exactly the kind that caused React #418 on the dashboard. Compute it once,
+  // post-mount. Empty string until then simply means "no cell is today yet",
+  // which is correct for a frame that hasn't resolved the clock.
+  const [todayKey, setTodayKey] = useState('');
+  useEffect(() => {
+    const now = new Date();
+    setTodayKey(
+      ymd(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))),
+    );
+  }, []);
 
   function toggleKind(k: ExpiryKind) {
     setEnabledKinds((prev) => {
