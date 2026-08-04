@@ -621,6 +621,13 @@ class AuthService {
               expires_at: expiresAt,
             },
           });
+          // SVT-PERF-2026-08 — `authenticate` keeps a short negative cache of
+          // "this JTI is not denylisted" to avoid a per-request lookup. Drop
+          // this token's entry the moment it IS denylisted so the revocation
+          // takes effect on the very next request rather than after the cache
+          // TTL. Without this the perf cache would widen the logout window.
+          const { invalidateDenylistCache } = await import('../../middlewares/auth.js');
+          invalidateDenylistCache(accessJti);
         } catch (err) {
         // SVT-AUDIT-SEC-2026-05 — fail-CLOSED on logout. The previous catch
         // swallowed every error including DB outages, which would silently

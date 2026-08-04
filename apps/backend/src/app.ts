@@ -2,6 +2,7 @@ import './shared/bigint-serializer.js';
 import express, { type Express } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import compression from 'compression';
 import cookieParser from 'cookie-parser';
 // SVT-TYPES-2026-05 — pino-http's CJS module sets `module.exports = pinoLogger`
 // plus `module.exports.default = pinoLogger` plus `module.exports.pinoHttp = ...`.
@@ -173,6 +174,26 @@ export function createApp(): Express {
   );
   app.use(express.urlencoded({ extended: false, limit: '256kb' }));
   app.use(cookieParser());
+  // SVT-PERF-2026-08 — gzip/deflate JSON responses. The API is almost entirely
+  // JSON list payloads, which compress 70–85%. On a metered egress plan that is
+  // a direct, linear bill reduction, and it cuts time-to-first-byte on the
+  // slow mobile connections counsellors actually use in the field.
+  //
+  // `threshold` skips tiny bodies where the framing overhead would exceed the
+  // saving. Document *downloads* are deliberately excluded: they are already
+  // compressed formats (PDF/JPEG/PNG/OOXML) so re-compressing burns CPU for
+  // nothing, and streaming them through the compressor would buffer bytes we
+  // want to pass straight through.
+  app.use(
+    compression({
+      threshold: 1024,
+      filter: (req, res) => {
+        if (req.path.includes('/documents/') && req.path.endsWith('/stream')) return false;
+        if (res.getHeader('Content-Encoding')) return false;
+        return compression.filter(req, res);
+      },
+    }),
+  );
   app.use(securityHeaders);
   app.use(globalLimiter);
 

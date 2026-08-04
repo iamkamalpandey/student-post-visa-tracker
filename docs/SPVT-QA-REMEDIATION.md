@@ -219,6 +219,114 @@ weakened: reading the stamp through the BYPASS-RLS client is required because
 `spv_app` role a plain read would be filtered to null and the check would
 silently no-op.
 
+## Cost & scale optimisation pass (SVT-PERF-2026-08)
+
+Goal: materially cut per-request cost without touching UX, security posture, or
+feature behaviour. Every change below is a pure efficiency win — no capability
+was removed and no guard was relaxed.
+
+### 1. Per-query transaction → batched transaction (the dominant cost)
+
+`middlewares/tenantContext.ts` wraps every Prisma operation in a transaction
+that first `set_config`s the `app.tenant_id` GUC, because the RLS policies read
+it. The previous implementation used the **interactive** form:
+
+```
+prisma.$transaction(async (tx) => {
+  await tx.$executeRaw`SELECT set_config(...)`;   // round-trip
+  return tx.<model>.<op>(args);                   // round-trip
+});
+```
+
+An interactive transaction is a conversation — the driver issues `BEGIN`,
+waits, `set_config`, waits, the query, waits, `COMMIT`, waits. That is **four
+network round-trips for one logical query**, with the pool connection held for
+all four. An endpoint issuing 8 queries paid 32 round-trips and 8 separate
+connection checkouts.
+
+Switched to Prisma's **array** form, which pipelines the batch in a single
+exchange. Prisma promises are lazy — building `prisma.student.findMany(args)`
+executes nothing until awaited or handed to `$transaction` — so the operation
+is constructed, placed after the `set_config` statement, and shipped together.
+Same transaction, same connection, same local-scoped GUC; roughly a quarter of
+the round-trips and a quarter of the pool churn. This is the documented Prisma
+RLS pattern, not a relaxation.
+
+Raw operations (`$queryRaw`/`$executeRaw`) and any unknown model/operation
+pairing still take the interactive path — correctness over cleverness.
+
+### 2. Memoised scoped client
+
+`makeScopedClient` ran on **every request**, and `$extends` rebuilds a proxy
+over the entire client surface each time — pure allocation churn on the hottest
+path. The extension closes over nothing but `tenantId`, so clients are now
+cached per tenant, with a bounded map so a pathological tenant count cannot
+leak memory.
+
+### 3. Auth hot path — negative caching of the JTI denylist
+
+Every authenticated request ran `SELECT … FROM access_token_denylist WHERE jti
+= ?`, whose answer is "no row" for essentially every request. Negative results
+are now cached for 10s.
+
+The security cost is bounded and explicit: a token revoked via `/auth/logout`
+could survive at most that window — except logout now calls
+`invalidateDenylistCache(jti)` immediately after the denylist write, so
+revocation takes effect on the very next request. Positive results are never
+cached, so we can never cache our way into accepting a revoked token. The
+`sessions_valid_from` lookup keeps its existing 30s cache with explicit
+invalidation on all six revocation flows.
+
+### 4. Response compression
+
+The API is almost entirely JSON list payloads, which gzip 70–85%. Added
+`compression` with a 1 KiB threshold — a direct, linear egress-bill reduction
+and a real time-to-first-byte improvement on the mobile connections counsellors
+use in the field. Document **streams** are excluded: PDF/JPEG/PNG/OOXML are
+already compressed, so re-compressing burns CPU for nothing and would buffer
+bytes we want to pass straight through.
+
+### 5. Covering indexes for list pagination (migration `20991231236002`)
+
+Every list endpoint paginates with the same keyset shape:
+
+```
+WHERE tenant_id = $1 AND deleted_at IS NULL
+ORDER BY created_at DESC, id DESC
+LIMIT $2
+```
+
+`audit_logs` and `students` already had matching partial indexes; three hot
+tables did not, so Postgres read every live row for the tenant and sorted it on
+**every** page request — including page 1, where most sessions start. On the
+CRM lead table that is a full sort of 10,000+ rows to return 25.
+
+Added (all partial on `deleted_at IS NULL`, so they stay smaller than the table
+and stay cache-hot):
+
+- `crm_leads_tenant_created_id_live_idx` — the busiest screen in the product.
+- `documents_tenant_student_id_live_idx` — every student detail page.
+- `crm_lead_fees_tenant_lead_due_live_idx` — the open-fees nested read on the
+  leads list, which previously sorted once per row on the page.
+
+`students` deliberately got **nothing**: it already has an identical index from
+`20991231235960_perf_indexes`. A duplicate would be pure overhead — extra
+writes on every mutation, more buffer cache consumed, zero read benefit. This
+was caught by checking the existing migrations before writing the new one.
+
+### Already optimal — checked, no change needed
+
+- **Frontend bundle**: `next.config.mjs` already sets
+  `optimizePackageImports` for `@mui/material` + `@mui/icons-material` (the
+  classic MUI barrel-import cost), disables browser source maps, and uses
+  standalone output.
+- **React Query defaults**: `staleTime` 30s, `refetchOnWindowFocus` off,
+  bounded retry with exponential backoff — already tuned against refetch
+  storms.
+- **Index count**: 198 `@@index` declarations plus the SQL-only partial and
+  trigram indexes; coverage was good, the gaps were specifically the
+  ORDER BY-matching composites above.
+
 ### CANNOT REPRODUCE / DEFERRED
 
 - **H5 `/status` page renders app error** — [/status page](apps/frontend/app/(public)/status/page.tsx) has a try/catch fallback around the backend fetch and the `status` i18n namespace exists at `messages/en.json:673`. The reported crash is env-specific (possibly the QA session hit it before the backend `/api/v1/public/status` route was deployed). Retest after this deploy.

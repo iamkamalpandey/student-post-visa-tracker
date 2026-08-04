@@ -30,6 +30,7 @@
     "@spv/utils": "workspace:*",
     "@spv/zod-schemas": "workspace:*",
     "argon2": "^0.41.1",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -51,6 +52,7 @@
   "devDependencies": {
     "@spv/eslint-config": "workspace:*",
     "@spv/tsconfig": "workspace:*",
+    "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.7",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",

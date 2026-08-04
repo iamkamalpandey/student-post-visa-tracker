@@ -1975,6 +1975,11 @@ model Document {
   // Perf: documents_tenant_expiry_active_idx — partial(deleted_at IS NULL)
   // on (tenant_id, expires_on) for the expiry-alerts document scan. SQL-only (partial).
   @@index([student_id, document_type_id])
+  // SVT-PERF-2026-08 — SQL-only partial index, see
+  // migrations/20991231236002_perf_list_pagination_indexes:
+  //   documents_tenant_student_id_live_idx
+  //     ON documents (tenant_id, student_id, id DESC) WHERE deleted_at IS NULL
+  // Serves the per-student document list ordering.
   @@index([sha256])
   @@index([tenant_id, expires_on])
   // Perf P1 #5 — retentionErasure pagination walks (tenant_id, retention_until)
@@ -3220,6 +3225,12 @@ model CrmLead {
   // row) was silently dropped from the post-visa queue on every sync.
   // Identity comes from (tenant_id, v2_lead_id); phone keeps a plain index.
   @@index([tenant_id, phone_number])
+  // SVT-PERF-2026-08 — SQL-only partial index (Prisma @@index cannot express
+  // a WHERE clause), see migrations/20991231236002_perf_list_pagination_indexes:
+  //   crm_leads_tenant_created_id_live_idx
+  //     ON crm_leads (tenant_id, created_at DESC, id DESC)
+  //     WHERE deleted_at IS NULL
+  // Serves the leads list keyset pagination with no sort node.
   @@index([tenant_id, is_archived])
   @@index([tenant_id, assigned_to_id])
   @@index([tenant_id, last_name, first_name])
@@ -3717,6 +3728,11 @@ model CrmLeadFee {
 
   @@index([tenant_id, status, due_on])
   @@index([tenant_id, lead_id])
+  // SVT-PERF-2026-08 — SQL-only partial index, see
+  // migrations/20991231236002_perf_list_pagination_indexes:
+  //   crm_lead_fees_tenant_lead_due_live_idx
+  //     ON crm_lead_fees (tenant_id, lead_id, due_on) WHERE deleted_at IS NULL
+  // Serves the open-fees nested read on the leads list.
   @@index([deleted_at])
   @@map("crm_lead_fees")
 }

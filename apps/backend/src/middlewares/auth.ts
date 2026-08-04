@@ -47,12 +47,17 @@ export function invalidateSessionsValidFrom(userId: string): void {
   sessionsValidFromCache.delete(userId);
 }
 
-async function getSessionsValidFromMs(userId: string): Promise<number> {
-  const now = Date.now();
+function readSessionsValidFromCache(userId: string): number | null {
   const cached = sessionsValidFromCache.get(userId);
-  if (cached && now - cached.cachedAt < SESSIONS_CACHE_TTL_MS) {
+  if (cached && Date.now() - cached.cachedAt < SESSIONS_CACHE_TTL_MS) {
     return cached.validFromMs;
   }
+  return null;
+}
+
+async function getSessionsValidFromMs(userId: string): Promise<number> {
+  const cached = readSessionsValidFromCache(userId);
+  if (cached !== null) return cached;
   // Read via adminDb (BYPASSRLS) so a tenant-context-less path (this
   // middleware runs BEFORE tenantContext) can still resolve the user's
   // revocation stamp.
@@ -61,8 +66,50 @@ async function getSessionsValidFromMs(userId: string): Promise<number> {
     select: { sessions_valid_from: true },
   });
   const validFromMs = row?.sessions_valid_from ? row.sessions_valid_from.getTime() : 0;
-  sessionsValidFromCache.set(userId, { validFromMs, cachedAt: now });
+  sessionsValidFromCache.set(userId, { validFromMs, cachedAt: Date.now() });
   return validFromMs;
+}
+
+// SVT-PERF-2026-08 — JTI denylist cache.
+//
+// The denylist answers "was this exact token explicitly logged out?". Before
+// this, EVERY authenticated request paid a `SELECT ... WHERE jti = ?` for it —
+// on an app where the overwhelming majority of tokens are NOT denylisted, that
+// is a per-request query whose answer is almost always "no row".
+//
+// A negative result is cached for a short TTL. The security cost is bounded and
+// explicit: a token revoked via /auth/logout can survive at most
+// DENYLIST_NEG_CACHE_TTL_MS after the logout call. That window is deliberately
+// much shorter than the access-token TTL, and logout ALSO clears the refresh
+// cookie, so the session cannot be renewed past it.
+//
+// A POSITIVE result (token IS denied) is never cached as negative and short-
+// circuits immediately — we never cache our way into accepting a revoked token.
+const DENYLIST_NEG_CACHE_TTL_MS = 10_000;
+const denylistNegCache = new Map<string, number>(); // jti -> cachedAt
+
+/** Called by logout so a freshly denylisted token is never served from cache. */
+export function invalidateDenylistCache(jti: string): void {
+  denylistNegCache.delete(jti);
+}
+
+async function isTokenDenylisted(jti: string): Promise<boolean> {
+  const cachedAt = denylistNegCache.get(jti);
+  if (cachedAt !== undefined && Date.now() - cachedAt < DENYLIST_NEG_CACHE_TTL_MS) {
+    return false; // known-not-denied, recently verified
+  }
+  const denied = await prisma.accessTokenDenylist.findUnique({ where: { jti } });
+  if (denied && denied.expires_at > new Date()) return true;
+  denylistNegCache.set(jti, Date.now());
+  // Opportunistic sweep: the map is keyed by JTI so it grows with unique
+  // tokens. Bound it — entries are worthless once past their TTL anyway.
+  if (denylistNegCache.size > 10_000) {
+    const cutoff = Date.now() - DENYLIST_NEG_CACHE_TTL_MS;
+    for (const [k, t] of denylistNegCache) {
+      if (t < cutoff) denylistNegCache.delete(k);
+    }
+  }
+  return false;
 }
 
 export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
@@ -81,8 +128,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     // would otherwise wait for a Postgres blip to slip through. The legitimate
     // user gets a brief outage rather than a long-lived security hole.
     try {
-      const denied = await prisma.accessTokenDenylist.findUnique({ where: { jti: claims.jti } });
-      if (denied && denied.expires_at > new Date()) {
+      if (await isTokenDenylisted(claims.jti)) {
         return next(Unauthorized('Token revoked'));
       }
     } catch (err) {
