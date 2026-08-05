@@ -23,7 +23,7 @@
     "@spv/tsconfig": "workspace:*",
     "@spv/eslint-config": "workspace:*",
     "rimraf": "^6.0.1",
-    "typescript": "^5.6.2",
+    "typescript": "^7.0.2",
     "eslint": "^9.11.1",
     "@types/node": "^20.16.10"
   }
