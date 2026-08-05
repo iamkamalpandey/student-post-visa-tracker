@@ -68,10 +68,18 @@ jobs:
         id: nvm
         run: echo "version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
 
+      # SVT-CI-2026-08 — do NOT pin `version:` here. pnpm/action-setup@v4 hard
+      # errors ("Multiple versions of pnpm specified") when a version is given
+      # both in this block and via `packageManager` in the root package.json.
+      # That killed this job at the SETUP step, which meant lint, typecheck,
+      # the whole test suite and — most importantly — the `prisma migrate
+      # deploy` step that exercises every migration against a real Postgres
+      # never ran on any commit. The job went red in ~20s and read as "tests
+      # failing" rather than "tests never executed".
+      # package.json's packageManager field is the single source of truth;
+      # security.yml already omits the version and works.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
