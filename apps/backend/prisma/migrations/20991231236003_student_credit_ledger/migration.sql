@@ -102,11 +102,23 @@ BEGIN
 
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
+    -- SVT-SEC-2026-08 — NO `OR app_current_tenant() IS NULL` ESCAPE CLAUSE.
+    --
+    -- The surrounding billing migrations predate
+    -- 20991231235983_rls_remove_escape_hatch, which exists specifically to
+    -- strip that clause from every tenant_isolation policy. Copying the older
+    -- shape into a NEW migration silently re-opens the hole for this table,
+    -- because this migration sorts last and therefore wins.
+    --
+    -- With the escape clause, any connection where `app.tenant_id` is unset —
+    -- a cron job, a script, or an app-path bug that forgets the tenant-scoped
+    -- client — reads and writes EVERY tenant's rows. Without it, a missing GUC
+    -- returns zero rows, which fails safe and is loudly debuggable.
     EXECUTE format(
       'DROP POLICY IF EXISTS tenant_isolation ON %I; '
       'CREATE POLICY tenant_isolation ON %I '
-      'USING (tenant_id = app_current_tenant() OR app_current_tenant() IS NULL) '
-      'WITH CHECK (tenant_id = app_current_tenant() OR app_current_tenant() IS NULL);',
+      'USING (tenant_id = app_current_tenant()) '
+      'WITH CHECK (tenant_id = app_current_tenant());',
       tbl, tbl
     );
   END LOOP;

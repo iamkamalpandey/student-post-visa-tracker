@@ -76,16 +76,60 @@ export function todayLocalIso(): string {
   return `${y}-${m}-${day}`;
 }
 
+/**
+ * Matches a bare calendar date (`YYYY-MM-DD`) with no time or offset.
+ *
+ * SVT-I18N-2026-08 — this distinction is a correctness issue, not a nicety.
+ * `new Date('2026-05-14')` is parsed by the spec as UTC midnight. Rendering
+ * that instant in a negative-offset zone moves it to the previous day:
+ *
+ *   stored 2026-05-14, timeZone America/New_York  →  "13 May 2026"
+ *
+ * Every `expires_on`, `due_on` and `paid_on` in this app is a Postgres DATE
+ * column — a calendar day with no instant attached. On a visa-expiry tracker,
+ * showing all of them a day early for every user in the Americas is the kind
+ * of error that makes someone miss a deadline. A date-only value must be
+ * rendered in UTC so the calendar day survives; only true timestamps get the
+ * user's zone applied.
+ */
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `Intl.*Format` constructors are among the most expensive calls in the JS
+ * engine, and these helpers were allocating a fresh one per value. A 100-row
+ * table with three money columns cost ~600 constructions per render.
+ * Formatters are immutable and safe to share, so cache them by their full
+ * option signature. Same approach as `lib/money.ts`'s digits cache.
+ */
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+function dateFormatter(
+  locale: string,
+  timeZone: string | undefined,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  const key = `${locale}|${timeZone ?? ''}|${JSON.stringify(options)}`;
+  let f = dateFormatterCache.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale, { ...options, ...(timeZone ? { timeZone } : {}) });
+    dateFormatterCache.set(key, f);
+  }
+  return f;
+}
+
 /** "14 May 2026" — short, locale-aware date with no time component. */
 export function formatDate(iso: string, locale = 'en', opts: FormatOptions = {}): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
-  return new Intl.DateTimeFormat(locale, {
+  // Date-only input pins to UTC so the calendar day cannot drift; a full
+  // timestamp is shown in the viewer's zone as before.
+  const dateOnly = DATE_ONLY_RE.test(iso.trim());
+  const tz = dateOnly ? 'UTC' : opts.timeZone;
+  return dateFormatter(locale, tz, {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
-    ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
   }).format(d);
 }
 
@@ -94,14 +138,13 @@ export function formatDateTime(iso: string, locale = 'en', opts: FormatOptions =
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
-  return new Intl.DateTimeFormat(locale, {
+  return dateFormatter(locale, opts.timeZone, {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-    ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
   }).format(d);
 }
 

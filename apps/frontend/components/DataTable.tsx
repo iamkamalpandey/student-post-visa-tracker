@@ -179,8 +179,17 @@ export default function DataTable<R>({
                           }
                         : undefined
                     }
+                    // SVT-A11Y-2026-08 — role="button" deliberately NOT set here.
+                    // ARIA 1.2 defines `button` as Children Presentational: True,
+                    // so putting it on a <tr> removes the row from the table
+                    // structure AND strips the semantics of every <td> inside it.
+                    // Across 35 DataTable instances the grids announced as a flat
+                    // list of unlabelled buttons — no "row 5 of 20", no column
+                    // header association, no cell-by-cell navigation. The earlier
+                    // change correctly fixed a 2.1.1 keyboard trap but traded it
+                    // for a 1.3.1 failure. tabIndex + the keydown handler above
+                    // keep the row operable by keyboard while it stays a row.
                     tabIndex={clickable ? 0 : undefined}
-                    role={clickable ? 'button' : undefined}
                     sx={{
                       cursor: clickable ? 'pointer' : 'default',
                     }}

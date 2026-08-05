@@ -37,7 +37,15 @@ export default function ListPageShell({
         justifyContent="space-between"
       >
         <Stack spacing={0.75}>
-          <Typography variant="h4" sx={{ fontWeight: 600, letterSpacing: -0.2 }}>
+          {/*
+            SVT-A11Y-2026-08 — `component="h1"` is load-bearing, not cosmetic.
+            MUI maps variant="h4" to a literal <h4> element, so every page built
+            on this shell (~40 authenticated routes) emitted a document whose
+            outline began at level 4 with no h1/h2/h3 above it. A screen-reader
+            user pressing "1" to jump to the page heading found nothing at all.
+            `variant` keeps the visual size; `component` fixes the semantics.
+          */}
+          <Typography component="h1" variant="h4" sx={{ fontWeight: 600, letterSpacing: -0.2 }}>
             {title}
           </Typography>
           {description ? (
