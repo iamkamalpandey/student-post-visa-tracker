@@ -43,9 +43,9 @@ jobs:
 
       - name: Setup pnpm
         # SVT-CI-2026-08 — see backend-ci.yml. Pinning `version:` alongside
-        # package.json's `packageManager` makes pnpm/action-setup@v4 fail the
+        # package.json's `packageManager` makes pnpm/action-setup@v5 fail the
         # job at setup, so nothing downstream ever ran.
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Setup Node
         uses: actions/setup-node@v4
