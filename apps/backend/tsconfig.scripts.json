@@ -1,0 +1,17 @@
+// SVT-CI-2026-08 — typecheck the operational scripts.
+//
+// tsconfig.json is include: ["src/**/*"], so apps/backend/scripts/ was never
+// typechecked and never linted (`lint` was `eslint src`). A duplicate
+// `import { getKms }` sat in rewrap-secrets.ts — the KEK re-wrap tool run after
+// a suspected key compromise — without any gate objecting.
+//
+// Mirrors tsconfig.seed.json, which exists for the same reason (prisma/seed.ts).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src/**/*", "scripts/**/*"],
+  "exclude": ["dist", "node_modules", "tests"]
+}

@@ -50,12 +50,45 @@ function makeFakePrisma(initial: FakeRow[]) {
   const inserts: { table: string; column: string; row_id: string; new_kek_id?: string; old_kek_id?: string }[] = [];
   const matchProgressKey = (table: string, col: string, id: string) => `${table}|${col}|${id}`;
 
+  // SVT-CI-2026-08 — this fake MUST honour the keyset cursor.
+  //
+  // rewrapColumn pages with `AND t.<pk>::text > ${cursor}` and only stops when a
+  // batch comes back empty. The previous fake ignored the cursor and identified
+  // the table/column as literals[0]/literals[1] — true only on the first pass,
+  // because once a cursor is bound it becomes literals[0] and shifts everything
+  // along. The progress keys then never matched, so every batch returned the
+  // same rows and the loop never terminated.
+  //
+  // Non-dry-run runs hid it (progress is written, so the anti-join drains the
+  // set anyway); --dry-run writes no progress, so the cursor is the ONLY thing
+  // ending the loop. That test spun until the worker died of memory exhaustion,
+  // which surfaces as a bare "Worker exited unexpectedly" and takes down the
+  // whole `vitest run` — including CI, which runs the full suite.
+  //
+  // The cursor is NOT a top-level string parameter: rewrapColumn builds it as a
+  // Prisma.Sql fragment (`cursorClause`) and interpolates the fragment, so the
+  // bound value sits in that fragment's own `.values`. Filtering top-level
+  // values for strings therefore yields exactly [table, column] on every pass —
+  // which is why the cursor was invisible here. Descend into the nested
+  // fragments to find it. Interpolation order is cursorClause then tenantClause,
+  // and Prisma.raw()/Prisma.empty fragments carry no values, so the first nested
+  // string is the cursor.
+  const isSqlFragment = (v: unknown): v is { values: unknown[] } =>
+    typeof v === 'object' && v !== null && Array.isArray((v as { values?: unknown }).values);
+
   async function queryRaw(_strings: TemplateStringsArray, ...values: unknown[]): Promise<FakeRow[]> {
     const literals = values.filter((v): v is string => typeof v === 'string');
     const table = literals[0]!;
     const column = literals[1]!;
+    const nested = values.filter(isSqlFragment).flatMap((f) => f.values);
+    const cursor = nested.find((v): v is string => typeof v === 'string') ?? null;
     const limit = (values.find((v): v is number => typeof v === 'number') ?? 500) as number;
-    const filtered = rows.filter((r) => !progress.has(matchProgressKey(table, column, r.id)));
+    const filtered = rows
+      // ORDER BY t.<pk>::text — the cursor compares as text, so sort as text.
+      .slice()
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .filter((r) => cursor === null || r.id > cursor)
+      .filter((r) => !progress.has(matchProgressKey(table, column, r.id)));
     return filtered.slice(0, limit);
   }
 
@@ -121,8 +154,16 @@ class DualKms implements Kms {
       return oldKms.decryptDek(blob);
     }
   }
+  // SVT-CI-2026-08 — MUST be the id this Kms actually wraps under.
+  // encryption.ts stamps `kms.rotateKekId()` into the v2 envelope header, and
+  // decryptDek() later selects a key by that id. This returned 'dual' while
+  // generateDek() wrapped via LocalKms(newKek, 'kek-new'), so every blob this
+  // fake produced was labelled with an id no KMS could resolve — undecryptable
+  // by construction. That is a fixture bug, not a product bug: the interface
+  // documents rotateKekId() as "identifier of the active KEK; stamped into new
+  // envelopes", and any implementation that misreports it breaks rotation.
   rotateKekId(): string {
-    return 'dual';
+    return 'kek-new';
   }
 }
 
@@ -168,8 +209,9 @@ describe('rewrap-secrets — round trip + dry-run + old-KEK rejection', () => {
     const n = await rewrapColumn(fake.client, COL, DEFAULT_ARGS);
     expect(n).toBe(2);
 
-    // Verify the rewritten blobs decrypt under KEK_B ALONE.
-    __setKmsForTests(new LocalKms(kekB, 'kek-B'));
+    // Verify the rewritten blobs decrypt under KEK_B ALONE. The id must match
+    // what DualKms stamped ('kek-new'), since v2 envelopes select the key by id.
+    __setKmsForTests(new LocalKms(kekB, 'kek-new'));
     expect(await decryptField(fake.rows[0]!.blob)).toBe(plaintext1);
     expect(await decryptField(fake.rows[1]!.blob)).toBe(plaintext2);
 

@@ -48,8 +48,10 @@
 // complete in the progress table.
 
 import { PrismaClient, Prisma } from '@prisma/client';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { decryptFieldRaw, encryptField, envelopeKekId } from '../src/shared/encryption.js';
-import { getKms } from '../src/config/kms.js';
 import { getKms } from '../src/config/kms.js';
 import { logger } from '../src/config/logger.js';
 
@@ -327,11 +329,29 @@ async function main() {
 }
 
 // Only run when invoked directly (not when imported by tests).
+//
+// SVT-CI-2026-08 — this used to be
+//   import.meta.url.endsWith(argv1.replace(/\\/g, '/'))
+// which is wrong in BOTH directions and failed silently either way:
+//
+//   - `import.meta.url` is a file:// URL, so any character that percent-encodes
+//     (a space, most commonly) makes the suffix compare fail. On a checkout
+//     path containing a space the script parsed its args, decided it was being
+//     imported, ran nothing and exited 0. For a KEK re-wrap after a suspected
+//     compromise that is the worst possible failure mode: the operator sees a
+//     clean exit and destroys a KEK that is still wrapping live ciphertext.
+//   - When `process.argv[1]` is absent it defaults to '', and every string
+//     ends with '', so the guard flips to true and `main()` fires inside any
+//     importing process.
+//
+// Compare resolved real paths instead. realpathSync normalises symlinks and
+// drive-letter case on Windows; the try/catch covers argv[1] not existing.
 const isDirect = (() => {
   try {
-    const argv1 = process.argv[1] ?? '';
-    // tsx normalises argv[1] to a file path; import.meta.url is a file:// URL.
-    return import.meta.url.endsWith(argv1.replace(/\\/g, '/'));
+    const argv1 = process.argv[1];
+    if (!argv1) return false;
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    return self === realpathSync(resolve(argv1));
   } catch {
     return false;
   }

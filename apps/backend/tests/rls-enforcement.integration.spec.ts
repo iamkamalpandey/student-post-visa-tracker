@@ -123,11 +123,33 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
         [sid, tid],
       );
     }
+    // SVT-CI-2026-08 — students.nationality_code FKs to countries(code_alpha2),
+    // and CI provisions its database with `migrate deploy` ALONE — no seed. So
+    // the suite has to supply the reference rows it depends on rather than
+    // assuming a populated lookup table.
+    //
+    // Deliberately never cleaned up: `countries` is global reference data, not
+    // tenant data. On a seeded database the row already exists (ON CONFLICT
+    // makes this a no-op), and deleting it in afterAll would strip real
+    // reference data from a developer's dev DB.
+    await admin.query(
+      `INSERT INTO countries (code_alpha2, code_alpha3, numeric_code, name, dial_code)
+       VALUES ('NP','NPL','524','Nepal','+977')
+       ON CONFLICT (code_alpha2) DO NOTHING`,
+    );
+
+    // SVT-CI-2026-08 — name_in_passport_enc is BYTEA NOT NULL in the baseline
+    // migration, so the seed must supply it. The bytes are a placeholder, NOT a
+    // valid envelope: this suite asserts row VISIBILITY under RLS and never
+    // decrypts anything. (This omission went unnoticed because the whole file
+    // skips unless the migrations have been applied, and they could not be —
+    // see the …235995 fix in this same change.)
     await admin.query(
       `INSERT INTO students (id, tenant_id, student_code, given_name, family_name, date_of_birth,
-                             nationality_code, current_stage_id, stage_entered_at, created_at, updated_at)
-       VALUES ($1,$2,'RLS-A-1','Alice','Anderson','2000-01-01','NP',$3,now(),now(),now()),
-              ($4,$5,'RLS-B-1','Bob','Brown','2000-01-01','NP',$6,now(),now(),now())`,
+                             nationality_code, current_stage_id, stage_entered_at,
+                             name_in_passport_enc, created_at, updated_at)
+       VALUES ($1,$2,'RLS-A-1','Alice','Anderson','2000-01-01','NP',$3,now(),decode('00','hex'),now(),now()),
+              ($4,$5,'RLS-B-1','Bob','Brown','2000-01-01','NP',$6,now(),decode('00','hex'),now(),now())`,
       [studentA, tenantA, stageA, studentB, tenantB, stageB],
     );
 

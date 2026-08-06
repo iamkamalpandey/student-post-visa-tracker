@@ -86,8 +86,10 @@ The `url` field in the datasource block is deprecated in favour of `prisma.confi
 **4.5 Express 5 retires a whole class of latent bug.**
 Express 5 forwards rejected promises from async handlers to error middleware automatically. The architecture audit flagged that there is no `no-floating-promises` lint rule and that `server.ts` exits the process on any unhandled rejection — meaning the discipline is held by code review alone. Express 5 converts part of that risk into ordinary error handling.
 
-**4.6 ESLint is already broken and blocks the whole plan.**
-`packages/eslint-config/index.js` is legacy eslintrc format while ESLint 9 requires flat config, so `pnpm --filter backend lint` fails repo-wide today. Any upgrade of this size without a working linter is done blind. This must be fixed first, and it is small.
+**4.6 ESLint was broken and blocked the whole plan — now fixed.**
+`packages/eslint-config/index.js` was legacy eslintrc format while ESLint 9 requires flat config, so `pnpm --filter backend lint` failed repo-wide and any upgrade of this size would have been done blind. Migrated to flat config (`eslint.config.mjs` in the four linted packages); backend lint now exits 0. Re-enabling it surfaced 14 real errors, all fixed rather than downgraded — chiefly ten `as any` casts on dynamically built Prisma `where` objects, now typed as the proper `Prisma.*WhereInput`. 33 warnings remain as visible debt.
+
+One deliberate gap: `eslint:recommended` is not applied, because its flat equivalent lives in `@eslint/js`, which is not a declared dependency of the config package. Adding it is a small follow-up.
 
 ---
 
@@ -99,7 +101,7 @@ Do not begin a platform migration with no error tracking, no alerting and no tes
 - Install `@sentry/node` — it is referenced throughout and **present in neither `package.json` nor the lockfile**, so every `captureException` is currently a no-op.
 - Add DigitalOcean `alerts:` + `log_destinations:`.
 - Uncomment the backup cron in `db-backup.yml` and perform **one real restore**.
-- Migrate `packages/eslint-config` to flat config so lint works again.
+- ~~Migrate `packages/eslint-config` to flat config~~ — done; add `@eslint/js` so `eslint:recommended` applies again.
 
 Rationale: if the Prisma or MUI migration breaks something subtly in production, today there is no mechanism by which anyone would find out, and no verified way back.
 

@@ -221,18 +221,37 @@ CREATE POLICY tenant_isolation ON program_modules
 ALTER TABLE program_fees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE program_fees FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON program_fees;
+-- SVT-SEC-2026-08 — join through program_intakes.
+--
+-- This policy referenced `program_fees.program_id`, a column that has never
+-- existed in any migration: program_fees links to a program only indirectly,
+-- via program_intake_id. Postgres therefore aborted the statement with 42703
+-- every time, which had two consequences nobody saw because
+-- `prisma migrate deploy` had never actually run in CI:
+--
+--   1. The whole migration chain became unreplayable from scratch — you could
+--      not rebuild the database from its own migrations, which breaks disaster
+--      recovery and any new environment.
+--   2. program_fees ended up with NO tenant_isolation policy anywhere. Since
+--      ProgramFee has no tenant_id column of its own, RLS was the only
+--      isolation it could ever have had.
+--
+-- Safe to correct in place: a statement that always errors is never recorded
+-- as applied, so no environment has a checksum for the broken version.
 CREATE POLICY tenant_isolation ON program_fees
   USING (
     EXISTS (
-      SELECT 1 FROM programs p
-      WHERE p.id = program_fees.program_id
+      SELECT 1 FROM program_intakes pi
+      JOIN programs p ON p.id = pi.program_id
+      WHERE pi.id = program_fees.program_intake_id
         AND p.tenant_id = app_current_tenant()
     )
   )
   WITH CHECK (
     EXISTS (
-      SELECT 1 FROM programs p
-      WHERE p.id = program_fees.program_id
+      SELECT 1 FROM program_intakes pi
+      JOIN programs p ON p.id = pi.program_id
+      WHERE pi.id = program_fees.program_intake_id
         AND p.tenant_id = app_current_tenant()
     )
   );

@@ -122,6 +122,26 @@ jobs:
       - name: Prisma generate
         run: pnpm --filter backend prisma:generate
 
+      # SVT-CI-2026-08 — create the runtime role BEFORE migrating.
+      #
+      # 20991231235959_init_rls_and_triggers issues GRANTs to `spv_app`
+      # unguarded (later migrations wrap theirs in an IF EXISTS check), but the
+      # postgres service above only creates `spv`. So migrate deploy aborted on
+      # migration #2 with 42704 "role spv_app does not exist" — every time.
+      #
+      # Nobody had seen it, because this job never got past pnpm setup until
+      # now. The migrate step below claims to exercise every migration; it
+      # could not, and the first thing it found when it finally ran was a
+      # migration that had never applied anywhere (see …235995).
+      # Uses `prisma db execute` rather than psql: the very next step runs the
+      # same CLI, so it is guaranteed present, whereas psql is only incidentally
+      # on the runner image.
+      - name: Create runtime role (spv_app)
+        run: >-
+          pnpm --filter backend exec prisma db execute
+          --url "$DATABASE_URL"
+          --file "$GITHUB_WORKSPACE/.github/ci/create-runtime-role.sql"
+
       # SVT-QA-2026-08 — apply the REAL migrations, not `db push`.
       #
       # Two things this buys, both previously untested anywhere:
