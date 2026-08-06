@@ -12,6 +12,7 @@ import TenantSettingsSection from './sections/TenantSettingsSection';
 import BillingModuleSection from './sections/BillingModuleSection';
 import ThemeSection from './sections/ThemeSection';
 import ComplianceSection from './sections/ComplianceSection';
+import CustomFieldsSection from './sections/CustomFieldsSection';
 import SignOutEverywhereSection from './sections/SignOutEverywhereSection';
 
 export default function SettingsPage() {
@@ -33,6 +34,7 @@ export default function SettingsPage() {
       <TenantSettingsSection />
       <BillingModuleSection />
       <ThemeSection />
+      <CustomFieldsSection />
       <ComplianceSection />
       <SignOutEverywhereSection />
     </Stack>

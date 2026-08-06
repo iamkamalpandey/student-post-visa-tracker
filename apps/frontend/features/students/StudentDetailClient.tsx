@@ -48,6 +48,7 @@ import InsuranceSection from '@/features/students/profile/InsuranceSection';
 import RegulatorIdsSection from '@/features/students/profile/RegulatorIdsSection';
 import DependentsSection from '@/features/students/profile/DependentsSection';
 import ComplianceSection from '@/features/students/profile/ComplianceSection';
+import CustomFieldsSection from '@/features/attributes/CustomFieldsSection';
 import TravelSection from '@/features/students/journey/TravelSection';
 import AccommodationsSection from '@/features/students/journey/AccommodationsSection';
 import EngagementsSection from '@/features/students/journey/EngagementsSection';
@@ -654,6 +655,14 @@ function ProfileTab({ student, onEdit }: { student: Student; onEdit?: () => void
       </SectionAnchor>
       <SectionAnchor id="compliance">
         <ComplianceSection studentId={student.id} />
+      </SectionAnchor>
+      {/*
+        SVT-UNLOCK-2026-08 — custom fields. The AttributeDefinition /
+        EntityAttribute backend shipped complete and had no UI at all, so
+        tenant-defined fields existed in the database and were unreachable.
+      */}
+      <SectionAnchor id="custom-fields">
+        <CustomFieldsSection entityType="student" entityId={student.id} />
       </SectionAnchor>
     </Stack>
   );

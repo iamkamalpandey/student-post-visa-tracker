@@ -64,6 +64,14 @@ export type SnoozeReminderRequest = z.infer<typeof SnoozeReminderRequest>;
 // List filters. All optional; when none supplied the caller gets every row in
 // the tenant. Date filters operate on `due_on` / `scheduled_for` independently.
 export const ReminderListQuery = PaginationQuery.extend({
+  // SVT-CONTRACT-2026-08 — `q` and `page` were sent by the Reminders tab from
+  // the day it shipped (RemindersTab -> lib/queries buildReminderParams) but
+  // were never declared here. Because this schema is `.strict()`, every
+  // keystroke in the search box produced a 422 that nobody saw: the tab also
+  // filters client-side over the rows already loaded, so the box appeared to
+  // work while only ever searching the current page.
+  q: z.string().trim().min(1).max(200).optional(),
+  page: z.coerce.number().int().min(1).optional(),
   status: ReminderStatusEnum.optional(),
   type: ReminderTypeEnum.optional(),
   assigned_to_id: Uuid.optional(),

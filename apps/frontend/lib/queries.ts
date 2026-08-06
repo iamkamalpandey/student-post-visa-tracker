@@ -378,7 +378,7 @@ export type ReminderFilters = {
  * Strip blank/`all` filters before they hit the wire so the URL stays clean
  * and the backend doesn't have to treat empties as "no filter".
  */
-function buildReminderParams(filters: ReminderFilters): Record<string, string | number> {
+export function buildReminderParams(filters: ReminderFilters): Record<string, string | number> {
   const out: Record<string, string | number> = {};
   if (filters.limit) out['limit'] = filters.limit;
   if (filters.q && filters.q.trim()) out['q'] = filters.q.trim();

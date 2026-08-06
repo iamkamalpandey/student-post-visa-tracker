@@ -180,13 +180,30 @@ export const reminderService = {
           }
         : {}),
     };
+    // SVT-CONTRACT-2026-08 — honour the free-text search the Reminders tab has
+    // always sent. It previously 422'd at the schema, so the search box only
+    // ever filtered the rows already on screen.
+    if (q.q) {
+      const needle = q.q.trim();
+      where.OR = [
+        { title: { contains: needle, mode: 'insensitive' } },
+        { description: { contains: needle, mode: 'insensitive' } },
+      ];
+    }
+
     return db(req).reminder.findMany({
       where,
       // Stable cursor pagination: scheduled_for is the natural ordering for
       // dashboards; tie-break with id so the cursor never skips a row.
       orderBy: [{ scheduled_for: 'asc' }, { id: 'asc' }],
       take: q.limit,
-      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      // `page` is an offset fallback for the tab's numbered pager; `cursor`
+      // remains the preferred path and wins when both are supplied.
+      ...(q.cursor
+        ? { cursor: { id: q.cursor }, skip: 1 }
+        : q.page && q.page > 1
+          ? { skip: (q.page - 1) * q.limit }
+          : {}),
     });
   },
 
