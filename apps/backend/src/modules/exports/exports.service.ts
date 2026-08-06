@@ -92,19 +92,19 @@ async function estimateExportBytes(
       search: typeof filter['search'] === 'string' ? filter['search'] : undefined,
       ...(ids && ids.length > 0 ? { ids } : {}),
     })) as Record<string, unknown>;
-    rowCount = await prisma.student.count({ where: where as any });
+    rowCount = await prisma.student.count({ where: where as Prisma.StudentWhereInput });
   } else if (resource === 'institutions') {
-    rowCount = await prisma.institution.count({ where: where as any });
+    rowCount = await prisma.institution.count({ where: where as Prisma.InstitutionWhereInput });
   } else if (resource === 'programs') {
-    rowCount = await prisma.program.count({ where: where as any });
+    rowCount = await prisma.program.count({ where: where as Prisma.ProgramWhereInput });
   } else if (resource === 'enrollments') {
-    rowCount = await prisma.enrollment.count({ where: where as any });
+    rowCount = await prisma.enrollment.count({ where: where as Prisma.EnrollmentWhereInput });
   } else if (resource === 'program_fees') {
     // ProgramFee — tenancy is reachable only via program_intake.program.
     // Mirror the where clause used by streamRows so the estimate matches
     // the eventual row set.
     rowCount = await prisma.programFee.count({
-      where: { program_intake: { program: { tenant_id: tenantId, deleted_at: null } } } as any,
+      where: { program_intake: { program: { tenant_id: tenantId, deleted_at: null } } } as Prisma.ProgramFeeWhereInput,
     });
   }
 
@@ -508,16 +508,16 @@ async function* streamRows(
     let rows: unknown[] = [];
     if (resource === 'students') {
       rows = await prisma.student.findMany({
-        where: where as any,
+        where: where as Prisma.StudentWhereInput,
         orderBy: { id: 'asc' },
         take: PAGE,
       });
     } else if (resource === 'institutions') {
-      rows = await prisma.institution.findMany({ where: where as any, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await prisma.institution.findMany({ where: where as Prisma.InstitutionWhereInput, orderBy: { id: 'asc' }, take: PAGE });
     } else if (resource === 'programs') {
-      rows = await prisma.program.findMany({ where: where as any, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await prisma.program.findMany({ where: where as Prisma.ProgramWhereInput, orderBy: { id: 'asc' }, take: PAGE });
     } else if (resource === 'enrollments') {
-      rows = await prisma.enrollment.findMany({ where: where as any, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await prisma.enrollment.findMany({ where: where as Prisma.EnrollmentWhereInput, orderBy: { id: 'asc' }, take: PAGE });
     } else if (resource === 'program_fees') {
       // REGRESSION GUARD: ProgramFee has no direct tenant_id column; tenancy is
       // reachable only via program_intake.program.tenant_id. The previous
@@ -530,7 +530,7 @@ async function* streamRows(
       };
       if (cursorId) feeWhere['id'] = { gt: cursorId };
       rows = await prisma.programFee.findMany({
-        where: feeWhere as any,
+        where: feeWhere as Prisma.ProgramFeeWhereInput,
         orderBy: { id: 'asc' },
         take: PAGE,
       });

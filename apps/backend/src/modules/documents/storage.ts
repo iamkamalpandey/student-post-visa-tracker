@@ -238,8 +238,12 @@ class S3Storage implements ObjectStorage {
         })
       );
       return true;
-    } catch (err: any) {
-      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) return false;
+    } catch (err: unknown) {
+      // S3 signals "absent" either by error name or by the SDK's $metadata
+      // status. Narrow rather than typing the catch as `any`, so a future
+      // refactor of this shape fails at compile time instead of at runtime.
+      const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) return false;
       throw err;
     }
   }

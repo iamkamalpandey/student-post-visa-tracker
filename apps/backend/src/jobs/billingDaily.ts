@@ -47,7 +47,7 @@ const SYSTEM_ACTOR = null; // System cron writes — actor_id null is recognised
 // first installment is due today becomes a visible receivable immediately
 // rather than only on the due date itself.
 const INVOICE_LEAD_DAYS = 7;
-const SYSTEM_ROLE: 'ADMIN' = 'ADMIN';
+const SYSTEM_ROLE = 'ADMIN' as const;
 
 type LateFeePolicy = {
   enabled?: boolean;

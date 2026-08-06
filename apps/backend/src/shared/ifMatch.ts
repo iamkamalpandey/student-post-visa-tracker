@@ -65,7 +65,14 @@ export async function applyVersionedUpdate<T>(
   expected: number | undefined,
   data: Record<string, unknown>,
 ): Promise<T> {
-  const delegate = (db as unknown as Record<string, { updateMany: Function; findFirst: Function } | undefined>)[
+  // Minimal structural type for the two Prisma delegate methods this helper
+  // calls. `Function` accepted any callable, which defeated the point of
+  // asserting a shape at all.
+  type VersionedDelegate = {
+    updateMany: (args: unknown) => Promise<{ count: number }>;
+    findFirst: (args: unknown) => Promise<unknown>;
+  };
+  const delegate = (db as unknown as Record<string, VersionedDelegate | undefined>)[
     modelName
   ];
   if (!delegate) {

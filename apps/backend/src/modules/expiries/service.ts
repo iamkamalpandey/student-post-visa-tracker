@@ -7,6 +7,7 @@
 // our own query bag here. Both functions share the same "kind" vocabulary
 // (extended with "regulator_id") so future consolidation is straightforward.
 
+import { logger } from '../../config/logger.js';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type {
   ExpiriesListQuery,
@@ -15,6 +16,23 @@ import type {
 } from '@spv/zod-schemas';
 
 type DB = PrismaClient | Prisma.TransactionClient;
+
+// SVT-PERF-2026-08 — bound every source query.
+//
+// This endpoint deliberately has NO lower date bound: overdue rows are the
+// whole point of a triage inbox, so `expires_on <= horizon` is correct. But
+// with no row cap either, the result set is every expiry that has EVER
+// occurred in the tenant, materialised into Node on each request — and the
+// inbox fetches it just to render a count.
+//
+// Each query already orders soonest-first, which for a list containing overdue
+// rows means most-overdue-first. So a cap drops the least urgent, never the
+// most urgent. The sibling helper jobs/expiryAlerts.ts has had this treatment
+// since SVT-PERF-2026-06; this is the same fix applied to the request path.
+//
+// Capping is reported rather than silent — a truncated list that looks
+// complete is how people miss a lapsed visa.
+const MAX_PER_KIND = 500;
 
 function severityFor(daysRemaining: number): ExpiryRow['severity'] {
   if (daysRemaining < 0) return 'overdue';
@@ -70,6 +88,7 @@ export async function listExpiries(
             student: { select: { given_name: true, family_name: true } },
           },
           orderBy: { expires_on: 'asc' },
+          take: MAX_PER_KIND,
         })
         .then((rows) =>
           rows.map<ExpiryRow>((r) => {
@@ -105,6 +124,7 @@ export async function listExpiries(
             student: { select: { given_name: true, family_name: true } },
           },
           orderBy: { expires_on: 'asc' },
+          take: MAX_PER_KIND,
         })
         .then((rows) =>
           rows
@@ -138,6 +158,7 @@ export async function listExpiries(
             student: { select: { given_name: true, family_name: true } },
           },
           orderBy: { ends_on: 'asc' },
+          take: MAX_PER_KIND,
         })
         .then((rows) =>
           rows.map<ExpiryRow>((r) => {
@@ -173,6 +194,7 @@ export async function listExpiries(
             student: { select: { given_name: true, family_name: true } },
           },
           orderBy: { expires_on: 'asc' },
+          take: MAX_PER_KIND,
         })
         .then((rows) =>
           rows
@@ -209,6 +231,7 @@ export async function listExpiries(
             student: { select: { given_name: true, family_name: true } },
           },
           orderBy: { expires_on: 'asc' },
+          take: MAX_PER_KIND,
         })
         .then((rows) =>
           rows
@@ -231,6 +254,17 @@ export async function listExpiries(
   }
 
   const grouped = await Promise.all(tasks);
+  // Any source that came back exactly at the cap was almost certainly
+  // truncated. Say so, so an operator can narrow `within_days` rather than
+  // quietly working from a partial list.
+  for (const group of grouped) {
+    if (group.length >= MAX_PER_KIND) {
+      logger.warn(
+        { tenantId, kind: group[0]?.kind ?? 'unknown', cap: MAX_PER_KIND },
+        'expiries: source hit the per-kind cap; least-urgent rows omitted',
+      );
+    }
+  }
   const out = grouped.flat();
   out.sort((a, b) => a.days_remaining - b.days_remaining);
   return out;
