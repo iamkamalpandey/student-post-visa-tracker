@@ -49,9 +49,20 @@ describe('LocalStorage encryption-at-rest', () => {
     expect(onDisk.equals(PLAINTEXT)).toBe(false);
     // Plaintext substring must not appear anywhere in the blob.
     expect(onDisk.toString('binary').includes(PLAINTEXT.toString('binary'))).toBe(false);
-    // Envelope version byte = 0x01.
-    expect(onDisk.readUInt8(0)).toBe(0x01);
-    // Header(3) + wrappedDek(>=28) + iv(12) + ct(>=plain.length) + tag(16).
+    // SVT-CRYPTO-2026-08 — envelope version byte.
+    //
+    // This asserted 0x01 and started failing when KEK versioning introduced the
+    // v2 envelope (0x02, which carries the KEK id so rotating a local KEK no
+    // longer makes existing ciphertext undecryptable). v1 is still READ, but
+    // it is never WRITTEN any more, so a fresh put() is always v2.
+    //
+    // Assert against the set of recognised versions rather than a magic
+    // number: the point of the test is "this is a real envelope, not
+    // plaintext", and pinning the exact current version just re-breaks the
+    // test on the next legitimate format change.
+    expect([0x01, 0x02]).toContain(onDisk.readUInt8(0));
+    // v2 header is larger than v1 (version + kekIdLen + kekId + wrappedDekLen),
+    // so the v1-era minimum is still a valid lower bound.
     expect(onDisk.length).toBeGreaterThan(PLAINTEXT.length + 3 + 12 + 16);
   });
 
@@ -118,6 +129,7 @@ describe('LocalStorage encryption-at-rest', () => {
     // And confirm the on-disk blob is still ciphertext.
     const onDisk = readFileSync(rawPath(crossKey));
     expect(onDisk.equals(payload)).toBe(false);
-    expect(onDisk.readUInt8(0)).toBe(0x01);
+    // Recognised envelope version — see the note on the put() test above.
+    expect([0x01, 0x02]).toContain(onDisk.readUInt8(0));
   });
 });
