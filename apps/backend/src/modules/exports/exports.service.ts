@@ -13,6 +13,7 @@ import { writeAudit } from '../../shared/audit.js';
 import { Forbidden, NotFound, PayloadTooLarge } from '../../shared/errors.js';
 import { writeCsv, writeJson, writeJsonl, writeXlsx } from './writers.js';
 import type { CreateExportRequest } from '@spv/zod-schemas';
+import { buildStudentListWhere } from '../students/students.service.js';
 
 // ----------------------------------------------------------------------------
 // PERF-AUDIT-P0-#3 — Buffered-export size cap.
@@ -69,11 +70,28 @@ async function estimateExportBytes(
   filter: Record<string, unknown>,
   format: string,
 ): Promise<{ rowCount: number; estimatedBytes: number }> {
-  const where: Record<string, unknown> = { tenant_id: tenantId, deleted_at: null };
+  let where: Record<string, unknown> = { tenant_id: tenantId, deleted_at: null };
   if (typeof filter['status'] === 'string') where['status'] = filter['status'];
 
   let rowCount = 0;
   if (resource === 'students') {
+    // SVT-EXPORT-FILTER-2026-08 — estimate against the SAME predicate the
+    // export will actually run. Counting the unfiltered tenant here would
+    // reject a small filtered export as "too large", which is the mirror image
+    // of the disclosure bug fixed in streamRows.
+    const slaBreached = filter['sla_breached'] === true || filter['sla_breached'] === 'true';
+    const ids = Array.isArray(filter['ids'])
+      ? (filter['ids'] as unknown[]).filter((v): v is string => typeof v === 'string')
+      : undefined;
+    where = (await buildStudentListWhere(prisma as never, tenantId, {
+      stage_id: typeof filter['stage_id'] === 'string' ? filter['stage_id'] : undefined,
+      status: typeof filter['status'] === 'string' ? (filter['status'] as never) : undefined,
+      assigned_to_id:
+        typeof filter['assigned_to_id'] === 'string' ? filter['assigned_to_id'] : undefined,
+      ...(slaBreached ? { sla_breached: true as const } : {}),
+      search: typeof filter['search'] === 'string' ? filter['search'] : undefined,
+      ...(ids && ids.length > 0 ? { ids } : {}),
+    })) as Record<string, unknown>;
     rowCount = await prisma.student.count({ where: where as any });
   } else if (resource === 'institutions') {
     rowCount = await prisma.institution.count({ where: where as any });
@@ -441,11 +459,51 @@ async function* streamRows(
     // SVT-SEC-2026-05 — soft-deleted rows MUST be excluded from exports.
     // Otherwise erasure-tombstoned subjects re-surface via the bulk pipeline,
     // defeating GDPR Art 17 + retention crons. tenant_id pinned to scope.
-    const where: Record<string, unknown> = { tenant_id: tenantId, deleted_at: null };
-    // Pull a small set of stable, scalar filters through. Anything else is silently ignored
-    // for v1 — we'll formalise the filter DSL in v2.
-    if (typeof filter['status'] === 'string') where['status'] = filter['status'];
-    if (cursorId) where['id'] = { gt: cursorId };
+    let where: Record<string, unknown> = { tenant_id: tenantId, deleted_at: null };
+
+    // SVT-EXPORT-FILTER-2026-08 — run the SAME predicate the list screen ran.
+    //
+    // This previously whitelisted `status` and silently dropped everything
+    // else, so a counsellor who filtered the students list down to twelve
+    // SLA-breached records and clicked "Export CSV" received a CSV of every
+    // student in the tenant. No error, no warning, and the frontend told them
+    // the file was "an exact representation of what the user sees on screen".
+    // Exporting far more subject data than the operator asked for is a
+    // disclosure problem, not just a wrong number.
+    //
+    // buildStudentListWhere is the exact builder /students uses, so the two
+    // cannot drift apart again.
+    if (resource === 'students') {
+      const ids = Array.isArray(filter['ids'])
+        ? (filter['ids'] as unknown[]).filter((v): v is string => typeof v === 'string')
+        : undefined;
+      const slaBreached = filter['sla_breached'] === true || filter['sla_breached'] === 'true';
+      const studentWhere = await buildStudentListWhere(prisma as never, tenantId, {
+        stage_id: typeof filter['stage_id'] === 'string' ? filter['stage_id'] : undefined,
+        status: typeof filter['status'] === 'string' ? (filter['status'] as never) : undefined,
+        assigned_to_id:
+          typeof filter['assigned_to_id'] === 'string' ? filter['assigned_to_id'] : undefined,
+        ...(slaBreached ? { sla_breached: true as const } : {}),
+        search: typeof filter['search'] === 'string' ? filter['search'] : undefined,
+        ...(ids && ids.length > 0 ? { ids } : {}),
+      });
+      where = studentWhere as Record<string, unknown>;
+    } else if (typeof filter['status'] === 'string') {
+      // Other resources still honour only `status`; their list screens do not
+      // yet offer richer filters, so there is nothing to drift from.
+      where['status'] = filter['status'];
+    }
+
+    // Keyset cursor. Added via AND so it cannot clobber an `id` predicate that
+    // the filter builder may already have set (e.g. an explicit id selection).
+    if (cursorId) {
+      const existingAnd = Array.isArray(where['AND'])
+        ? (where['AND'] as unknown[])
+        : where['AND']
+          ? [where['AND']]
+          : [];
+      where['AND'] = [...existingAnd, { id: { gt: cursorId } }];
+    }
 
     let rows: unknown[] = [];
     if (resource === 'students') {

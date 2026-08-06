@@ -46,6 +46,78 @@ type Ctx = { db: Db; tenantId: string; actorId: string };
 // list
 // -----------------------------------------------------------------------------
 
+/**
+ * Build the student-list WHERE clause from the caller's filters.
+ *
+ * SVT-EXPORT-FILTER-2026-08 — extracted from `list()` so the CSV export runs
+ * the SAME predicate the screen ran.
+ *
+ * Why this exists: the export pipeline used to whitelist a single scalar
+ * (`status`) and silently drop everything else. A counsellor who filtered the
+ * students list to twelve SLA-breached records and clicked "Export CSV"
+ * received a CSV of EVERY student in the tenant — a far larger disclosure than
+ * they asked for, with no error and no warning. The frontend comment even
+ * claimed the export was "an exact representation of what the user sees on
+ * screen".
+ *
+ * Keeping one builder means the list and the export cannot drift apart again;
+ * a new filter is honoured by both the moment it is added here.
+ */
+export async function buildStudentListWhere(
+  db: Db,
+  tenantId: string,
+  q: Pick<StudentListQuery, 'stage_id' | 'status' | 'assigned_to_id' | 'sla_breached' | 'search'> & {
+    ids?: string[];
+  },
+): Promise<Prisma.StudentWhereInput> {
+  // Base WHERE: tenant + soft-delete filter.
+  const where: Prisma.StudentWhereInput = {
+    tenant_id: tenantId,
+    deleted_at: null,
+  };
+  if (q.stage_id) where.current_stage_id = q.stage_id;
+  if (q.status) where.status = q.status;
+  if (q.assigned_to_id) where.assigned_to_id = q.assigned_to_id;
+  // Explicit id set — used by "export selected" so a ticked selection exports
+  // exactly those rows rather than the whole tenant.
+  if (q.ids && q.ids.length > 0) where.id = { in: q.ids };
+
+  const andClauses: Prisma.StudentWhereInput[] = [];
+
+  if (q.sla_breached) {
+    const stagesWithSla = await db.lifecycleStage.findMany({
+      where: { tenant_id: tenantId, sla_hours: { not: null }, show_on_dashboard: true },
+      select: { id: true, sla_hours: true },
+    });
+    if (stagesWithSla.length === 0) {
+      // Force an empty set without clobbering an `ids` filter above.
+      andClauses.push({ id: '00000000-0000-0000-0000-000000000000' });
+    } else {
+      const now = Date.now();
+      const HOUR_MS = 60 * 60 * 1000;
+      andClauses.push({
+        OR: stagesWithSla.map((s) => ({
+          current_stage_id: s.id,
+          stage_entered_at: { lt: new Date(now - (s.sla_hours ?? 0) * HOUR_MS) },
+        })),
+      });
+      if (!q.status) where.status = 'ACTIVE';
+    }
+  }
+  if (q.search) {
+    const needle = q.search.trim();
+    andClauses.push({
+      OR: [
+        { family_name: { contains: needle, mode: 'insensitive' } },
+        { given_name: { contains: needle, mode: 'insensitive' } },
+        { student_code: { contains: needle, mode: 'insensitive' } },
+      ],
+    });
+  }
+  if (andClauses.length > 0) where.AND = andClauses;
+  return where;
+}
+
 export async function list(
   ctx: { db: Db; tenantId: string },
   q: StudentListQuery,

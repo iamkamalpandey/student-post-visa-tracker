@@ -65,7 +65,11 @@ export default function LinkInstitutionDialog({
     queryKey: ['institutions', 'all-for-link-picker'],
     queryFn: async () => {
       const res = await api.get<ApiList<InstitutionLite>>('/institutions', {
-        params: { limit: 200 },
+        // SVT-CONTRACT-2026-08 — PaginationQuery caps `limit` at 100 and the
+        // list schema is .strict(), so `limit: 200` was rejected with a 400 and
+        // this picker rendered "No options" forever — the dialog could not be
+        // completed at all. 100 is the maximum the API will accept.
+        params: { limit: 100 },
       });
       return res.data.data;
     },

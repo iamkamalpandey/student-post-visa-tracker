@@ -102,7 +102,11 @@ export default function SponsorshipsSection({ studentId }: SponsorshipsSectionPr
   const sponsorsQuery = useQuery({
     queryKey: ['sponsors', 'all'],
     queryFn: async () => {
-      const res = await api.get('/sponsors', { params: { limit: 200 } });
+      // SVT-CONTRACT-2026-08 — PaginationQuery caps `limit` at 100 and
+      // SponsorListQuery is .strict(), so `limit: 200` returned 400. That left
+      // the sponsor picker empty apart from the "create new" sentinel, and made
+      // the table's Sponsor column fall back to showing a raw UUID.
+      const res = await api.get('/sponsors', { params: { limit: 100 } });
       return unwrapList<Sponsor>(res.data);
     },
   });

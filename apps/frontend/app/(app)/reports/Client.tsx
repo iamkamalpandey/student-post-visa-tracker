@@ -21,8 +21,6 @@ import {
 import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
 import OpenInNewOutlinedIcon from '@mui/icons-material/OpenInNewOutlined';
 import GroupsOutlinedIcon from '@mui/icons-material/GroupsOutlined';
-import EventAvailableOutlinedIcon from '@mui/icons-material/EventAvailableOutlined';
-import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined';
 import ReceiptLongOutlinedIcon from '@mui/icons-material/ReceiptLongOutlined';
 import RefreshOutlinedIcon from '@mui/icons-material/RefreshOutlined';
 import { api, ApiError } from '@/lib/api';
@@ -93,15 +91,6 @@ const PREBUILT_REPORTS: ReportDef[] = [
     filter: { status: 'ACTIVE' },
   },
   {
-    id: 'reminders-pending',
-    title: 'Pending reminders',
-    description: 'Open reminders with their assignees and due dates.',
-    resource: 'reminders',
-    format: 'csv',
-    icon: <NotificationsOutlinedIcon fontSize="small" />,
-    filter: { status: 'PENDING' },
-  },
-  {
     id: 'enrollments-active',
     title: 'Active enrollments',
     description: 'Course enrollments currently in progress.',
@@ -110,15 +99,25 @@ const PREBUILT_REPORTS: ReportDef[] = [
     icon: <ReceiptLongOutlinedIcon fontSize="small" />,
     filter: { status: 'ENROLLED' },
   },
-  {
-    id: 'expiries-90d',
-    title: 'Upcoming expiries (90d)',
-    description: 'Visas, passports, insurance and documents lapsing soon.',
-    resource: 'students',
-    format: 'csv',
-    icon: <EventAvailableOutlinedIcon fontSize="small" />,
-    filter: { upcoming_expiries_within_days: 90 },
-  },
+  // SVT-CONTRACT-2026-08 — two cards were removed here rather than left on
+  // screen, because neither could ever produce what its description promised:
+  //
+  //   'Pending reminders'      resource: 'reminders' is not a member of
+  //                            ImportResource (students | institutions |
+  //                            programs | enrollments | program_fees), and
+  //                            CreateExportRequest is .strict(), so every
+  //                            click ended in a 400.
+  //
+  //   'Upcoming expiries (90d)' filter: { upcoming_expiries_within_days } is
+  //                            not a filter the export pipeline understands,
+  //                            so it was discarded and the user received a
+  //                            full dump of every student in the tenant under
+  //                            a label promising lapsing documents. That is the
+  //                            same disclosure problem as the students-list
+  //                            export filter bug, in a different costume.
+  //
+  // Both need real backend support (a reminders export resource; an expiry
+  // filter) before the cards come back.
 ];
 
 export default function ReportsPage() {
