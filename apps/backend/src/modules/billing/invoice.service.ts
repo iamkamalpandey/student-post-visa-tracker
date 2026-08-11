@@ -110,11 +110,20 @@ export async function renderInvoiceText(
   lines.push('----------------------------------------------------------------');
   lines.push('  TOTALS');
   lines.push('----------------------------------------------------------------');
+  // SVT-FIN-2026-08 — the scholarship is a DEDUCTION, so it prints signed and
+  // is followed by the net it produces. It used to print as a bare positive
+  // between "Plan Total" and a "Gross (sum)" that did not reflect it, which
+  // read as a discount the document never actually applied. "Billed (sum)" is
+  // the sum of the installment schedule and must now equal Net Payable — the
+  // reader can reconcile the document against itself.
   lines.push(`Plan Total     : ${fmtMinor(plan.total_minor, plan.currency)}`);
   if (plan.scholarship_minor > 0n) {
-    lines.push(`Scholarship    : ${fmtMinor(plan.scholarship_minor, plan.currency)}`);
+    lines.push(`Scholarship    : -${fmtMinor(plan.scholarship_minor, plan.currency)}`);
+    lines.push(
+      `Net Payable    : ${fmtMinor(plan.total_minor - plan.scholarship_minor, plan.currency)}`,
+    );
   }
-  lines.push(`Gross (sum)    : ${fmtMinor(totalGross, plan.currency)}`);
+  lines.push(`Billed (sum)   : ${fmtMinor(totalGross, plan.currency)}`);
   lines.push(`Paid           : ${fmtMinor(totalPaid, plan.currency)}`);
   lines.push(`Outstanding    : ${fmtMinor(totalBalance, plan.currency)}`);
   lines.push('================================================================');
@@ -409,10 +418,16 @@ export async function renderInvoicePdf(
   const totals = [
     ['Plan Total',  fmtMinor(plan.total_minor, plan.currency)],
   ] as Array<[string, string]>;
+  // SVT-FIN-2026-08 — mirrors the text renderer: signed deduction plus the net
+  // it produces, so the PDF reconciles against itself.
   if (plan.scholarship_minor > 0n) {
-    totals.push(['Scholarship', fmtMinor(plan.scholarship_minor, plan.currency)]);
+    totals.push(['Scholarship', `-${fmtMinor(plan.scholarship_minor, plan.currency)}`]);
+    totals.push([
+      'Net Payable',
+      fmtMinor(plan.total_minor - plan.scholarship_minor, plan.currency),
+    ]);
   }
-  totals.push(['Gross (sum)', fmtMinor(totalGross, plan.currency)]);
+  totals.push(['Billed (sum)', fmtMinor(totalGross, plan.currency)]);
   totals.push(['Paid',        fmtMinor(totalPaid, plan.currency)]);
   totals.push(['Outstanding', fmtMinor(totalBalance, plan.currency)]);
 

@@ -94,6 +94,68 @@ export function generateInstallmentLines(opts: {
 }
 
 /**
+ * Reduce an installment schedule by a scholarship, proportionally to each
+ * line's share of the total.
+ *
+ * SVT-FIN-2026-08 — `scholarship_minor` was stored on the FeePlan and PRINTED
+ * on both invoice renderers, but never subtracted from anything: `total_minor`
+ * was the raw sum of the lines and every installment carried its full gross.
+ * A plan with a scholarship therefore showed the student a discount line and
+ * then billed them the undiscounted amount — over-billing by exactly the
+ * scholarship, on every installment, silently.
+ *
+ * Proportional rather than flat allocation, because a flat per-line cut drives
+ * a small line negative: lines [50, 10000] with a 200 scholarship would take
+ * 100 off each and leave -50. Proportional cannot, and the bound is provable:
+ *
+ *   - floor(s·gᵢ/T) ≤ gᵢ for s ≤ T, and strictly < gᵢ whenever s < T, so the
+ *     base cut never reaches the line amount.
+ *   - The largest-remainder pass adds at most one unit per line. It can only
+ *     touch lines whose fractional part is non-zero, and since Σfracᵢ =
+ *     shortfall·T with every fracᵢ < T, strictly more than `shortfall` lines
+ *     have a non-zero fraction. So the units always land on lines with
+ *     gᵢ > 0 and a cut still strictly below gᵢ.
+ *
+ * No line can go negative and the cuts sum to exactly `scholarship_minor`.
+ * Ties break on the earliest line, so the split is deterministic and a
+ * regenerated plan reproduces byte-for-byte.
+ */
+export function applyScholarship(
+  lines: FeePlanLineInput[],
+  scholarship_minor: bigint,
+): FeePlanLineInput[] {
+  if (scholarship_minor === 0n) return lines;
+  if (scholarship_minor < 0n) {
+    const e = new Error('scholarship_minor must be >= 0') as Error & { status: number };
+    e.status = 400;
+    throw e;
+  }
+  const total = lines.reduce((sum, l) => sum + l.gross_minor, 0n);
+  if (scholarship_minor > total) {
+    const e = new Error(
+      `scholarship_minor (${scholarship_minor}) cannot exceed the schedule total (${total})`,
+    ) as Error & { status: number };
+    e.status = 400;
+    throw e;
+  }
+  if (total === 0n) return lines;
+
+  const cuts = lines.map((l) => (scholarship_minor * l.gross_minor) / total);
+  const allocated = cuts.reduce((sum, c) => sum + c, 0n);
+  const shortfall = Number(scholarship_minor - allocated);
+  if (shortfall > 0) {
+    const ranked = lines
+      .map((l, i) => ({ i, frac: (scholarship_minor * l.gross_minor) % total }))
+      .sort((a, b) => (a.frac === b.frac ? a.i - b.i : a.frac > b.frac ? -1 : 1));
+    for (let k = 0; k < shortfall; k += 1) {
+      const idx = ranked[k]!.i;
+      cuts[idx] = cuts[idx]! + 1n;
+    }
+  }
+  return lines.map((l, i) => ({ ...l, gross_minor: l.gross_minor - cuts[i]! }));
+}
+
+/**
  * Compute net_minor + balance_minor + new status from gross + adjustments + paid.
  * Adjustment-sign convention (see schema.prisma FeeAdjustment block):
  *   LATE_FEE  → positive (adds to net)

@@ -22,7 +22,9 @@ import { decodeCursor, encodeCursor, type Db } from './crm-leads.types.js';
 type Ctx = { db: Db; tenantId: string; actorId: string };
 type ReadCtx = { db: Db; tenantId: string };
 
-const OPEN_FEE_STATUSES = ['SCHEDULED', 'DUE', 'OVERDUE'] as const;
+// SVT-FIN-2026-08 — PARTIAL is an OPEN status. A part-paid fee is still owed;
+// omitting it here is exactly how the shortfall used to leave receivables.
+const OPEN_FEE_STATUSES = ['SCHEDULED', 'DUE', 'PARTIAL', 'OVERDUE'] as const;
 
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 
@@ -312,12 +314,30 @@ export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input
   //    billing side's fee_installments_paid_le_net.
   //
   // Folding the version into the WHERE fixes (2) the same way updateFee does.
+  // SVT-FIN-2026-08 — `paid_amount_minor` is the CUMULATIVE amount settled on
+  // this fee, not the size of one payment. That is what the `?? amount_minor`
+  // default has always meant ("no figure given → they settled it in full"), and
+  // treating a follow-up payment as cumulative is the reading that cannot
+  // double-count. A figure below what is already recorded would be a refund,
+  // which is not this endpoint's job.
   const settledMinor = input.paid_amount_minor ?? current.amount_minor;
   if (settledMinor > current.amount_minor) {
     throw UnprocessableEntity(
       `Settled amount ${settledMinor} exceeds the billed amount ${current.amount_minor}. Adjust the fee first, or record the surplus separately.`,
     );
   }
+  const alreadySettled = current.paid_amount_minor ?? 0n;
+  if (settledMinor < alreadySettled) {
+    throw UnprocessableEntity(
+      `Settled amount ${settledMinor} is below the ${alreadySettled} already recorded on this fee. paid_amount_minor is the cumulative total settled; reverse the payment instead of lowering it.`,
+    );
+  }
+  // SVT-FIN-2026-08 — the status now follows the arithmetic instead of being
+  // hardcoded to PAID. A short payment stays PARTIAL, which keeps it inside
+  // OPEN_FEE_STATUSES so the balance remains in receivables and keeps being
+  // chased. Previously 2,500 against a 10,000 fee closed it as PAID and the
+  // 7,500 was silently written off.
+  const fullySettled = settledMinor >= current.amount_minor;
   const result = await db.crmLeadFee.updateMany({
     where: {
       id: feeId,
@@ -327,7 +347,15 @@ export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input
       status: { notIn: ['PAID', 'WAIVED'] },
       version: current.version,
     },
-    data: { status: 'PAID', paid_at: new Date(input.paid_on), paid_amount_minor: settledMinor, updated_by_id: actorId, version: { increment: 1 } },
+    data: {
+      status: fullySettled ? 'PAID' : 'PARTIAL',
+      // Only a full settlement has a settlement date; a partial payment leaves
+      // paid_at null so "when was this fee cleared?" keeps a truthful answer.
+      paid_at: fullySettled ? new Date(input.paid_on) : null,
+      paid_amount_minor: settledMinor,
+      updated_by_id: actorId,
+      version: { increment: 1 },
+    },
   });
   if (result.count === 0) {
     throw Conflict('Fee changed while being settled (paid, waived, or amended); reload and retry');
@@ -335,8 +363,28 @@ export async function markFeePaid(ctx: Ctx, leadId: string, feeId: string, input
   const updated = await getFee(db, tenantId, leadId, feeId);
   // SVT-SYNC-2026-06 — A7: dismiss PENDING/SENT reminders that reference this fee.
   // Without this, "payment due in 7 days" notifications keep firing for a paid fee.
-  await dismissRemindersForEntity(db, tenantId, 'crm_lead_fee', feeId);
-  await writeAudit({ action: 'crm_lead.fee.paid', entityType: 'crm_lead_fee', entityId: feeId, actorId, tenantId, after: { paid_on: input.paid_on } } as never);
+  //
+  // SVT-FIN-2026-08 — but ONLY on full settlement. Dismissing on a part payment
+  // would silence the chase on a fee that is still owed, which is the same
+  // disappearing-shortfall failure this change exists to fix, one layer up.
+  if (fullySettled) {
+    await dismissRemindersForEntity(db, tenantId, 'crm_lead_fee', feeId);
+  }
+  await writeAudit({
+    action: fullySettled ? 'crm_lead.fee.paid' : 'crm_lead.fee.part_paid',
+    entityType: 'crm_lead_fee',
+    entityId: feeId,
+    actorId,
+    tenantId,
+    // Record what was actually settled and what remains, so the trail answers
+    // "how much came in?" without re-deriving it from a later snapshot.
+    after: {
+      paid_on: input.paid_on,
+      status: fullySettled ? 'PAID' : 'PARTIAL',
+      settled_minor: settledMinor.toString(),
+      balance_minor: (current.amount_minor - settledMinor).toString(),
+    },
+  } as never);
   return toFee(updated);
 }
 
@@ -529,8 +577,15 @@ export async function convertLeadToStudent(
   // tx which would break atomicity (see students.service.create).
   // (Enrollment is intentionally NOT auto-created — a curated Program/Institution
   // is required; fabricating catalog rows from CRM free-text would corrupt it.)
+  // SVT-FIN-2026-08 — PARTIAL maps to PENDING deliberately, not by falling
+  // through the `?? 'PENDING'` default below. FinanceStatus has no PARTIAL
+  // member; on that side a part-paid item stays OPEN and the partiality is
+  // carried by `paid_amount_minor`, which the create below already copies. So
+  // a part-paid lead fee converts to an open finance item owing the balance —
+  // the shortfall survives the convert instead of being closed out.
   const feeStatusMap: Record<string, 'PENDING' | 'PAID' | 'OVERDUE' | 'WAIVED'> = {
-    SCHEDULED: 'PENDING', DUE: 'PENDING', OVERDUE: 'OVERDUE', PAID: 'PAID', WAIVED: 'WAIVED',
+    SCHEDULED: 'PENDING', DUE: 'PENDING', PARTIAL: 'PENDING', OVERDUE: 'OVERDUE',
+    PAID: 'PAID', WAIVED: 'WAIVED',
   };
   let feesMigrated = 0;
   // SVT-QA-2026-08 (LEAD-C1) — compensating cleanup for the just-created

@@ -27,7 +27,11 @@ export type ConvertLeadToStudentRequest = z.infer<typeof ConvertLeadToStudentReq
 export const CrmLeadStatusEnum = z.enum(['ACTIVE', 'COMPLETED', 'WITHDRAWN', 'ON_HOLD']);
 export type CrmLeadStatus = z.infer<typeof CrmLeadStatusEnum>;
 
-export const CrmFeeStatusEnum = z.enum(['SCHEDULED', 'DUE', 'PAID', 'WAIVED', 'OVERDUE']);
+// SVT-FIN-2026-08 — PARTIAL must be listed here or a part-paid fee fails
+// validation the moment the API returns it. This enum is the FE↔BE contract.
+export const CrmFeeStatusEnum = z.enum([
+  'SCHEDULED', 'DUE', 'PARTIAL', 'PAID', 'WAIVED', 'OVERDUE',
+]);
 export type CrmFeeStatus = z.infer<typeof CrmFeeStatusEnum>;
 
 export const CrmLeadCourseStateEnum = z.enum([

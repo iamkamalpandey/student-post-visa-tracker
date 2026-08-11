@@ -26,6 +26,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1101.0",
     "@prisma/client": "^5.22.0",
+    "@sentry/node": "^10.70.0",
     "@spv/api-types": "workspace:*",
     "@spv/utils": "workspace:*",
     "@spv/zod-schemas": "workspace:*",

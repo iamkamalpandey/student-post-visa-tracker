@@ -526,7 +526,9 @@ export function useUpdateTenantSettings(): UseMutationResult<
 // units arrive as STRINGS (global BigInt serializer) — format only, no math.
 // ---------------------------------------------------------------------------
 
-export type CrmFeeStatus = 'SCHEDULED' | 'DUE' | 'PAID' | 'WAIVED' | 'OVERDUE';
+// SVT-FIN-2026-08 — PARTIAL: a fee settled for less than it was billed. Still
+// owed, so it counts as open everywhere open fees are summed.
+export type CrmFeeStatus = 'SCHEDULED' | 'DUE' | 'PARTIAL' | 'PAID' | 'WAIVED' | 'OVERDUE';
 export type CrmLeadStatus = 'ACTIVE' | 'COMPLETED' | 'WITHDRAWN' | 'ON_HOLD';
 
 export type CrmFeeRow = {

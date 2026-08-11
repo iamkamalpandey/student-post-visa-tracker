@@ -14,15 +14,20 @@ import TranslateOutlinedIcon from '@mui/icons-material/TranslateOutlined';
 import CheckOutlinedIcon from '@mui/icons-material/CheckOutlined';
 import { setLocale } from '@/app/actions/set-locale';
 
+// SVT-I18N-2026-08 — this component is deliberately NOT mounted anywhere yet.
+// It offered four languages of which three were verbatim English; `ar`/`hi`
+// have been deleted and `ne` is still placeholder English (see
+// messages/ne.json `_translation_status`). Mounting a switcher whose only
+// effect is a page reload would look like a defect to anyone who tried it.
+// Mount this in AppShell next to NotificationsBell once ne.json is really
+// translated — the wiring below and app/actions/set-locale.ts already work.
 type LocaleOption = {
-  code: 'en' | 'ar' | 'hi' | 'ne';
+  code: 'en' | 'ne';
   label: string;
 };
 
 const LOCALES: LocaleOption[] = [
   { code: 'en', label: 'English' },
-  { code: 'ar', label: 'العربية' },
-  { code: 'hi', label: 'हिन्दी' },
   { code: 'ne', label: 'नेपाली' },
 ];
 

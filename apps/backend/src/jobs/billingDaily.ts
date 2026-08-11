@@ -47,6 +47,11 @@ const SYSTEM_ACTOR = null; // System cron writes — actor_id null is recognised
 // first installment is due today becomes a visible receivable immediately
 // rather than only on the due date itself.
 const INVOICE_LEAD_DAYS = 7;
+// How long past its due date an installment sits before it flips to OVERDUE.
+// A system constant, deliberately NOT a policy lookup — it used to be read off
+// a policy object that was always empty, which made it look configurable while
+// it never was.
+const OVERDUE_GRACE_DAYS = 7;
 const SYSTEM_ROLE = 'ADMIN' as const;
 
 type LateFeePolicy = {
@@ -63,7 +68,13 @@ function parsePolicy(raw: unknown): LateFeePolicy {
   const p = (obj.late_fee_policy ?? obj) as Record<string, unknown>;
   return {
     enabled: Boolean(p.enabled),
-    amount_minor: p.amount_minor as number | string | undefined,
+    // SVT-FIN-2026-08 — accept `fee_minor` as an alias. schema.prisma documents
+    // the FeePlan.late_fee_policy shape as `{ grace_days, fee_minor | fee_pct,
+    // max_per_installment }` while this parser only ever read `amount_minor`,
+    // so a policy authored from the schema comment parsed to `undefined` and
+    // the plan silently never charged. Reading both removes a configuration
+    // trap whose only symptom was nothing happening.
+    amount_minor: (p.amount_minor ?? p.fee_minor) as number | string | undefined,
     currency: p.currency as string | undefined,
     grace_days: typeof p.grace_days === 'number' ? p.grace_days : 7,
     max_per_installment: typeof p.max_per_installment === 'number' ? p.max_per_installment : 3,
@@ -92,15 +103,9 @@ async function processTenant(tenantId: string): Promise<{
   if (!tenant || !tenant.billing_enabled) {
     return { scheduled_to_invoiced, invoiced_to_due, due_to_overdue, late_fees_applied, plans_completed, errors };
   }
-  // SVT-WAVE-BILLING-2026-05 — tenant-wide late_fee_policy lives on the
-  // Tenant in a future migration (`late_fee_policy_json`). Until then,
-  // late fees are disabled by default; per-FeePlan.late_fee_policy is the
-  // fallback (read inside the LATE_FEE loop below).
-  const policy: LateFeePolicy = parsePolicy(null);
-
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
-  const graceDays = policy.grace_days ?? 7;
+  const graceDays = OVERDUE_GRACE_DAYS;
   const overdueCutoff = new Date(today);
   overdueCutoff.setUTCDate(overdueCutoff.getUTCDate() - graceDays);
 
@@ -255,86 +260,115 @@ async function processTenant(tenantId: string): Promise<{
   }
 
   // 3. Apply LATE_FEE per OVERDUE — idempotent on applied_on=today.
-  if (policy.enabled && policy.amount_minor) {
-    try {
-      const amountMinor = BigInt(policy.amount_minor);
-      if (amountMinor <= 0n) {
-        logger.warn({ tenantId }, 'billing.daily: late_fee_policy.amount_minor must be > 0');
-      } else {
-        const candidates = await prisma.feeInstallment.findMany({
-          where: {
-            tenant_id: tenantId,
-            deleted_at: null,
-            status: 'OVERDUE',
-          },
-          select: {
-            id: true,
-            currency: true,
-            adjustments: {
-              where: { kind: 'LATE_FEE', applied_on: today },
-              select: { id: true },
-            },
-            _count: { select: { adjustments: { where: { kind: 'LATE_FEE' } } } },
-          },
-          take: 5000,
-        });
-        for (const inst of candidates) {
-          // Idempotent — skip if a LATE_FEE already applied today.
-          if (inst.adjustments.length > 0) continue;
-          // Cap to max_per_installment.
-          if (
-            policy.max_per_installment != null &&
-            inst._count.adjustments >= policy.max_per_installment
-          ) {
-            continue;
-          }
-          try {
-            await prisma.feeAdjustment.create({
-              data: {
-                tenant_id: tenantId,
-                fee_installment_id: inst.id,
-                kind: 'LATE_FEE',
-                amount_minor: amountMinor,
-                reason_code: 'auto.overdue',
-                reason_text: `Auto late fee — overdue by > ${graceDays}d`,
-                applied_on: today,
-                created_by_id: SYSTEM_ACTOR,
-              },
-            });
-            // Recompute net + balance for this installment.
-            const sumRows = await prisma.feeAdjustment.aggregate({
-              where: { fee_installment_id: inst.id, tenant_id: tenantId },
-              _sum: { amount_minor: true },
-            });
-            const adjSum = sumRows._sum.amount_minor ?? 0n;
-            const fresh = await prisma.feeInstallment.findFirst({
-              where: { id: inst.id },
-              select: { gross_minor: true, paid_minor: true },
-            });
-            if (fresh) {
-              const newNet = fresh.gross_minor + adjSum;
-              const newBalance = newNet - fresh.paid_minor;
-              await prisma.feeInstallment.updateMany({
-                where: { id: inst.id, tenant_id: tenantId },
-                data: {
-                  net_minor: newNet < 0n ? 0n : newNet,
-                  balance_minor: newBalance < 0n ? 0n : newBalance,
-                  updated_by_id: SYSTEM_ACTOR,
-                  version: { increment: 1 },
-                },
-              });
-            }
-            late_fees_applied += 1;
-          } catch (err) {
-            errors += 1;
-            logger.warn({ err, installmentId: inst.id, tenantId }, 'billing.daily: late_fee write failed');
-          }
-        }
+  //
+  // SVT-FIN-2026-08 — this entire block was unreachable. The gate was
+  // `policy.enabled`, and `policy` came from `parsePolicy(null)`, so `enabled`
+  // was `Boolean(undefined)` — false, always, for every tenant. Roughly eighty
+  // lines of careful, correct late-fee machinery had never executed once, while
+  // reading to any auditor (or any competitor reading the repo) as a shipped
+  // feature. The comment above it blamed a `tenant.settings` JSON column that
+  // does not exist on Tenant in any migration.
+  //
+  // `FeePlan.late_fee_policy Json?` DOES exist, so the policy is now read per
+  // plan. That is also the safer default: a plan whose policy is null stays
+  // disabled, so no late fee can ever land on a bill unless that specific plan
+  // opted in. Nothing starts charging as a side effect of this fix.
+  try {
+    const candidates = await prisma.feeInstallment.findMany({
+      where: {
+        tenant_id: tenantId,
+        deleted_at: null,
+        status: 'OVERDUE',
+      },
+      select: {
+        id: true,
+        currency: true,
+        fee_plan: { select: { late_fee_policy: true } },
+        adjustments: {
+          where: { kind: 'LATE_FEE', applied_on: today },
+          select: { id: true },
+        },
+        _count: { select: { adjustments: { where: { kind: 'LATE_FEE' } } } },
+      },
+      take: 5000,
+    });
+    for (const inst of candidates) {
+      const policy = parsePolicy(inst.fee_plan?.late_fee_policy);
+      if (!policy.enabled || policy.amount_minor == null) continue;
+      // The amount arrives from a JSON column, so it is untrusted input:
+      // BigInt() throws on anything non-integral.
+      let amountMinor: bigint;
+      try {
+        amountMinor = BigInt(policy.amount_minor);
+      } catch {
+        errors += 1;
+        logger.warn(
+          { tenantId, installmentId: inst.id, amount: policy.amount_minor },
+          'billing.daily: late_fee_policy.amount_minor is not an integer',
+        );
+        continue;
       }
-    } catch (err) {
-      errors += 1;
-      logger.error({ err, tenantId }, 'billing.daily: late_fee policy execution failed');
+      if (amountMinor <= 0n) {
+        logger.warn(
+          { tenantId, installmentId: inst.id },
+          'billing.daily: late_fee_policy.amount_minor must be > 0',
+        );
+        continue;
+      }
+      // Idempotent — skip if a LATE_FEE already applied today.
+      if (inst.adjustments.length > 0) continue;
+      // Cap to max_per_installment.
+      if (
+        policy.max_per_installment != null &&
+        inst._count.adjustments >= policy.max_per_installment
+      ) {
+        continue;
+      }
+      try {
+        await prisma.feeAdjustment.create({
+          data: {
+            tenant_id: tenantId,
+            fee_installment_id: inst.id,
+            kind: 'LATE_FEE',
+            amount_minor: amountMinor,
+            reason_code: 'auto.overdue',
+            reason_text: `Auto late fee — overdue by > ${graceDays}d`,
+            applied_on: today,
+            created_by_id: SYSTEM_ACTOR,
+          },
+        });
+        // Recompute net + balance for this installment.
+        const sumRows = await prisma.feeAdjustment.aggregate({
+          where: { fee_installment_id: inst.id, tenant_id: tenantId },
+          _sum: { amount_minor: true },
+        });
+        const adjSum = sumRows._sum.amount_minor ?? 0n;
+        const fresh = await prisma.feeInstallment.findFirst({
+          where: { id: inst.id },
+          select: { gross_minor: true, paid_minor: true },
+        });
+        if (fresh) {
+          const newNet = fresh.gross_minor + adjSum;
+          const newBalance = newNet - fresh.paid_minor;
+          await prisma.feeInstallment.updateMany({
+            where: { id: inst.id, tenant_id: tenantId },
+            data: {
+              net_minor: newNet < 0n ? 0n : newNet,
+              balance_minor: newBalance < 0n ? 0n : newBalance,
+              updated_by_id: SYSTEM_ACTOR,
+              version: { increment: 1 },
+            },
+          });
+        }
+        late_fees_applied += 1;
+      } catch (err) {
+        errors += 1;
+        logger.warn({ err, installmentId: inst.id, tenantId }, 'billing.daily: late_fee write failed');
+      }
     }
+  } catch (err) {
+    errors += 1;
+    logger.error({ err, tenantId }, 'billing.daily: late_fee policy execution failed');
   }
 
   // 4. ACTIVE → COMPLETED when all installments terminal.

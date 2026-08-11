@@ -278,4 +278,70 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
     const r = await app.query(`SELECT id FROM students WHERE student_code LIKE 'RLS-%'`);
     expect(r.rowCount).toBe(0);
   });
+
+  // SVT-SEC-2026-08 — schema-wide invariants, not single-table behaviour.
+  //
+  // The tests above prove RLS works on `students`. They say nothing about the
+  // other ~100 tenant tables, and that gap is exactly where the last hole was:
+  // `interview_attempts` carried tenant_id AND candidate_name/candidate_email
+  // with no RLS at all, and no test noticed because no test looked at the
+  // schema as a whole. These three assertions look at every table at once, so
+  // a new tenant-owned table cannot ship unprotected.
+  describe('schema-wide RLS invariants', () => {
+    it('every table with a tenant_id column has RLS enabled', async () => {
+      expect(ready).toBe(true);
+      const r = await admin.query(`
+        SELECT c.relname
+          FROM pg_class c
+          JOIN information_schema.columns col
+            ON col.table_name = c.relname AND col.column_name = 'tenant_id'
+         WHERE c.relkind = 'r'
+           AND col.table_schema = 'public'
+           AND NOT c.relrowsecurity
+         ORDER BY 1
+      `);
+      expect(r.rows.map((x: { relname: string }) => x.relname)).toEqual([]);
+    });
+
+    it('every RLS table also FORCEs it, so the owner cannot bypass', async () => {
+      expect(ready).toBe(true);
+      // ONE documented exception. jobs/hashAnchor.ts writes an audit anchor for
+      // every tenant from a single unscoped connection with no app.tenant_id
+      // set — correct for a system-wide integrity job. FORCEing RLS there would
+      // make that insert fail its own WITH CHECK and silently stop nightly
+      // tamper-evidence, trading a real security control for a cosmetic one.
+      // The residual exposure is the owner role, which already holds DDL.
+      // Any OTHER table appearing here is a genuine gap, not a new exception.
+      const KNOWN_UNFORCED = ['audit_anchors'];
+      const r = await admin.query(`
+        SELECT c.relname
+          FROM pg_class c
+          JOIN information_schema.columns col
+            ON col.table_name = c.relname AND col.column_name = 'tenant_id'
+         WHERE c.relkind = 'r'
+           AND col.table_schema = 'public'
+           AND c.relrowsecurity
+           AND NOT c.relforcerowsecurity
+         ORDER BY 1
+      `);
+      const unforced = r.rows.map((x: { relname: string }) => x.relname);
+      expect(unforced.filter((t: string) => !KNOWN_UNFORCED.includes(t))).toEqual([]);
+    });
+
+    it('no policy anywhere reintroduces the `app_current_tenant() IS NULL` escape hatch', async () => {
+      // That clause makes a connection which never set the GUC see EVERYTHING
+      // rather than nothing. It has been removed twice already
+      // (…235983, …236005) and re-added twice by later migrations, so it is
+      // asserted globally rather than per table.
+      expect(ready).toBe(true);
+      const r = await admin.query(`
+        SELECT tablename, policyname
+          FROM pg_policies
+         WHERE qual LIKE '%app_current_tenant() IS NULL%'
+            OR with_check LIKE '%app_current_tenant() IS NULL%'
+         ORDER BY tablename
+      `);
+      expect(r.rows).toEqual([]);
+    });
+  });
 });

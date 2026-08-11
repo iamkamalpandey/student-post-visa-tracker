@@ -31,6 +31,7 @@ import type {
 } from '@spv/zod-schemas';
 import {
   generateInstallmentLines,
+  applyScholarship,
   shiftIsoDate,
   derivePlanStatusFromInstallments,
 } from './pricing.js';
@@ -142,9 +143,17 @@ export async function createFeePlan(ctx: Ctx, input: CreateFeePlanRequest) {
 
   const currency =
     input.currency ?? enrollment.tuition_currency ?? (await tenantDefaultCurrency(ctx));
-  const lines = resolveLines(input);
-  const total = lines.reduce((sum, l) => sum + l.gross_minor, 0n);
+  const grossLines = resolveLines(input);
+  const total = grossLines.reduce((sum, l) => sum + l.gross_minor, 0n);
   const scholarship = input.scholarship_minor ?? 0n;
+  // SVT-FIN-2026-08 — the scholarship comes off the schedule the student
+  // actually pays. `total_minor` stays GROSS: it is fed from the enrollment's
+  // `tuition_total_minor` (billing/enrollment-hook.ts) and is what the invoice's
+  // "Plan Total" line means. The invariant the tests pin is therefore
+  //   sum(installments.gross_minor) === plan.total_minor - plan.scholarship_minor
+  // Previously the scholarship was stored, printed on the invoice, and applied
+  // to nothing — the student was billed the full amount.
+  const lines = applyScholarship(grossLines, scholarship);
 
   // Single transaction: plan + installments + FSM transition + audit.
   let out;

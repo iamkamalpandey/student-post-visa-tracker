@@ -223,10 +223,18 @@ export default function DetailClient({ id }: { id: string }) {
             // Outstanding = unpaid SPVT fees, summed per currency (BigInt, never
             // mixed across currencies). NOT netted against V2 payments — those
             // are a separate historical record shown on the Payments tab.
-            const open = new Set(['SCHEDULED', 'DUE', 'OVERDUE']);
+            // SVT-FIN-2026-08 — PARTIAL is open, and what is outstanding on it
+            // is the BALANCE, not the billed amount. Summing amount_minor for a
+            // part-paid fee would overstate the debt by whatever was already
+            // received. For the other open statuses paid_amount_minor is null,
+            // so the subtraction is a no-op and one expression covers all four.
+            const open = new Set(['SCHEDULED', 'DUE', 'PARTIAL', 'OVERDUE']);
             const byCurrency = new Map<string, bigint>();
             for (const f of lead.fees) {
-              if (open.has(f.status)) byCurrency.set(f.currency, (byCurrency.get(f.currency) ?? 0n) + BigInt(f.amount_minor));
+              if (!open.has(f.status)) continue;
+              const balance = BigInt(f.amount_minor) - BigInt(f.paid_amount_minor ?? 0);
+              if (balance <= 0n) continue;
+              byCurrency.set(f.currency, (byCurrency.get(f.currency) ?? 0n) + balance);
             }
             const outstanding = [...byCurrency.entries()];
             return (

@@ -527,7 +527,10 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
     where: {
       tenant_id: tenantId,
       deleted_at: null,
-      status: { in: ['SCHEDULED', 'DUE'] },
+      // SVT-FIN-2026-08 — PARTIAL still owes a balance, so it must keep being
+      // chased. Omitting it would let a fee go quiet the moment a token
+      // payment landed against it.
+      status: { in: ['SCHEDULED', 'DUE', 'PARTIAL'] },
     },
     select: {
       id: true,

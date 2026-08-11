@@ -3038,6 +3038,10 @@ enum CrmLeadStatus {
 enum CrmFeeStatus {
   SCHEDULED
   DUE
+  // SVT-FIN-2026-08 — a payment smaller than the billed amount. Without this
+  // a short payment booked as PAID and the shortfall vanished from
+  // receivables. Non-terminal: a PARTIAL fee is still owed and still chased.
+  PARTIAL
   PAID
   WAIVED
   OVERDUE
