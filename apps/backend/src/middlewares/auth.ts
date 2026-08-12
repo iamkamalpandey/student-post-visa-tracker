@@ -98,7 +98,22 @@ async function isTokenDenylisted(jti: string): Promise<boolean> {
   if (cachedAt !== undefined && Date.now() - cachedAt < DENYLIST_NEG_CACHE_TTL_MS) {
     return false; // known-not-denied, recently verified
   }
-  const denied = await prisma.accessTokenDenylist.findUnique({ where: { jti } });
+  // SVT-SEC-2026-08 — prismaAdmin, for the same reason getSessionsValidFromMs
+  // above uses it: this runs inside `authenticate`, which executes BEFORE
+  // `tenantContext` sets the `app.tenant_id` GUC.
+  //
+  // `access_token_denylist` carries FORCE RLS with
+  // `USING (tenant_id = app_current_tenant() OR tenant_id IS NULL)`, and every
+  // denylist row is written with a real tenant_id. With no GUC set,
+  // `tenant_id = app_current_tenant()` evaluates to NULL and `tenant_id IS NULL`
+  // is false, so the row is FILTERED OUT — findUnique returns null without
+  // throwing. That is indistinguishable from "this token was never revoked", so
+  // the check silently passed every revoked token through.
+  //
+  // Note this bypassed the fail-closed handling at the call site: that catch
+  // only fires on an exception, and RLS filtering is not an exception. The
+  // control looked robust and was inert.
+  const denied = await prismaAdmin.accessTokenDenylist.findUnique({ where: { jti } });
   if (denied && denied.expires_at > new Date()) return true;
   denylistNegCache.set(jti, Date.now());
   // Opportunistic sweep: the map is keyed by JTI so it grows with unique

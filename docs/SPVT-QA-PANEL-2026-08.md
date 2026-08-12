@@ -420,7 +420,7 @@ path traversal, no tenant id taken from body or params. Tenant isolation is
 genuinely good. The damage is concentrated in session revocation, one
 authorization gate, and credentials reaching logs.
 
-### T6-1 · `POST /auth/logout` never revokes the access token — **OPEN**
+### T6-1 · `POST /auth/logout` never revoked the access token — **FIXED**
 `src/modules/auth/auth.routes.ts:44` · The chain is `originGuard, logout` with no
 `authenticate`, so `req.user` is always undefined, so the access-token JTI is
 never written. The denylist block in `auth.service.ts:607` is the only writer in
@@ -430,7 +430,48 @@ stolen token keeps full API access for the remaining TTL after the victim clicks
 denylist through the un-scoped `prisma` client *before* `tenantContext` sets the
 GUC, so even a real row returns null under RLS — **fail-open**.
 
-### T6-2 · The list endpoint bypasses `requireStudentOwnership` — **OPEN**
+> Fixed on both halves, because either alone leaves it inert.
+> **Write:** the route deliberately omits `authenticate` so an expired token can
+> still clear its cookie, which meant `req.user` was always undefined and the
+> JTI always null. The controller now verifies the bearer itself — a valid token
+> yields a JTI to revoke, anything else falls through to the same
+> cookie-clearing behaviour, so logout still cannot fail.
+> **Read:** `isTokenDenylisted` used the tenant-scoped client while running
+> *before* `tenantContext` sets the GUC. Under RLS the row was FILTERED, so
+> `findUnique` returned null without throwing — which the call site's
+> fail-closed catch could never see, because filtering is not an exception. Now
+> uses `prismaAdmin`, matching `getSessionsValidFromMs` in the same file.
+> 7 tests; there had been none on this path at all.
+
+### T6-2 · The list endpoint bypasses `requireStudentOwnership` — **OPEN, panel convened**
+Three expert lenses (security, agency-domain, codebase archaeology) all
+concluded: scope it. Archaeology verdict **INTENDED SCOPED** — 16 of 19
+student-linked read surfaces already scope for non-ADMIN, the docs promise it,
+and `comms/controller.ts` fixed the identical defect with the reasoning written
+out. Blocked on one product decision (rollout flag default), and on the
+prerequisites below, both now done:
+- unassigned-student lockout — **FIXED** (see T6-2a)
+- `list()` and the export now share one predicate — **FIXED**
+
+### T6-2a · Counsellors were locked out of students they created — **FIXED**
+`assertStudentOwnership` compared `assigned_to_id !== sub`, and `null !== uuid`
+is true, so every UNASSIGNED student 403'd for non-admins. Unassigned is the
+normal arrival state: `create()` defaults it to null and quick-create never
+sends one. A counsellor pressed "Add student", got a row, and was refused on
+opening it — and could not repair it, since only ADMIN may reassign. The
+realistic response is to create it again, so the symptom was duplicate records
+rather than a reported error. `requireLeadOwnership` in the same file already
+had the carve-out. 7 tests.
+
+### T6-2b · `list()` did not use the shared predicate builder — **FIXED**
+`buildStudentListWhere` was extracted for the export and the export pointed at
+it, but `list()` kept an inline copy — while the builder's docstring promised
+"the list and the export cannot drift apart again" and `exports.service.ts`
+called it "the exact builder /students uses". Neither was true, and they had
+begun to diverge. Consolidating also gives caseload scoping one place to land
+instead of two kept in step by hand.
+
+### T6-2-ORIGINAL · (superseded by T6-2 above)
 `src/modules/students/students.routes.ts:45` vs `:58` · `GET /students/:id` is
 ownership-gated and returns 403; `GET /students?limit=100` is not scoped to the
 caller at all and returns every student in the tenant, with names, DOB, both

@@ -168,6 +168,10 @@ const prismaMock = makePrismaMock();
 vi.mock('../src/config/db.js', () => ({
   prisma: prismaMock,
   prismaAdmin: {
+    // SVT-SEC-2026-08 — authenticate() reads the JTI denylist via the
+    // BYPASS-RLS client (it runs before tenantContext sets the GUC) and fails
+    // CLOSED when the lookup throws. null = "this token was never revoked".
+    accessTokenDenylist: { findUnique: async () => null },
     // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
     // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
     // fails CLOSED when the lookup throws. null = "no revocation on record".

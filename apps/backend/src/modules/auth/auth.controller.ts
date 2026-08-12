@@ -4,7 +4,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 
-import { jwks as jwksKeySet } from '../../shared/jwt.js';
+import { jwks as jwksKeySet, verifyAccessToken } from '../../shared/jwt.js';
 import { setRefreshCookie, clearRefreshCookie, readRefreshCookie } from '../../shared/cookies.js';
 
 import { authService } from './auth.service.js';
@@ -63,13 +63,47 @@ export const authController = {
   async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const cookieToken = readRefreshCookie(req);
-      // The access JTI may or may not be present — logout works either way.
-      const accessJti = req.user?.jti ?? null;
+
+      // SVT-SEC-2026-08 — resolve the access token's identity HERE rather than
+      // relying on `req.user`.
+      //
+      // The route deliberately omits `authenticate` (see auth.routes.ts) so a
+      // client whose access token already expired can still clear its refresh
+      // cookie. The side effect was that `req.user` was ALWAYS undefined on
+      // this path, so `accessJti` was always null, so the `if (accessJti)`
+      // branch in authService.logout — the only writer of accessTokenDenylist
+      // anywhere in the codebase — never executed. The denylist was dead code,
+      // and a stolen access token stayed valid for the rest of its TTL after
+      // the victim clicked "Log out" and saw it succeed.
+      //
+      // Verifying the bearer here keeps both properties: a valid token yields a
+      // JTI and gets revoked, while a missing, malformed or expired one falls
+      // through to the same cookie-clearing behaviour as before. Logout must
+      // never fail — an error here would strand the refresh cookie, which is
+      // the more dangerous credential of the two.
+      let actor: { jti: string | null; sub: string | null; tid: string | null } = {
+        jti: req.user?.jti ?? null,
+        sub: req.user?.sub ?? null,
+        tid: req.user?.tid ?? null,
+      };
+      if (!actor.jti) {
+        const header = req.header('authorization');
+        if (header?.startsWith('Bearer ')) {
+          try {
+            const claims = await verifyAccessToken(header.slice(7));
+            actor = { jti: claims.jti, sub: claims.sub, tid: claims.tid };
+          } catch {
+            // Expired / invalid / wrong-key — nothing to revoke, and the
+            // refresh cookie still needs clearing. Proceed silently.
+          }
+        }
+      }
+
       // SVT-SEC-2026-05 — pass real actor context so the JTI denylist row
       // carries the actual user_id/tenant_id rather than sentinel zeros.
-      await authService.logout(cookieToken, accessJti, {
-        userId: req.user?.sub ?? null,
-        tenantId: req.user?.tid ?? null,
+      await authService.logout(cookieToken, actor.jti, {
+        userId: actor.sub,
+        tenantId: actor.tid,
       });
       clearRefreshCookie(res);
       res.status(204).end();

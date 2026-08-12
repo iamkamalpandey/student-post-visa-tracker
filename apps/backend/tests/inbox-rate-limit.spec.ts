@@ -47,7 +47,11 @@ vi.mock('../src/config/db.js', () => {
   // tenantContext middleware calls prisma.$extends — return the same shape so
   // the scoped client is a no-op proxy back to the same mocks.
   prisma['$extends'] = vi.fn(function (this: unknown) { return prisma; });
-  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: {
+    // SVT-SEC-2026-08 — authenticate() reads the JTI denylist via the
+    // BYPASS-RLS client (it runs before tenantContext sets the GUC) and fails
+    // CLOSED when the lookup throws. null = "this token was never revoked".
+    accessTokenDenylist: { findUnique: async () => null }, user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({

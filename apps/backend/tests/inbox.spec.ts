@@ -93,7 +93,11 @@ vi.mock('../src/config/db.js', () => {
     $executeRaw: vi.fn(async () => 1),
     $queryRaw: vi.fn(async () => [{ entry_hash: null }]),
   };
-  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: {
+    // SVT-SEC-2026-08 — authenticate() reads the JTI denylist via the
+    // BYPASS-RLS client (it runs before tenantContext sets the GUC) and fails
+    // CLOSED when the lookup throws. null = "this token was never revoked".
+    accessTokenDenylist: { findUnique: async () => null }, user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 const { authenticate } = await import('../src/middlewares/auth.js');

@@ -77,7 +77,11 @@ vi.mock('../src/config/db.js', () => {
     $transaction: vi.fn(async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma)),
     $executeRaw: vi.fn(async () => 1),
   };
-  return { prisma, prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
+  return { prisma, prismaAdmin: {
+    // SVT-SEC-2026-08 — authenticate() reads the JTI denylist via the
+    // BYPASS-RLS client (it runs before tenantContext sets the GUC) and fails
+    // CLOSED when the lookup throws. null = "this token was never revoked".
+    accessTokenDenylist: { findUnique: async () => null }, user: { findUnique: async () => ({ sessions_valid_from: null }) } }, disconnectDb: async () => undefined };
 });
 
 // Stub the expiry job — dashboardRouter imports it for /summary; /sla-breaches doesn't use it.
