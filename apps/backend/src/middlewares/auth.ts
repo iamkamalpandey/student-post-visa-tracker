@@ -269,7 +269,27 @@ export async function assertStudentOwnership(
     // Tenant-leakage-safe: same 404-ish behaviour as if the row didn't exist.
     throw Forbidden('Not authorised for this student');
   }
-  if (student.assigned_to_id !== req.user.sub) {
+  // SVT-SEC-2026-08 — an UNASSIGNED student is open to any counsellor in the
+  // tenant, exactly as `requireLeadOwnership` below already treats an
+  // unassigned lead ("the shared queue is how they get picked up; locking
+  // those out would break intake").
+  //
+  // Without the null carve-out this gate locked counsellors out of students
+  // they had just created themselves. `create()` defaults `assigned_to_id` to
+  // null and the quick-create form never sends one, so a counsellor pressed
+  // "Add student", got a row, and was refused 403 the instant they opened it —
+  // and could not fix it either, because only ADMIN may set `assigned_to_id`.
+  // The realistic user response is to create the student again, so the failure
+  // mode was duplicate records rather than a visible error.
+  //
+  // Deliberately fixed HERE rather than by defaulting the assignee in
+  // `create()`. The carve-out is the more general fix: ADMIN-created and
+  // CSV-imported students also arrive unassigned and must stay pickup-able,
+  // which auto-assigning the creator would not address. It is also the form the
+  // caseload-scoping work needs — a scoped list has to read
+  // `assigned_to_id = self OR assigned_to_id IS NULL` for the same reason, so
+  // the two stay consistent.
+  if (student.assigned_to_id !== null && student.assigned_to_id !== req.user.sub) {
     throw Forbidden('Not authorised for this student');
   }
 }

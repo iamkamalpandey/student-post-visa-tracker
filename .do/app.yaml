@@ -66,8 +66,29 @@ services:
     # replicas record SKIPPED_LOCKED). Keep 1 unless request load needs more.
     instance_count: 1
     instance_size_slug: basic-xs
+    # SVT-REL-2026-08 — probe /readyz, not /livez.
+    #
+    # /livez returns {status:'ok'} unconditionally — it proves the Node process
+    # is listening and nothing else. With the platform gated on it, a deploy
+    # carrying a bad DATABASE_URL, a failed migration or an unreachable database
+    # binds its port, answers 200, is promoted as healthy, receives traffic, and
+    # then 500s every request. A green deploy and a fully down API at the same
+    # time, which is the worst shape an outage can take because the platform
+    # believes the rollout succeeded and will not roll back.
+    #
+    # /readyz executes `SELECT 1` and returns 503 when it fails, so a bad
+    # deployment is caught before traffic shifts. The readiness gate already
+    # existed and was simply not wired to anything.
+    #
+    # Safe with the current Redis configuration: /readyz 503s ONLY on the
+    # database check. An unreachable Redis reports `redis: 'unavailable'` and
+    # sets the gauge to 0 without failing the probe, so this does not turn the
+    # dummy REDIS_URL below into a deploy blocker.
+    #
+    # failure_threshold stays 5 at 10s so a transient blip does not flap a
+    # healthy instance; initial_delay covers migrate + boot.
     health_check:
-      http_path: /api/v1/health/livez
+      http_path: /api/v1/health/readyz
       initial_delay_seconds: 20
       period_seconds: 10
       failure_threshold: 5
@@ -88,11 +109,26 @@ services:
       # because ${spvt-db.DATABASE_URL} resolves to `defaultdb` which may
       # differ from the actual app database.
       - { key: DATABASE_MIGRATE_URL, scope: RUN_TIME, type: SECRET }
-      # Optional Redis (used for multi-instance rate limiting/nonces). Uncomment if scaling beyond 1 instance:
+      # SVT-REL-2026-08 — REDIS_URL is now genuinely optional in the env schema,
+      # so the dummy `redis://localhost:6379` has been REMOVED rather than left
+      # to satisfy validation.
+      #
+      # That placeholder was harmful, not neutral: server.ts gates its
+      # multi-replica MFA-replay warning on `!process.env.REDIS_URL`, so a fake
+      # value permanently silenced the one warning that would tell an operator
+      # that scaling past one instance breaks TOTP anti-replay and splits every
+      # rate limiter into per-process buckets. It also held `redis_up` at 0
+      # forever, training whoever watches that gauge to ignore it.
+      #
+      # With it absent the app reports the truth: /readyz says `not_configured`,
+      # the gauge reads 1 (an intentional single-node topology is not an
+      # outage), and the boot warning fires if anyone scales instance_count
+      # without provisioning Redis.
+      #
+      # REQUIRED before raising instance_count above 1 — provision a managed
+      # Redis and set it here:
       # - { key: REDIS_URL, scope: RUN_TIME, value: "${spvt-redis.REDIS_URL}" }
-      # Schema requires REDIS_URL as URL; runtime is optional (falls to in-process Map when `redis` pkg absent).
-      # Dummy value satisfies zod; single-replica deployment doesn't need real Redis.
-      - { key: REDIS_URL, scope: RUN_TIME, value: "redis://localhost:6379" }
+      # and run `pnpm --filter backend add redis`, which is not yet installed.
       - { key: SPV_ALLOW_SINGLE_REPLICA, scope: RUN_TIME, value: "true" }
       # Seed admin — env.ts requires these at BOOT (superRefine in production),
       # so the backend fails-fast if unset. The actual seed insert runs in the

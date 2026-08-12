@@ -125,65 +125,27 @@ export async function list(
   const { db, tenantId } = ctx;
   const limit = q.limit;
 
-  // Base WHERE: tenant + soft-delete filter.
-  const where: Prisma.StudentWhereInput = {
-    tenant_id: tenantId,
-    deleted_at: null,
-  };
-  if (q.stage_id) where.current_stage_id = q.stage_id;
-  if (q.status) where.status = q.status;
-  if (q.assigned_to_id) where.assigned_to_id = q.assigned_to_id;
-
-  // Collect OR-typed conditions in `andClauses` so multiple OR-bearing
-  // filters compose correctly. Prisma's where.OR is a single slot; when
-  // multiple filters need an OR each (e.g. SLA breach + search), the last
-  // one wins. Wrapping each in its own AND entry preserves intersection.
-  const andClauses: Prisma.StudentWhereInput[] = [];
-
-  // SVT-WAVE39-STUDENT-SLA-FILTER-2026-05 — translate the boolean flag into
-  // a set of per-stage thresholds. We compute (now - sla_hours) for every
-  // stage that has an SLA and is dashboard-visible, then OR-join. Only ACTIVE
-  // students count — ON_HOLD/ON_LEAVE/DEFERRED are intentional pauses (stopped
-  // clock) and WITHDRAWN/COMPLETED are terminal, so none are real SLA breaches.
-  if (q.sla_breached) {
-    const stagesWithSla = await db.lifecycleStage.findMany({
-      where: { tenant_id: tenantId, sla_hours: { not: null }, show_on_dashboard: true },
-      select: { id: true, sla_hours: true },
-    });
-    if (stagesWithSla.length === 0) {
-      // Force empty set without breaking pagination invariants downstream.
-      where.id = '00000000-0000-0000-0000-000000000000';
-    } else {
-      const now = Date.now();
-      const HOUR_MS = 60 * 60 * 1000;
-      andClauses.push({
-        OR: stagesWithSla.map((s) => ({
-          current_stage_id: s.id,
-          stage_entered_at: { lt: new Date(now - (s.sla_hours ?? 0) * HOUR_MS) },
-        })),
-      });
-      // Only override status when caller didn't pin one. Default to ACTIVE-only
-      // (the only status with a running SLA clock); an explicit q.status still
-      // wins so "ON_HOLD students in stage X" stays an honest deliberate query.
-      if (!q.status) where.status = 'ACTIVE';
-    }
-  }
-  if (q.search) {
-    const needle = q.search.trim();
-    andClauses.push({
-      OR: [
-        { family_name: { contains: needle, mode: 'insensitive' } },
-        { given_name: { contains: needle, mode: 'insensitive' } },
-        { student_code: { contains: needle, mode: 'insensitive' } },
-      ],
-    });
-  }
-  if (andClauses.length > 0) {
-    where.AND = [
-      ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
-      ...andClauses,
-    ];
-  }
+  // SVT-QA-2026-08 — the filter predicate comes from buildStudentListWhere, the
+  // SAME builder the CSV export uses.
+  //
+  // This function previously carried its own inline copy of the whole predicate.
+  // The builder was extracted for the export and the export was pointed at it,
+  // but this caller was never switched over — so the two implementations sat
+  // side by side while the builder's docstring claimed "keeping one builder
+  // means the list and the export cannot drift apart again" and
+  // exports.service.ts asserted it was "the exact builder /students uses".
+  // Neither statement was true. Two copies of a filter with a comment promising
+  // they are one is precisely how the original export-filter bug happened.
+  //
+  // The copies had in fact already begun to diverge: the no-SLA-stages branch
+  // assigned `where.id` directly here, while the builder pushes it as an AND
+  // clause so it cannot clobber an `ids` filter. The builder's form is the
+  // correct one and is equivalent for this caller's inputs, so adopting it is a
+  // behaviour-preserving change for the list.
+  //
+  // It also means caseload scoping, when it lands, has exactly one place to go
+  // rather than two that must be kept in step by hand.
+  const where = await buildStudentListWhere(db, tenantId, q);
 
   // Cursor: opaque base64 of {created_at, id}. We seek with (created_at, id) tuple
   // so duplicates on created_at don't break paging.

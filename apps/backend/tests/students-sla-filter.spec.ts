@@ -62,6 +62,24 @@ function filterStudents(where: Record<string, unknown>, take?: number): Student[
     const andList = where['AND'];
     if (Array.isArray(andList)) {
       for (const clause of andList as Array<Record<string, unknown>>) {
+        // SVT-QA-2026-08 — honour a SCALAR clause inside AND, not just OR ones.
+        //
+        // This walker used to `continue` past any AND entry without an `OR`,
+        // which silently ignored the impossible-id sentinel the no-SLA-stages
+        // branch emits. Prisma applies `AND: [{ id: 'x' }]` exactly as it
+        // applies a top-level `id: 'x'` — both compile to `AND id = 'x'` — so
+        // skipping it made the mock disagree with the database it stands in
+        // for, and the spec passed only because the production code happened to
+        // write that sentinel at the top level.
+        //
+        // It is written as an AND clause now (so it cannot clobber an `ids`
+        // filter), which is what surfaced the gap. Fixing the mock rather than
+        // reverting the shape: the AND form is the correct one, and a mock that
+        // ignores whole clause types will hide the next filter too.
+        if (typeof clause['id'] === 'string') {
+          if (s.id !== clause['id']) return false;
+          continue;
+        }
         const ors = clause['OR'];
         if (!Array.isArray(ors)) continue;
         const passes = (ors as Array<Record<string, unknown>>).some((or) => {

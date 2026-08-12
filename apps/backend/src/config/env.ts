@@ -15,7 +15,26 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().url(),
   DATABASE_MIGRATE_URL: z.string().url(),
 
-  REDIS_URL: z.string().url(),
+  // SVT-REL-2026-08 — OPTIONAL, because requiring it forced operators to lie.
+  //
+  // This was `z.string().url()` (required), and no Redis is provisioned, so
+  // .do/app.yaml satisfied it with a dummy `redis://localhost:6379`. That dummy
+  // was not inert — it actively disabled the safety net built for exactly this
+  // situation. server.ts gates its multi-replica MFA-replay warning on
+  // `!process.env.REDIS_URL`, so with a fake URL present the warning could
+  // never fire; scaling past one instance would silently break TOTP anti-replay
+  // and split every rate limiter into per-process buckets (the 5/min auth
+  // brute-force cap becoming 5×N/min) with nothing said. It also pinned the
+  // `redis_up` gauge at 0 forever — a permanent false alarm on the one signal
+  // meant to page.
+  //
+  // shared/redisClient.ts already returns null cleanly when this is unset, and
+  // /readyz reports an absent Redis as `not_configured` with the gauge at 1
+  // (an intentional single-node topology is not an outage). So the honest state
+  // is "no Redis configured", and the code paths for it already exist.
+  //
+  // Set it for real when scaling past one replica; that is when it matters.
+  REDIS_URL: z.string().url().optional(),
 
   JWT_PRIVATE_KEY: z.string().min(1).transform(s => s.replace(/\\n/g, '\n')),
   JWT_PUBLIC_KEY: z.string().min(1).transform(s => s.replace(/\\n/g, '\n')),
