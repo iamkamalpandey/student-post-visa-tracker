@@ -698,6 +698,39 @@ export default function CommissionsClient() {
       ),
     },
     {
+      // SVT-FIN-2026-08 — the claimed-vs-received variance, finally visible.
+      // received_minor has been stored since migration …235993 and displayed
+      // nowhere, so a university remitting 18,400 against a 20,000 claim looked
+      // settled in full and the 1,600 shortfall was invisible on every screen.
+      // Only meaningful once PAID; null on legacy rows, which mean "in full".
+      key: 'received',
+      label: 'Received',
+      align: 'right',
+      render: (r) => {
+        if (r.status !== 'PAID') return <Typography variant="body2" color="text.disabled">—</Typography>;
+        const claimed = toBigIntSafe(r.amount_minor);
+        const received = r.received_minor == null ? claimed : toBigIntSafe(r.received_minor);
+        const variance = claimed - received;
+        return (
+          <Stack spacing={0.25} alignItems="flex-end">
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              {formatMoney(received, r.currency)}
+            </Typography>
+            {variance !== 0n ? (
+              <Typography
+                variant="caption"
+                color={variance > 0n ? 'error.main' : 'warning.main'}
+                sx={{ fontWeight: 600 }}
+              >
+                {variance > 0n ? 'short ' : 'over '}
+                {formatMoney(variance > 0n ? variance : -variance, r.currency)}
+              </Typography>
+            ) : null}
+          </Stack>
+        );
+      },
+    },
+    {
       key: 'status',
       label: t('columns.status'),
       render: (r) => <StatusChip status={r.status} color={COMMISSION_STATUS_COLOR[r.status]} />,

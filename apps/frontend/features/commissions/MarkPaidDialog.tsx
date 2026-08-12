@@ -9,20 +9,54 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { useTranslations } from 'next-intl';
 import { Box, Stack, TextField, Tooltip, Typography } from '@mui/material';
-import { MarkPaidRequest } from '@spv/zod-schemas';
+import { z } from 'zod';
 
 import { api, ApiError } from '@/lib/api';
+import { majorToMinor, currencyMinorDigits } from '@/lib/money';
 import AppDialog from '@/components/AppDialog';
 import LabeledField from '@/components/LabeledField';
 import type { CommissionRow } from './types';
 
-type FormValues = {
-  paid_on: string;
-  payment_reference?: string;
-};
+// SVT-FIN-2026-08 — this dialog is where claimed-vs-received reconciliation was
+// silently lost.
+//
+// `CommissionClaim.received_minor` exists, `MarkPaidRequest` accepts it, and
+// `summary()` was fixed to report cash received rather than claimed — but this
+// form only ever sent `paid_on` and `payment_reference`, so the service
+// defaulted `received_minor` to the FULL claimed amount. The variance was
+// therefore structurally always zero: a university remitting 18,400 against a
+// 20,000 claim booked as paid in full, and the 1,600 short-payment was
+// invisible everywhere. The whole ledger was built and the last mile was one
+// field.
+//
+// The form takes MAJOR units (what the operator reads off the remittance
+// advice) and converts with the currency's real ISO-4217 exponent, so it is
+// correct for 0-, 2- and 3-decimal currencies alike.
+const formSchema = z
+  .object({
+    paid_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a valid date'),
+    payment_reference: z.string().max(120).optional(),
+    received_major: z
+      .string()
+      .trim()
+      .regex(/^\d+(\.\d+)?$/, 'Enter an amount, e.g. 18400.00'),
+  })
+  .strict();
+
+type FormValues = z.infer<typeof formSchema>;
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** Minor-unit string → major-unit string, for prefilling from the claim. */
+function minorToMajor(minor: string, currency: string): string {
+  const exp = currencyMinorDigits(currency);
+  const neg = minor.startsWith('-');
+  const digits = (neg ? minor.slice(1) : minor).padStart(exp + 1, '0');
+  const whole = digits.slice(0, digits.length - exp) || '0';
+  const frac = exp > 0 ? digits.slice(digits.length - exp) : '';
+  return `${neg ? '-' : ''}${whole}${frac ? `.${frac}` : ''}`;
 }
 
 export type MarkPaidDialogProps = {
@@ -46,13 +80,19 @@ export default function MarkPaidDialog({ open, claim, onClose }: MarkPaidDialogP
     reset,
     formState: { errors, isSubmitting, isDirty },
   } = useForm<FormValues>({
-    resolver: zodResolver(MarkPaidRequest),
-    defaultValues: { paid_on: todayIso(), payment_reference: '' },
+    resolver: zodResolver(formSchema),
+    defaultValues: { paid_on: todayIso(), payment_reference: '', received_major: '' },
   });
 
+  // Prefill with the claimed amount: settling in full is the common case, and
+  // it makes any edit an explicit, deliberate statement that less arrived.
+  const claimedMajor = claim ? minorToMajor(String(claim.amount_minor), claim.currency) : '';
+
   useEffect(() => {
-    if (open) reset({ paid_on: todayIso(), payment_reference: '' });
-  }, [open, claim?.id, reset]);
+    if (open) {
+      reset({ paid_on: todayIso(), payment_reference: '', received_major: claimedMajor });
+    }
+  }, [open, claim?.id, claimedMajor, reset]);
 
   const mutation = useMutation<unknown, ApiError, FormValues>({
     mutationFn: async (values) => {
@@ -60,6 +100,11 @@ export default function MarkPaidDialog({ open, claim, onClose }: MarkPaidDialogP
       const body: Record<string, unknown> = { paid_on: values.paid_on };
       const ref = values.payment_reference?.trim();
       if (ref) body.payment_reference = ref;
+      const receivedMinor = majorToMinor(values.received_major, claim.currency);
+      // majorToMinor returns null only on input the schema already rejected;
+      // omitting the key on that path keeps the server's "settled in full"
+      // default rather than sending a bad number.
+      if (receivedMinor !== null) body.received_minor = receivedMinor;
       const res = await api.post(`/commissions/${claim.id}/mark-paid`, body);
       return res.data;
     },
@@ -117,6 +162,28 @@ export default function MarkPaidDialog({ open, claim, onClose }: MarkPaidDialogP
           Required
         </Typography>
         <Stack spacing={2}>
+          <LabeledField
+            label={`Amount received${claim ? ` (${claim.currency})` : ''}`}
+            required
+            error={Boolean(errors.received_major)}
+            helperText={
+              errors.received_major?.message ??
+              (claim && claimedMajor
+                ? `Claimed ${claimedMajor} ${claim.currency}. Change this if the institution remitted less — the shortfall is recorded as a variance instead of the claim looking settled in full.`
+                : 'What the institution actually remitted.')
+            }
+            htmlFor="commission-received"
+          >
+            <TextField
+              id="commission-received"
+              fullWidth
+              hiddenLabel
+              size="medium"
+              inputMode="decimal"
+              error={Boolean(errors.received_major)}
+              {...register('received_major')}
+            />
+          </LabeledField>
           <LabeledField
             label="Paid on"
             required

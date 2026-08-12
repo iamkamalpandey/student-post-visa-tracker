@@ -40,6 +40,14 @@ export type CommissionRow = {
   invoice_no?: string | null;
   invoiced_on?: string | null;
   paid_on?: string | null;
+  /**
+   * SVT-FIN-2026-08 — cash the institution ACTUALLY remitted, in minor units.
+   * `amount_minor - received_minor` is the short-payment variance. Null on
+   * claims settled before the column existed (treat as settled in full) and on
+   * any claim not yet PAID. This was missing from the row type entirely, which
+   * is why no table could display the variance the backend was already storing.
+   */
+  received_minor?: bigint | string | number | null;
   payment_reference?: string | null;
   dispute_reason?: string | null;
   notes?: string | null;

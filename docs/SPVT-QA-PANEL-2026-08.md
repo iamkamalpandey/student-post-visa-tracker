@@ -160,7 +160,7 @@ which holds `FOR UPDATE` throughout. A payment landing mid-sequence yields a
 never rescanned. Crashing mid-sequence orphans the adjustment permanently,
 because the same-day idempotency guard then skips the recompute forever.
 
-### T1-7 · `commissions.summary` drops legacy PAID rows — **OPEN**
+### T1-7 · `commissions.summary` dropped legacy PAID rows — **FIXED**
 `src/modules/commissions/service.ts:707`
 
 `(_sum.received_minor ?? _sum.amount_minor)` is a *group*-level coalesce where a
@@ -168,10 +168,20 @@ because the same-day idempotency guard then skips the recompute forever.
 with no backfill, so pre-migration rows vanish unless every row in the group is
 NULL. Collections understated by exactly the legacy total.
 
-### T1-8 · `/reports/commission-revenue` reports claimed, not received — **OPEN**
+### T1-8 · `/reports/commission-revenue` reported claimed, not received — **FIXED**
 `src/modules/reports/service.ts:141` · Same defect `summary()` already fixed;
 the reports surface was not updated. Two finance screens, same row, 150,000
 apart on a short-settled claim.
+
+Fixed by adding `total_received_minor`, summed with a genuine row-level
+`COALESCE(received_minor, amount_minor)` for PAID rows (raw SQL here, so the
+coalesce can be expressed directly — unlike T1-7, which needed two grouped sums).
+
+**Deliberately NOT changed: the date basis.** Rows are still bucketed by claim
+date, not payment date. Moving PAID onto `paid_on` would reconcile more
+naturally against a bank statement, but it silently changes what "month" means
+in an existing report and shifts claims across period boundaries. That is a
+product decision, not a bug fix — **left for sign-off**.
 
 ### T1-9 · Idempotency caches FAILED for 24h, including for writes that committed — **OPEN**
 `src/shared/idempotency.ts:187`, `:226`
@@ -445,12 +455,25 @@ that itself refuses PAID, and an adjustment model — **none of which exist**
 competitor exactly this question. Corrected 2026-08-12; the claim is now recorded
 as an open gap in §3.9 and the question removed from §4.
 
-### T7-2 · Claimed-vs-received variance is structurally always zero — **BATTLE CARD CORRECTED**
-`MarkPaidDialog.tsx:60` sends only `paid_on` + `payment_reference`, so
-`received_minor` defaults to the full claimed amount, and no column displays the
-variance. The backend is complete. **Cheapest high-value fix in this register:
-one field on one dialog, one column on one table.** Also falsified a battle-card
-question; corrected in §3.8.
+### T7-2 · Claimed-vs-received variance — **FIXED**
+`MarkPaidDialog.tsx` sent only `paid_on` + `payment_reference`, so
+`received_minor` defaulted to the full claimed amount and the variance was
+structurally always zero; no column displayed it either.
+
+Fixed end to end:
+- The dialog now takes the amount received, prefilled with the claimed figure
+  (settling in full is the common case, so any edit is a deliberate statement
+  that less arrived). Entry is in MAJOR units — what the operator reads off the
+  remittance advice — converted via `lib/money.majorToMinor`, which uses the
+  currency's real ISO-4217 exponent, so it is correct for 0-, 2- and 3-decimal
+  currencies rather than assuming cents.
+- `received_minor` was missing from the `CommissionRow` type entirely, which is
+  why no table could show what the backend was already storing. Added.
+- The commissions table gained a **Received** column showing the cash and, when
+  it differs, the signed variance ("short 1,600" / "over 200").
+
+**§3.8 of the battle card can be reverted once this ships and is demoed** — the
+reconciliation question becomes safe to ask again. Leave it corrected until then.
 
 ### T7-3 · Converted lead fees leave every finance rollup — **OPEN**
 `FinanceItem` is aggregated nowhere — the dashboard, `/reports/outstanding-by-age`

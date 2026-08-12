@@ -663,6 +663,31 @@ export async function summary(req: Request) {
     _count: { _all: true },
   });
 
+  // SVT-FIN-2026-08 — the legacy fallback has to be applied PER ROW, not per
+  // group.
+  //
+  // `received_minor` was added by migration …235993 with no backfill, so PAID
+  // claims written before it are NULL. SQL SUM skips NULLs, so
+  // `_sum.received_minor` silently omits those rows entirely, and the
+  // `?? _sum.amount_minor` fallback below only fires when EVERY row in the
+  // group is NULL. A group of one legacy claim at 100,000 plus two settled at
+  // 50,000 each summed to 100,000 — the legacy 100,000 vanished and collections
+  // were understated by exactly that amount.
+  //
+  // Prisma's groupBy cannot express SUM(COALESCE(received_minor, amount_minor)),
+  // so the legacy remainder is summed separately and added back. Two grouped
+  // sums reproduce the row-level COALESCE exactly, without raw SQL and without
+  // a backfill migration on a money table.
+  const legacyPaid = await db(req).commissionClaim.groupBy({
+    by: ['institution_id', 'currency'],
+    where: { tenant_id: tid, deleted_at: null, status: 'PAID', received_minor: null },
+    _sum: { amount_minor: true },
+  });
+  const legacyByKey = new Map<string, bigint>();
+  for (const l of legacyPaid) {
+    legacyByKey.set(`${l.institution_id}::${l.currency}`, l._sum.amount_minor ?? 0n);
+  }
+
   // Pivot status into named columns.
   const byKey = new Map<string, SummaryRow>();
   for (const g of groups) {
@@ -702,9 +727,12 @@ export async function summary(req: Request) {
         // so a claim of 100,000 settled at 50,000 still contributed 100,000 to
         // paid_total_minor. The finance summary overstated collections by
         // exactly the variance the column was added to expose.
-        // COALESCE to amount_minor for rows written before received_minor
-        // existed, where NULL means "settled in full".
-        row.paid_total_minor = (g._sum.received_minor ?? g._sum.amount_minor ?? 0n).toString();
+        // Rows written before received_minor existed are NULL, meaning "settled
+        // in full" — their amount_minor is summed separately above and added
+        // here, because SUM would otherwise skip them entirely.
+        row.paid_total_minor = (
+          (g._sum.received_minor ?? 0n) + (legacyByKey.get(key) ?? 0n)
+        ).toString();
         row.paid_claimed_total_minor = sum;
         break;
       // DISPUTED + WAIVED counted but not surfaced as separate columns; they're

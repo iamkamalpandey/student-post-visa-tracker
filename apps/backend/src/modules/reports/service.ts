@@ -121,7 +121,23 @@ interface CommissionRevenueRow {
   status: string;
   currency: string;
   claim_count: number;
+  /** What was CLAIMED (billed to the institution). */
   total_amount_minor: string;
+  /**
+   * SVT-FIN-2026-08 — cash actually RECEIVED. Zero for every status except
+   * PAID, where it is COALESCE(received_minor, amount_minor) summed per row.
+   *
+   * This report summed amount_minor for every status including PAID, so an
+   * agency owner reconciling against a bank statement was shown what was
+   * invoiced, not what arrived — and it disagreed with /commissions/summary,
+   * which had already been fixed to report received. A claim of 500,000
+   * short-settled at 350,000 read 500,000 here and 350,000 there: two finance
+   * screens, one row, 150,000 apart.
+   *
+   * total_amount_minor - total_received_minor on a PAID row is the
+   * short-payment variance.
+   */
+  total_received_minor: string;
 }
 interface CommissionRevenueFilters { from: Date; to: Date; currency: string | null }
 
@@ -130,15 +146,26 @@ async function commissionRevenue(
   tenantId: string,
   filters: CommissionRevenueFilters,
 ): Promise<ReportResult<CommissionRevenueRow, CommissionRevenueFilters>> {
+  // NOTE ON THE DATE BASIS (deliberately unchanged): rows are still bucketed by
+  // the CLAIM date, not the payment date. Moving PAID rows onto `paid_on` would
+  // reconcile more naturally against a bank statement, but it silently changes
+  // what "month" means in an existing report — a product decision, not a bug
+  // fix, so it is logged in the QA register rather than changed here.
   const raw = await db.$queryRaw<Array<{
     month: Date; status: string; currency: string;
-    claim_count: bigint; total_amount_minor: bigint;
+    claim_count: bigint; total_amount_minor: bigint; total_received_minor: bigint;
   }>>`
     SELECT date_trunc('month', COALESCE(cc.claimed_on, cc.created_at::date))::date AS month,
            cc.status::text                                              AS status,
            cc.currency,
            COUNT(*)                                                     AS claim_count,
-           SUM(cc.amount_minor)                                         AS total_amount_minor
+           SUM(cc.amount_minor)                                         AS total_amount_minor,
+           -- Row-level COALESCE: received_minor is NULL for claims written
+           -- before migration …235993 (no backfill), and those settled in full.
+           -- A group-level fallback would drop them, since SUM skips NULLs.
+           SUM(CASE WHEN cc.status = 'PAID'
+                    THEN COALESCE(cc.received_minor, cc.amount_minor)
+                    ELSE 0 END)                                         AS total_received_minor
       FROM commission_claims cc
      WHERE cc.tenant_id = ${tenantId}::uuid
        AND cc.deleted_at IS NULL
@@ -154,6 +181,7 @@ async function commissionRevenue(
       status: r.status, currency: r.currency,
       claim_count: Number(r.claim_count),
       total_amount_minor: r.total_amount_minor.toString(),
+      total_received_minor: r.total_received_minor.toString(),
     })),
     generated_at: now(),
     filters,
