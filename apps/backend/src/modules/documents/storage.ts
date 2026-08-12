@@ -220,13 +220,43 @@ class S3Storage implements ObjectStorage {
     return blob;
   }
 
+  /**
+   * SVT-GDPR-2026-08 — this used to end in `.catch(() => undefined)` with the
+   * comment "best-effort idempotent delete". Idempotent and best-effort are not
+   * the same thing, and conflating them made erasure lie.
+   *
+   * S3 DeleteObject IS idempotent — deleting a key that is not there succeeds.
+   * So the only errors reaching this catch were real ones: AccessDenied, a
+   * throttle, a timeout, the wrong bucket. Swallowing them meant the retention
+   * pass treated a failed delete as a success, stamped `deleted_at`, and wrote
+   * an audit row asserting `document.retention_shredded`. The next scan filters
+   * on `deleted_at IS NULL`, so that document was never revisited: the passport
+   * scan stayed in the bucket while the audit log affirmatively recorded its
+   * destruction. Nothing self-heals, and the only symptom is a false attestation
+   * discovered at an audit.
+   *
+   * Now it throws, matching LocalStorage.delete, which had this right all along.
+   * Callers are built for it — jobs/retentionErasure.ts:131 and the DSAR path
+   * catch per document, count the error, report to Sentry, and leave the row
+   * un-shredded so the next run retries it. A retry is the correct outcome; a
+   * silent false success is not.
+   */
   async delete(key: string): Promise<void> {
-    await this.client.send(
-      new DeleteObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-      })
-    ).catch(() => undefined); // Best-effort idempotent delete
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        })
+      );
+    } catch (err) {
+      // A missing object is genuine idempotent success. Everything else is a
+      // real failure and must surface.
+      const code =
+        (err as { name?: string })?.name ?? (err as { Code?: string })?.Code ?? '';
+      if (code === 'NoSuchKey' || code === 'NotFound') return;
+      throw err;
+    }
   }
 
   async exists(key: string): Promise<boolean> {
@@ -274,4 +304,8 @@ export function sha256Hex(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-export { LocalStorage };
+// SVT-GDPR-2026-08 — S3Storage is exported for the same reason LocalStorage
+// already was: its delete() semantics are a correctness boundary (a swallowed
+// failure becomes a false erasure attestation) and that is only assertable by
+// constructing it directly against a stubbed client.
+export { LocalStorage, S3Storage };

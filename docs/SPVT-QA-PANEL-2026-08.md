@@ -40,15 +40,28 @@ Fixed: v1 now walks the active key then every retired key (AES-GCM
 authenticates, so a wrong key fails the tag rather than returning garbage), and
 an active id colliding with a retired one refuses to boot. 8 tests.
 
-### T0-2 · DSAR marked COMPLETED and committed *before* erasure runs — **OPEN**
+### T0-2 · DSAR COMPLETED can outlive a crashed erasure — **OPEN, scope corrected**
 `src/modules/dsar/service.ts:1076` then `:1204`
 
-Separate transactions. An OOM or pod eviction between them leaves the request
-reading COMPLETED to the regulator with every byte of subject PII live. The
-compensating `catch` at `:1227` never runs on SIGKILL, and the from-status guard
-at `:1080` makes a re-PATCH a no-op — so the erasure can never fire again.
+**Correction to the panel's report, verified on re-read.** A compensating
+`catch` at `:1227` already exists and is well-built: it reverts the status,
+clears `completed_at`, audits the failure and re-throws. So an erasure that
+*throws* is handled correctly, and the ordering (status commits first) is a
+deliberate, documented choice so the audit chain reads
+`status→COMPLETED` then `dsar.erasure.executed` chronologically.
 
-### T0-3 · S3 delete swallows every error; erasure reports success — **OPEN**
+The residual risk is narrower but real: the `catch` cannot run on SIGKILL, OOM
+or pod eviction. A hard kill between the two transactions leaves COMPLETED with
+live PII, and the from-status guard at `:1080` makes a re-PATCH a no-op, so the
+erasure can never fire again.
+
+Reordering is the wrong fix — it would break the audit-chain rationale. The
+right fix is reconciliation: an `erasure_executed_at` column (or a scan for
+ERASURE DSARs that are COMPLETED with no `dsar.erasure.executed` audit row) plus
+a job that re-runs them. **That is a schema change, so it is a hard stop needing
+sign-off** — not startable inside a routine batch.
+
+### T0-3 · S3 delete swallowed every error; erasure reported success — **FIXED**
 `src/modules/documents/storage.ts:223` — `.catch(() => undefined)`
 
 Production runs `STORAGE_DRIVER=s3`. A 403/500/timeout during the retention pass
@@ -100,7 +113,7 @@ rebuilds from `before.total_minor` — the full original. Plan of 1,000,000 with
 to **1,000,000**. The student is dunned for money they already paid. The code
 comment at `:513` names this exact hazard as the thing to avoid.
 
-### T1-2 · `financeSummary` double-counts partial CRM fees — **FIXED IN PROGRESS**
+### T1-2 · `financeSummary` double-counted partial CRM fees — **FIXED**
 `src/modules/crm-leads/crm-leads.service.ts:751`
 
 **My regression from earlier today.** I added PARTIAL to `OPEN_FEE_STATUSES`
@@ -110,7 +123,7 @@ part-paid 40,000 reports outstanding 100,000 (should be 60,000) and collected 0
 (should be 40,000) — an 80,000 swing on one fee, in the exact money the PARTIAL
 status was introduced to preserve.
 
-### T1-3 · `Enrollment.scholarship_minor` never applied — **OPEN**
+### T1-3 · `Enrollment.scholarship_minor` never applied — **FIXED**
 `src/modules/billing/enrollment-hook.ts:75`
 
 Same bug class as the FeePlan scholarship fixed earlier today, one layer

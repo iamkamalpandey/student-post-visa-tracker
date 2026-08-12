@@ -59,6 +59,11 @@ export async function maybeSeedFeePlan(ctx: Ctx, enrollmentId: string): Promise<
         id: true,
         tuition_total_minor: true,
         tuition_currency: true,
+        // SVT-FIN-2026-08 — the scholarship was NOT selected, so the seeded
+        // plan billed gross. Same defect class as the FeePlan scholarship fixed
+        // earlier, one layer upstream: the field is writable via the API, the
+        // CSV importer and the enrollment form, and nothing applied it.
+        scholarship_minor: true,
         start_date: true,
         program_intake_id: true,
       },
@@ -70,12 +75,31 @@ export async function maybeSeedFeePlan(ctx: Ctx, enrollmentId: string): Promise<
     }
     const startsOn = (e.start_date ?? new Date()).toISOString().slice(0, 10);
 
+    // SVT-FIN-2026-08 — a scholarship larger than the tuition is a data error,
+    // not a refund. Clamping to the tuition means "fully covered", which is the
+    // only sane reading, and keeps the plan seedable — refusing outright would
+    // leave the student ENROLLED with no fee plan and therefore never invoiced,
+    // which is a worse failure than a logged anomaly.
+    const rawScholarship = e.scholarship_minor ?? 0n;
+    const scholarship = rawScholarship > e.tuition_total_minor
+      ? e.tuition_total_minor
+      : rawScholarship < 0n
+        ? 0n
+        : rawScholarship;
+    if (scholarship !== rawScholarship) {
+      logger.warn(
+        { enrollmentId, rawScholarship: rawScholarship.toString(), tuition: e.tuition_total_minor.toString() },
+        'billing.seed: scholarship_minor out of range — clamped',
+      );
+    }
+
     // Default: 1-row ANNUAL plan. Admin can later regenerate to MONTHLY/SEMESTER.
     // Future enhancement: pull cadence from ProgramIntake.fees rows.
     await createFeePlan(ctx, {
       enrollment_id: e.id,
       cadence: 'ANNUAL',
       total_minor: e.tuition_total_minor,
+      scholarship_minor: scholarship,
       installment_count: 1,
       starts_on: startsOn,
       currency: e.tuition_currency ?? undefined,

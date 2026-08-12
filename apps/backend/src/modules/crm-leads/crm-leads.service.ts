@@ -743,6 +743,37 @@ function toCurrencyAmounts(
     .sort((a, b) => a.currency.localeCompare(b.currency));
 }
 
+/**
+ * Outstanding on open fees = billed MINUS whatever has already been settled.
+ *
+ * SVT-FIN-2026-08 — a regression I introduced when PARTIAL was added to
+ * `OPEN_FEE_STATUSES`. Before PARTIAL existed, every open fee had
+ * `paid_amount_minor = null`, so summing `amount_minor` was the balance. Once a
+ * part-paid fee became "open", that same sum started reporting the FULL billed
+ * amount as outstanding while the cash already received was counted nowhere —
+ * a fee of 100,000 settled for 40,000 reported outstanding 100,000 and
+ * collected 0, an 80,000 swing on one row, in exactly the money the PARTIAL
+ * status was introduced to stop losing.
+ *
+ * Subtracting here (rather than in SQL) keeps the per-currency grouping the DB
+ * already does; Prisma's groupBy cannot express `SUM(a) - SUM(b)` directly.
+ * Clamped at zero so a data anomaly surfaces as "nothing owed" rather than a
+ * negative receivable.
+ */
+function toOutstandingAmounts(
+  rows: Array<{ currency: string; _sum: { amount_minor?: bigint | null; paid_amount_minor?: bigint | null } }>,
+): CurrencyAmount[] {
+  return rows
+    .map((r) => {
+      const billed = r._sum.amount_minor ?? 0n;
+      const settled = r._sum.paid_amount_minor ?? 0n;
+      const balance = billed - settled;
+      return { currency: r.currency, amount_minor: (balance > 0n ? balance : 0n).toString() };
+    })
+    .filter((r) => r.amount_minor !== '0')
+    .sort((a, b) => a.currency.localeCompare(b.currency));
+}
+
 export async function financeSummary(
   ctx: ReadCtx,
 ): Promise<{ outstanding: CurrencyAmount[]; collected: CurrencyAmount[]; payments: CurrencyAmount[]; lead_count: number }> {
@@ -751,11 +782,16 @@ export async function financeSummary(
     db.crmLeadFee.groupBy({
       by: ['currency'],
       where: { tenant_id: tenantId, deleted_at: null, status: { in: [...OPEN_FEE_STATUSES] } },
-      _sum: { amount_minor: true },
+      // paid_amount_minor is summed too so the balance can be derived — a
+      // PARTIAL fee is open for what REMAINS, not for what it was billed.
+      _sum: { amount_minor: true, paid_amount_minor: true },
     }),
     db.crmLeadFee.groupBy({
       by: ['currency'],
-      where: { tenant_id: tenantId, deleted_at: null, status: 'PAID' },
+      // PARTIAL belongs here as well as in the open set: the cash actually
+      // received on a part-paid fee is collected revenue. Counting only PAID
+      // made every partial settlement invisible.
+      where: { tenant_id: tenantId, deleted_at: null, status: { in: ['PAID', 'PARTIAL'] } },
       _sum: { paid_amount_minor: true },
     }),
     db.crmPayment.groupBy({
@@ -766,7 +802,7 @@ export async function financeSummary(
     db.crmLead.count({ where: { tenant_id: tenantId, deleted_at: null } }),
   ]);
   return {
-    outstanding: toCurrencyAmounts(outstandingRows, 'amount_minor'),
+    outstanding: toOutstandingAmounts(outstandingRows),
     collected: toCurrencyAmounts(collectedRows, 'paid_amount_minor'),
     payments: toCurrencyAmounts(paymentRows, 'amount_minor'),
     lead_count: leadCount,
