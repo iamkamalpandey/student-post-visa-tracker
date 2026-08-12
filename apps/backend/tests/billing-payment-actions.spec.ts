@@ -192,7 +192,15 @@ vi.mock('../src/config/db.js', () => {
     },
     studentCredit: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
-        store.credits.push(data); return data;
+        // Give every credit an id + reversal columns so the T1-4 retirement
+        // path (which reads them back via raw SQL) sees realistic rows.
+        const row = { id: randomUUID(), reversed_at: null, expires_on: null, ...data };
+        store.credits.push(row); return row;
+      }),
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const rows = matchWhere(store.credits, where);
+        for (const r of rows) Object.assign(r, data);
+        return { count: rows.length };
       }),
     },
     auditLog: { create: vi.fn(async () => null), findFirst: vi.fn(async () => null) },
@@ -211,6 +219,25 @@ vi.mock('../src/config/db.js', () => {
         const id = values[0] as string;
         const p = store.payments.find((x) => x.id === id);
         return p ? [{ id: p.id, status: p.status, gross_minor: p.gross_minor, currency: p.currency }] : [];
+      }
+      // SVT-FIN-2026-08 (T1-4) — retireCreditsForRefund / reverseCreditsForSource
+      // both read the payment's live credits under FOR UPDATE.
+      // Bind order: tenant_id, then source_ref_id.
+      if (sql.includes('FROM student_credits')) {
+        const [tenantId, sourceRefId] = values as [string, string];
+        return store.credits
+          .filter((c) => c['tenant_id'] === tenantId
+            && c['source_ref_id'] === sourceRefId
+            && (c['reversed_at'] ?? null) === null)
+          .map((c) => ({
+            id: c['id'],
+            student_id: c['student_id'],
+            enrollment_id: c['enrollment_id'] ?? null,
+            amount_minor: c['amount_minor'],
+            consumed_minor: c['consumed_minor'] ?? 0n,
+            currency: c['currency'],
+            expires_on: c['expires_on'] ?? null,
+          }));
       }
       return [];
     }),
@@ -276,6 +303,45 @@ describe('voidPayment', () => {
     expect(inst.status).toBe('INVOICED');
     expect(pay.status).toBe('VOIDED');
     expect(store.allocations).toHaveLength(0);
+  });
+
+  // ---- SVT-FIN-2026-08 (T1-5) — a reversal must not leave a live balance
+  // sitting under a status that claims nothing is owed. -------------------
+  //
+  // A waiver forgives the REMAINDER: applyAdjustment writes a negative
+  // adjustment lowering net_minor to what was already paid. Void the payment
+  // behind it and that net is owed again — but the row used to stay WAIVED, so
+  // getOutstanding and the dashboard saw nothing while outstandingByAge counted
+  // the balance. The agency never chased money it was owed, and no API path
+  // could repair the row because the FSM had no way out of WAIVED.
+
+  it('T1-5: voiding the payment under a waived installment restores an owed status', async () => {
+    // Installment was 1000; student paid 400; admin waived the remaining 600,
+    // which lowered net_minor to 400 and zeroed the balance.
+    const inst = seedPaidInst(400n, 400n, 'WAIVED');
+    inst.balance_minor = 0n;
+    const pay = mkPayment(400n); store.payments.push(pay);
+    seedAlloc(pay.id, inst.id, 400n);
+
+    await svc.voidPayment(admin as never, pay.id, { reason: 'cheque bounced' } as never);
+
+    // The 400 is owed again and now says so.
+    expect(inst.paid_minor).toBe(0n);
+    expect(inst.balance_minor).toBe(400n);
+    expect(inst.status).toBe('INVOICED');
+  });
+
+  it('T1-5: the waiver itself survives the reversal — only the "nothing owed" claim goes', async () => {
+    const inst = seedPaidInst(400n, 400n, 'WAIVED');
+    inst.balance_minor = 0n;
+    const pay = mkPayment(400n); store.payments.push(pay);
+    seedAlloc(pay.id, inst.id, 400n);
+
+    await svc.voidPayment(admin as never, pay.id, { reason: 'cheque bounced' } as never);
+
+    // net_minor keeps the forgiven reduction: the student owes the 400 they
+    // never really paid, not the original 1000.
+    expect(inst.net_minor).toBe(400n);
   });
 
   it('partial void (other alloc remains) flips PAID→PARTIAL', async () => {
@@ -356,6 +422,122 @@ describe('completeRefund', () => {
     expect(store.credits).toHaveLength(1);
     expect(store.credits[0]).toMatchObject({ amount_minor: 30n, source: 'refund_carryforward' });
   });
+
+  // ---- SVT-FIN-2026-08 (T1-4) — refunding an overpayment must extinguish
+  // the credit that overpayment minted. ------------------------------------
+  //
+  // The failure this prevents: student overpays, recordPayment mints Credit A
+  // for the overflow. The refund unwinds allocations only, so the leftover
+  // falls into the surplus branch, whose error tells the operator to pass
+  // credit_carryforward=true — minting Credit B for the very cash being
+  // returned. Net cash movement zero, credit liability doubled, both halves
+  // spendable against real installments.
+
+  /** Mint the overpayment credit recordPayment would have created. */
+  function seedOverpaymentCredit(paymentId: string, amount: bigint): Record<string, unknown> {
+    const c = {
+      id: randomUUID(), tenant_id: TENANT, student_id: STUDENT, enrollment_id: ENROLLMENT,
+      amount_minor: amount, currency: 'USD', source: 'overpayment',
+      source_ref_id: paymentId, consumed_minor: 0n, expires_on: null, reversed_at: null,
+    };
+    store.credits.push(c);
+    return c;
+  }
+
+  it('T1-4: refunding an overpayment retires its credit instead of minting a second', async () => {
+    // Student owed 100, paid 130. 100 allocated, 30 became Credit A.
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(130n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const creditA = seedOverpaymentCredit(pay.id, 30n);
+
+    // Refund just the overpaid 30.
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 30n, status: 'PENDING' };
+    store.refunds.push(refund);
+    await svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never);
+
+    // Credit A is retired — the student no longer holds the money twice.
+    expect(creditA['reversed_at']).toBeInstanceOf(Date);
+    // No second credit was minted for the same cash.
+    expect(store.credits).toHaveLength(1);
+    // And the settled installment was NOT disturbed: the credit was the
+    // least-committed money, so the refund came out of it first.
+    expect(i1.paid_minor).toBe(100n);
+    expect(i1.status).toBe('PAID');
+  });
+
+  it('T1-4: refunding the whole payment retires the credit AND unwinds allocations, with no carryforward', async () => {
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(130n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const creditA = seedOverpaymentCredit(pay.id, 30n);
+
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 130n, status: 'PENDING' };
+    store.refunds.push(refund);
+    // Note: no credit_carryforward. Previously the 30 leftover forced the
+    // operator into the carryforward branch; now it is absorbed by retiring
+    // the credit the payment itself created.
+    await svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never);
+
+    expect(creditA['reversed_at']).toBeInstanceOf(Date);
+    expect(store.credits).toHaveLength(1);
+    expect(i1.paid_minor).toBe(0n);
+    expect(i1.status).toBe('REFUNDED');
+  });
+
+  it('T1-4: a partial refund of a credit reverses it and re-posts the residual', async () => {
+    // Money rows are never edited in place, so a credit refunded in part is
+    // reversed in full and the remainder re-posted as a new credit.
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(130n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const creditA = seedOverpaymentCredit(pay.id, 30n);
+
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 10n, status: 'PENDING' };
+    store.refunds.push(refund);
+    await svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never);
+
+    expect(creditA['reversed_at']).toBeInstanceOf(Date);
+    const residual = store.credits.find((c) => c['reversed_at'] == null);
+    expect(residual).toMatchObject({ amount_minor: 20n, source: 'overpayment', source_ref_id: pay.id });
+    // The installment is still fully settled — nothing was unwound.
+    expect(i1.paid_minor).toBe(100n);
+  });
+
+  it('T1-4: refuses when the credit has already been spent on other installments', async () => {
+    // Refunding it as cash while it also sits inside a settled installment
+    // would spend the same money twice. Needs an operator decision.
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(130n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const creditA = seedOverpaymentCredit(pay.id, 30n);
+    creditA['consumed_minor'] = 20n;
+
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 30n, status: 'PENDING' };
+    store.refunds.push(refund);
+    await expect(
+      svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(creditA['reversed_at']).toBeNull();
+  });
+
+  it('T1-4: the audit entry records which credits the refund extinguished', async () => {
+    const i1 = seedPaidInst(100n, 100n, 'PAID');
+    const pay = mkPayment(130n); store.payments.push(pay);
+    seedAlloc(pay.id, i1.id, 100n);
+    const creditA = seedOverpaymentCredit(pay.id, 30n);
+
+    const refund: Refund = { id: randomUUID(), tenant_id: TENANT, payment_id: pay.id, amount_minor: 30n, status: 'PENDING' };
+    store.refunds.push(refund);
+    await svc.completeRefund(admin as never, refund.id, { refunded_on: '2026-05-19' } as never);
+
+    // Otherwise the credit vanishes from the student's balance with nothing
+    // tying it to the refund that consumed it.
+    const entry = store.audits.find((a) => a['action'] === 'refund.completed')!;
+    const after = entry['after'] as Record<string, unknown>;
+    expect(after['credits_retired_minor']).toBe('30');
+    expect(after['credits_retired']).toEqual([{ id: creditA['id'], retired_minor: '30' }]);
+  });
 });
 
 describe('markRefundFailed', () => {
@@ -405,6 +587,32 @@ describe('applyAdjustment', () => {
         kind: 'WAIVER', amount_minor: -100n, reason_text: 'hardship', applied_on: '2026-05-19',
       } as never),
     ).rejects.toMatchObject({ status: 403 });
+  });
+
+  // SVT-FIN-2026-08 (T1-5b) — the same corrupt row (WAIVED while money is
+  // owed) was reachable without any reversal at all: a WAIVER is capped at the
+  // balance but may be smaller than it, and the status flip was unconditional.
+
+  it('T1-5b: a WAIVER covering the whole balance still lands on WAIVED', async () => {
+    const inst = seedPaidInst(100n, 0n, 'DUE');
+    await svc.applyAdjustment(admin as never, inst.id, {
+      kind: 'WAIVER', amount_minor: -100n, reason_text: 'hardship', applied_on: '2026-05-19',
+    } as never);
+    expect(inst.status).toBe('WAIVED');
+    expect(inst.balance_minor).toBe(0n);
+  });
+
+  it('T1-5b: a PARTIAL waiver records the forgiveness but leaves the row collectable', async () => {
+    // Forgiving 40 of a 100 balance used to stamp the row WAIVED with 60 still
+    // owed — invisible to getOutstanding, which scans only
+    // INVOICED/DUE/OVERDUE/PARTIAL, while outstandingByAge kept counting it.
+    const inst = seedPaidInst(100n, 0n, 'DUE');
+    await svc.applyAdjustment(admin as never, inst.id, {
+      kind: 'WAIVER', amount_minor: -40n, reason_text: 'partial hardship', applied_on: '2026-05-19',
+    } as never);
+    expect(inst.net_minor).toBe(60n);      // forgiveness recorded
+    expect(inst.balance_minor).toBe(60n);  // remainder still owed
+    expect(inst.status).toBe('DUE');       // and still collectable
   });
 });
 

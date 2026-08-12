@@ -511,4 +511,115 @@ export async function reverseCreditsForSource(
   return rows.map((r) => ({ id: r.id, amount_minor: r.amount_minor }));
 }
 
+// ---------------------------------------------------------------------------
+// retireCreditsForRefund — used by completeRefund.
+//
+// A payment that overpaid minted a StudentCredit for the overflow. Refunding
+// that money in cash must extinguish the credit, or the student holds the same
+// money twice: once in their bank, once as spending power against future
+// installments. `voidPayment` already does this via reverseCreditsForSource;
+// the refund path did not — and the error it raised on the leftover ("pass
+// credit_carryforward=true") instructed the operator to mint a SECOND credit
+// for the very cash being returned.
+//
+// Retiring credits BEFORE unwinding allocations is also the correct order on
+// its own merits. The credit is the least-committed money the payment created,
+// so a refund should consume it before disturbing an installment that is
+// legitimately settled. Refunding an overpayment now leaves the installment
+// alone, which is what an accountant would expect.
+//
+// Partial retirement uses reverse-and-re-post rather than editing the row in
+// place: money rows here are never mutated (`reversed_at` exists precisely for
+// retirement-without-deletion, and `sum(applications) == consumed_minor` is an
+// invariant), so a credit refunded in part is reversed in full and a
+// replacement credit is minted for the residual.
+// ---------------------------------------------------------------------------
+
+export async function retireCreditsForRefund(
+  tx: Prisma.TransactionClient,
+  opts: {
+    tenantId: string;
+    /** The payment whose minted credits are being refunded. */
+    sourceRefId: string;
+    /** Ceiling on what may be retired — the unaccounted-for part of the refund. */
+    cap: bigint;
+    actorId: string | null;
+    reason: string;
+  },
+): Promise<{ retired: bigint; credits: Array<{ id: string; retired_minor: bigint }> }> {
+  if (opts.cap <= 0n) return { retired: 0n, credits: [] };
+
+  const rows = await tx.$queryRaw<
+    Array<{
+      id: string;
+      student_id: string;
+      enrollment_id: string | null;
+      amount_minor: bigint;
+      consumed_minor: bigint;
+      currency: string;
+      expires_on: Date | null;
+    }>
+  >`
+    SELECT id, student_id, enrollment_id, amount_minor, consumed_minor, currency, expires_on
+    FROM student_credits
+    WHERE tenant_id = ${opts.tenantId}::uuid
+      AND source_ref_id = ${opts.sourceRefId}::uuid
+      AND reversed_at IS NULL
+    ORDER BY created_at ASC
+    FOR UPDATE
+  `;
+  if (rows.length === 0) return { retired: 0n, credits: [] };
+
+  let remaining = opts.cap;
+  const credits: Array<{ id: string; retired_minor: bigint }> = [];
+
+  for (const r of rows) {
+    if (remaining <= 0n) break;
+    // Same policy as reverseCreditsForSource: money already applied to other
+    // installments is not ours to claw back silently. Refunding it as cash
+    // while it also sits inside a settled installment would double-spend it.
+    if (r.consumed_minor > 0n) {
+      throw Conflict(
+        `The overpayment on this payment created a student credit of which ${r.consumed_minor} has already been applied to other installments. Reverse those applications first, or the same money is both refunded and left settling an installment.`,
+      );
+    }
+    const available = r.amount_minor - r.consumed_minor;
+    if (available <= 0n) continue;
+    const take = available < remaining ? available : remaining;
+
+    await tx.studentCredit.updateMany({
+      where: { id: r.id, tenant_id: opts.tenantId, reversed_at: null },
+      data: {
+        reversed_at: new Date(),
+        reversed_reason: opts.reason,
+        reversed_by_id: opts.actorId,
+      },
+    });
+
+    const residual = available - take;
+    if (residual > 0n) {
+      await tx.studentCredit.create({
+        data: {
+          tenant_id: opts.tenantId,
+          student_id: r.student_id,
+          enrollment_id: r.enrollment_id,
+          amount_minor: residual,
+          currency: r.currency,
+          source: 'overpayment',
+          source_ref_id: opts.sourceRefId,
+          consumed_minor: 0n,
+          expires_on: r.expires_on,
+          created_by_id: opts.actorId,
+          notes: `Residual of credit ${r.id}, which was reversed after ${take} of it was refunded in cash.`,
+        },
+      });
+    }
+
+    credits.push({ id: r.id, retired_minor: take });
+    remaining -= take;
+  }
+
+  return { retired: opts.cap - remaining, credits };
+}
+
 export const __CREDIT_INTERNALS__ = { availableOf, SETTLEABLE_STATUSES };

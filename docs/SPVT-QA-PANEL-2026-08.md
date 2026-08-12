@@ -133,23 +133,73 @@ plan billing **2,000,000**, and the invoice prints no scholarship line — so th
 document is internally consistent and the error is undetectable from the
 artifact.
 
-### T1-4 · Refund mints a second credit for the same cash — **OPEN**
-`src/modules/billing/payment.service.ts:664`
+### T1-4 · Refund mints a second credit for the same cash — **FIXED**
+`src/modules/billing/payment.service.ts`, `credit.service.ts`
 
-`completeRefund` never retires the StudentCredit the payment minted (compare
-`voidPayment:413`, which does). An overpayment creates Credit A; the refund
-throws with guidance to pass `credit_carryforward=true`; following that
-instruction mints Credit B. Net cash movement zero, outstanding credit liability
+`completeRefund` never retired the StudentCredit the payment minted (compare
+`voidPayment`, which does). An overpayment creates Credit A; the refund throws
+with guidance to pass `credit_carryforward=true`; following that instruction
+mints Credit B. Net cash movement zero, outstanding credit liability
 **doubled**, both spendable against real installments.
 
-### T1-5 · Reversal restores a balance onto a WAIVED installment — **OPEN**
-`src/modules/billing/payment.service.ts:378`, `:614`
+Fixed with `retireCreditsForRefund`, called **before** the allocation unwind.
+Retiring first is not just convenient — the credit is the least-committed money
+the payment created, so refunding an overpayment should consume it rather than
+unwind an installment that is legitimately settled. With that in place,
+`surplus` finally means what its error says: the refund exceeded the payment's
+whole gross, not merely its allocated part, so the carryforward escape is left
+for genuine goodwill refunds.
 
-Status is only rewritten when currently PAID or PARTIAL, so a WAIVED row keeps
-WAIVED while regaining a live balance. The DB CHECK passes. That balance is then
-invisible to `getOutstanding` and the dashboard but *visible* to
-`outstandingByAge` — two finance screens disagree, and no API path can fix the
-row because the FSM has no outbound WAIVED edge.
+Partial retirement uses reverse-and-re-post rather than editing the row —
+`reversed_at` exists precisely for retirement-without-deletion and
+`sum(applications) == consumed_minor` is an invariant — so a credit refunded in
+part is reversed in full and the residual re-posted. A credit already spent on
+other installments refuses with a 409, matching `reverseCreditsForSource`:
+refunding it as cash while it also settles an installment spends it twice.
+
+The audit entry now records which credits a refund extinguished; without it the
+credit vanished from the student's balance with nothing linking it to the cause.
+
+`tests/billing-payment-actions.spec.ts` · 5 new tests.
+
+### T1-5 · Reversal restores a balance onto a WAIVED installment — **FIXED**
+`src/modules/billing/payment.service.ts`, `fsm-def.ts`
+
+Status was only rewritten when currently PAID or PARTIAL, so a WAIVED row kept
+WAIVED while regaining a live balance. The DB CHECK passes. That balance was
+then invisible to `getOutstanding` and the dashboard but *visible* to
+`outstandingByAge` — two finance screens disagreeing about one row, an agency
+never chasing money it was genuinely owed, and no API path able to repair it
+because the FSM had no outbound WAIVED edge.
+
+The arithmetic was never wrong. A waiver forgives the **remainder**: it writes a
+negative adjustment lowering `net_minor` to what was already paid, so
+`newBalance = net_minor - newPaid` correctly becomes positive when the payment
+behind it is reversed. Only the status lied. WAIVED now joins PAID/PARTIAL in
+both reversal loops, and `fsm-def.ts` gains the WAIVED → PARTIAL / INVOICED /
+REFUNDED edges — which its own comment already claimed existed ("PAID + WAIVED
+are terminal *unless* a refund reverses them — modelled as explicit transitions
+below"). The waiver itself is untouched: `net_minor` keeps the forgiven
+reduction, so the student owes the 400 they never really paid, not the original
+1,000.
+
+### T1-5b · A partial waiver marks an installment WAIVED while money is still owed — **FIXED**
+`src/modules/billing/payment.service.ts` · **Found while fixing T1-5**, and it
+reaches the same corrupt row with no reversal involved. A WAIVER is capped at
+the balance but may be *smaller* than it, and the status flip was
+unconditional — so forgiving 100 of a 600 balance stamped the row WAIVED with
+500 still owed. That is exactly the "WAIVED row showing money owed" state the
+guard at the top of `applyAdjustment` was written to prevent, arriving through a
+different door, and the comment beneath the cap asserted the opposite ("WAIVER
+zeros the balance via the WAIVED status transition further down" — nothing
+zeroed it).
+
+A partial waiver is a legitimate act, so the fix is not to forbid it: the
+negative adjustment already records the forgiveness in `net_minor`, and the
+remainder stays collectable under the row's existing status. WAIVED is now
+reached only when the waiver actually clears the balance.
+
+`tests/billing-payment-actions.spec.ts` · 4 new tests across T1-5 and T1-5b.
 
 ### T1-6 · Late-fee recompute is an unlocked read-modify-write — **OPEN**
 `src/jobs/billingDaily.ts:328`–`:353`

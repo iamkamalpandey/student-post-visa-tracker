@@ -50,7 +50,7 @@ import {
   recomputeInstallmentAmounts,
 } from './pricing.js';
 import { feeInstallmentFsm, paymentFsm, refundFsm, assertSettlement } from './fsm-def.js';
-import { reverseCreditsForSource } from './credit.service.js';
+import { reverseCreditsForSource, retireCreditsForRefund } from './credit.service.js';
 
 type DB = PrismaClient | Prisma.TransactionClient;
 type Role = 'ADMIN' | 'COUNSELLOR' | 'VIEWER';
@@ -379,9 +379,22 @@ export async function voidPayment(ctx: Ctx, paymentId: string, input: VoidPaymen
       // Status rollback:
       //   PAID    → PARTIAL (if newPaid > 0) | INVOICED (if 0)
       //   PARTIAL → PARTIAL (if still > 0)   | INVOICED (if 0)
+      //   WAIVED  → same, see below
       //   other   → preserved
+      //
+      // SVT-FIN-2026-08 (T1-5) — WAIVED belongs in this list. A waiver forgives
+      // the REMAINDER: it writes a negative adjustment that lowers net_minor to
+      // what has already been paid, so the row still carries a real net figure.
+      // Void the payment behind it and `newBalance` above correctly becomes
+      // positive — but the status used to stay WAIVED, so the row read as
+      // "nothing owed" to getOutstanding and the dashboard while
+      // outstandingByAge counted the balance. Two finance screens disagreed
+      // about one row, the agency never chased money it was genuinely owed, and
+      // no API path could repair it because the FSM had no outbound WAIVED edge
+      // (now added). The waiver itself is untouched — net_minor keeps the
+      // forgiven reduction; only the claim that nothing is owed goes away.
       let nextStatus: FeeInstallmentStatus = i.status;
-      if (i.status === 'PAID' || i.status === 'PARTIAL') {
+      if (i.status === 'PAID' || i.status === 'PARTIAL' || i.status === 'WAIVED') {
         nextStatus = newPaid > 0n ? 'PARTIAL' : 'INVOICED';
       }
       // FSM gate (PAID→INVOICED + PAID→PARTIAL + PARTIAL→INVOICED edges live in fsm-def.ts).
@@ -597,6 +610,33 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
     let toReverse = refund.amount_minor;
     let surplus = 0n;
 
+    // SVT-FIN-2026-08 (T1-4) — retire the credits this payment minted BEFORE
+    // unwinding any allocation.
+    //
+    // An overpayment mints a StudentCredit for the overflow (recordPayment).
+    // Returning that money in cash has to extinguish the credit, or the student
+    // holds it twice — once in their bank, once as spending power. voidPayment
+    // has always done this; completeRefund did not, and worse, the leftover
+    // then fell through to the surplus branch below whose error tells the
+    // operator to pass credit_carryforward=true — minting a SECOND credit for
+    // the same cash. Net cash movement zero, credit liability doubled, both
+    // halves spendable against real installments.
+    //
+    // Doing it first is also the right order independently: the credit is the
+    // least-committed money the payment created, so refunding an overpayment
+    // should consume it rather than unwind an installment that is legitimately
+    // settled. With this in place, `surplus` below now means what it says —
+    // the refund exceeded the payment's entire gross, not merely its allocated
+    // part — so the carryforward escape is left for genuine goodwill refunds.
+    const retiredCredits = await retireCreditsForRefund(tx, {
+      tenantId,
+      sourceRefId: payment.id,
+      cap: toReverse,
+      actorId,
+      reason: `Refunded in cash (refund ${refund.id})`,
+    });
+    toReverse -= retiredCredits.retired;
+
     for (const a of allocs) {
       if (toReverse <= 0n) break;
       const reverseAmount = toReverse < a.amount_minor ? toReverse : a.amount_minor;
@@ -619,13 +659,19 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
       //   newPaid == 0                → REFUNDED (the only money left is now zero)
       //   0 < newPaid < net_minor     → PARTIAL
       //   newPaid >= net_minor        → preserve PAID (other allocations cover)
+      //
+      // SVT-FIN-2026-08 (T1-5) — WAIVED is handled alongside PAID/PARTIAL for
+      // the same reason as in voidPayment: a waiver lowers net_minor to what was
+      // paid, so refunding that payment leaves a genuinely owed balance that
+      // must stop claiming nothing is due. Fully refunded → REFUNDED; partly →
+      // PARTIAL, since the remaining net is still collectable.
       let nextStatus: FeeInstallmentStatus = i.status;
       if (newPaid === 0n) {
-        if (i.status === 'PAID' || i.status === 'PARTIAL') {
+        if (i.status === 'PAID' || i.status === 'PARTIAL' || i.status === 'WAIVED') {
           nextStatus = 'REFUNDED';
         }
       } else if (newPaid < i.net_minor) {
-        if (i.status === 'PAID') nextStatus = 'PARTIAL';
+        if (i.status === 'PAID' || i.status === 'WAIVED') nextStatus = 'PARTIAL';
       }
       // fullUnwind = this single allocation row was reversed in its entirety
       // (consumed all of it). Used below to decide whether to DELETE the
@@ -730,7 +776,12 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
     }
     const completed = await tx.refund.findUniqueOrThrow({ where: { id: refund.id } });
 
-    return { refund: completed, surplus, paymentStatus: nextPaymentStatus };
+    return {
+      refund: completed,
+      surplus,
+      paymentStatus: nextPaymentStatus,
+      retiredCredits,
+    };
   });
 
   await writeAudit(ctx as never, {
@@ -743,6 +794,14 @@ export async function completeRefund(ctx: Ctx, refundId: string, input: Complete
       refunded_on: input.refunded_on,
       surplus_minor: out.surplus.toString(),
       payment_status: out.paymentStatus,
+      // SVT-FIN-2026-08 (T1-4) — record which credits this refund extinguished.
+      // Without it the credit simply disappears from the student's balance with
+      // nothing tying it to the refund that consumed it.
+      credits_retired_minor: out.retiredCredits.retired.toString(),
+      credits_retired: out.retiredCredits.credits.map((c) => ({
+        id: c.id,
+        retired_minor: c.retired_minor.toString(),
+      })),
     },
   });
   return out.refund;
@@ -917,10 +976,10 @@ export async function applyAdjustment(
     // SVT-WAVE-BILLING-SEC-P0-F1 — debt-erasing kinds may not exceed the
     // installment's current balance. Otherwise a counsellor could mint a
     // DISCOUNT larger than the actual outstanding amount (creating a
-    // negative net_minor — phantom credit). WAIVER zeros the balance via
-    // the WAIVED status transition further down, so capping its magnitude
-    // would be redundant; we still cap it for symmetry so net_minor never
-    // goes negative.
+    // negative net_minor — phantom credit). WAIVER is capped here for the
+    // same reason: nothing further down zeroes the balance (an earlier comment
+    // claimed it did — see T1-5b below), so the cap is what keeps net_minor
+    // from going negative.
     if (
       input.kind === 'DISCOUNT' ||
       input.kind === 'SCHOLARSHIP' ||
@@ -978,13 +1037,31 @@ export async function applyAdjustment(
     }
 
     // Status implications:
-    //   - WAIVER: status → WAIVED (FSM-gated, ADMIN + reason).
+    //   - WAIVER that clears the balance: status → WAIVED (FSM-gated, ADMIN + reason).
     //   - Other negative adjustments closing balance → PAID.
     //   - Otherwise preserve, unless reduction now leaves a 0 balance → PAID.
+    //
+    // SVT-FIN-2026-08 (T1-5b) — a WAIVER is capped at the balance but may be
+    // SMALLER than it, and the status flip used to be unconditional. Forgiving
+    // 100 of a 600 balance therefore stamped the row WAIVED with 500 still
+    // owed: the exact "WAIVED row showing money owed" state the guard at the
+    // top of this function was written to prevent, reached by a different door.
+    // getOutstanding scans INVOICED/DUE/OVERDUE/PARTIAL only, so that 500
+    // silently left every collection path while outstandingByAge kept counting
+    // it. The comment below the cap even asserted "WAIVER zeros the balance via
+    // the WAIVED status transition" — nothing zeroed it; the balance is
+    // whatever the adjustment left behind.
+    //
+    // A partial waiver is a legitimate act, so the fix is not to forbid it: the
+    // negative adjustment already records the forgiveness in net_minor, and the
+    // remainder stays collectable under the row's existing status.
     let nextStatus: FeeInstallmentStatus = i.status;
-    if (input.kind === 'WAIVER') {
+    if (input.kind === 'WAIVER' && recomputed.balance_minor === 0n) {
       assertOrThrow(feeInstallmentFsm, i.status, 'WAIVED', role, input.reason_text);
       nextStatus = 'WAIVED';
+    } else if (input.kind === 'WAIVER') {
+      // Partial waiver: forgiveness recorded, balance still owed, status stands.
+      nextStatus = i.status;
     } else if (recomputed.balance_minor === 0n && i.status !== 'PAID') {
       // SVT-QA-2026-08 (BILL-M8) — SCHEDULED → PAID is not a declared edge, so
       // fully discounting a still-SCHEDULED installment used to 422. The

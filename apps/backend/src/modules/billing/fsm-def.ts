@@ -73,6 +73,7 @@ export const feePlanFsm = defineMachine<FeePlanStatus>({
 //   SUSPENDED ──(plan resumed)──▶ INVOICED  (cron then re-evaluates DUE)
 //   *active* ──(plan cancelled)──▶ CANCELLED
 //   PAID ──(refund clears allocation)──▶ REFUNDED
+//   PAID/WAIVED ──(void/refund restores a balance)──▶ PARTIAL | INVOICED
 //
 // Terminal: PAID, WAIVED, CANCELLED, REFUNDED.
 export const feeInstallmentFsm = defineMachine<FeeInstallmentStatus>({
@@ -135,6 +136,25 @@ export const feeInstallmentFsm = defineMachine<FeeInstallmentStatus>({
     { from: 'PAID',    to: 'PARTIAL',  requires_role: 'ADMIN', require_reason: true },
     { from: 'PAID',    to: 'INVOICED', requires_role: 'ADMIN', require_reason: true },
     { from: 'PARTIAL', to: 'INVOICED', requires_role: 'ADMIN', require_reason: true },
+
+    // SVT-FIN-2026-08 (T1-5) — the same rollback edges out of WAIVED.
+    //
+    // A waiver forgives the REMAINDER: applyAdjustment writes a negative
+    // FeeAdjustment that lowers net_minor to whatever has been paid, so a
+    // waived row still carries a real net figure. Reverse the payment behind it
+    // and that net becomes owed again — correctly computed, but previously
+    // stranded under a WAIVED status because no edge left this state. The row
+    // then read as "nothing owed" to getOutstanding and the dashboard while
+    // outstandingByAge counted the balance: two finance screens disagreeing
+    // about the same row, with no API path able to repair it.
+    //
+    // The comment above already claimed WAIVED was non-terminal "unless a
+    // refund reverses them"; these are the transitions that claim referred to.
+    { from: 'WAIVED',  to: 'PARTIAL',  requires_role: 'ADMIN', require_reason: true },
+    { from: 'WAIVED',  to: 'INVOICED', requires_role: 'ADMIN', require_reason: true },
+    // completeRefund lands a fully-unwound row on REFUNDED rather than
+    // INVOICED, so WAIVED needs that exit too.
+    { from: 'WAIVED',  to: 'REFUNDED', requires_role: 'ADMIN', require_reason: true },
   ],
 });
 
