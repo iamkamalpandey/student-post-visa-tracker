@@ -66,6 +66,27 @@ prismaAdmin.$on('error' as never, (e: { message?: string }) => {
 // the runtime role at boot and refuse to serve a privileged role in production.
 // `prismaAdmin` is deliberately superuser (narrow auth-time cross-tenant
 // lookups) and is intentionally NOT checked here.
+/**
+ * SVT-SEC-2026-08 — has the runtime role been PROVEN to be RLS-enforced?
+ *
+ * The assertion below deliberately does not crash when its probe fails (a
+ * transient DB blip at boot should not brick a deployment), but the previous
+ * behaviour was to skip the check and serve anyway — so a deploy that raced a
+ * database failover could run indefinitely with tenant isolation never
+ * verified. "It re-runs on the next boot" assumes a restart that may not come
+ * for weeks.
+ *
+ * Readiness is the right lever rather than a crash loop: /readyz now refuses to
+ * report ready in production until this is true, so such an instance simply
+ * never receives traffic and the platform keeps the previous version serving.
+ * A blip delays readiness; it no longer silently disables the single control
+ * that makes this system safe to run multi-tenant.
+ */
+let rlsRoleVerified = false;
+export function isRlsRoleVerified(): boolean {
+  return rlsRoleVerified;
+}
+
 export async function assertRuntimeRoleRespectsRls(): Promise<void> {
   let row: { rolname: string; rolsuper: boolean; rolbypassrls: boolean } | undefined;
   try {
@@ -85,6 +106,7 @@ export async function assertRuntimeRoleRespectsRls(): Promise<void> {
     return;
   }
   if (!row.rolsuper && !row.rolbypassrls) {
+    rlsRoleVerified = true;
     logger.info({ role: row.rolname }, 'rls-role-assert: runtime DB role is RLS-enforced');
     return;
   }
@@ -95,6 +117,11 @@ export async function assertRuntimeRoleRespectsRls(): Promise<void> {
     );
     process.exit(1);
   }
+  // Non-production with a privileged role: a single-role dev DB is a valid
+  // local setup, so mark it verified — otherwise /readyz would refuse to come
+  // ready on every developer machine. The production branch above has already
+  // exited by this point, so this can never mask a real misconfiguration.
+  rlsRoleVerified = true;
   logger.warn(
     { role: row.rolname, rolsuper: row.rolsuper, rolbypassrls: row.rolbypassrls },
     'rls-role-assert: runtime DB role is superuser/BYPASSRLS so RLS is bypassed — OK for a single-role dev DB, but production MUST use spv_app.',

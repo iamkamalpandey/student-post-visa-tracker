@@ -377,10 +377,25 @@ v1 payload — dropping `hash_version := 2` and the actor/IP/user-agent hashes.
 as v1 and the daily job stays green while the forensic fields sit **outside** the
 tamper-evident hash.
 
-### T4-4 · RLS role assertion fails open, after the socket is already accepting — **OPEN**
-`src/config/db.ts:76`, `src/server.ts:48` · If the boot probe throws it is
-skipped entirely, and it runs inside the `listen` callback. A deploy coinciding
-with a failover serves indefinitely with the check never performed.
+### T4-4 · RLS role assertion fails open, after the socket is already accepting — **FIXED**
+`src/config/db.ts`, `src/modules/health/health.routes.ts` · If the boot probe
+threw it was skipped entirely, and it ran inside the `listen` callback. A deploy
+coinciding with a failover served indefinitely with the check never performed —
+and if `DATABASE_URL` pointed at the admin role, RLS would be off for the whole
+application with no other symptom.
+
+Fixed by tracking whether the role has been *positively proven* RLS-enforced
+(`isRlsRoleVerified()`) and gating `/readyz` on it in production. Crash-looping
+on a transient blip would be the wrong trade; readiness is the right lever, and
+it only became usable once T4-1 pointed the platform health check at `/readyz`.
+An unverified instance never receives traffic and the previous version keeps
+serving. Non-production marks itself verified on a privileged role so a
+single-role dev DB still comes ready — the production branch has already
+`process.exit(1)`d by that point, so it cannot mask a real misconfiguration.
+
+`tests/readyz-rls-gate.spec.ts` · 5 tests, including that the response
+distinguishes "DB down" from "DB up but isolation unproven" (different
+incidents, different responses) and that it never echoes driver detail.
 
 ---
 

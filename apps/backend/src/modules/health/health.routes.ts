@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { prisma } from '../../config/db.js';
+import { prisma, isRlsRoleVerified, assertRuntimeRoleRespectsRls } from '../../config/db.js';
+import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { getRedisClient } from '../../shared/redisClient.js';
 import { dbUp, redisUp } from '../../config/metrics.js';
@@ -14,6 +15,31 @@ healthRouter.get('/readyz', async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     dbUp.set(1);
+
+    // SVT-SEC-2026-08 — do not report ready until tenant isolation is PROVEN.
+    //
+    // assertRuntimeRoleRespectsRls() runs at boot and exits the process when it
+    // finds a superuser/BYPASSRLS DATABASE_URL in production. But when its probe
+    // THROWS (a DB blip during a deploy, a failover) it deliberately does not
+    // crash — and it used to simply skip, so the instance served indefinitely
+    // with the check never performed. If DATABASE_URL was misconfigured to the
+    // admin role, RLS would be off for the whole app with no other symptom.
+    //
+    // Gating readiness on it is the right lever. The DB is demonstrably up by
+    // this point, so retrying here is cheap and will succeed; if the role turns
+    // out to be privileged the assert exits the process, and if it still cannot
+    // be proven the instance stays un-ready and never receives traffic while the
+    // platform keeps the previous version serving. A blip now delays readiness
+    // instead of silently disabling the control that makes this app safe to run
+    // multi-tenant.
+    if (env.NODE_ENV === 'production' && !isRlsRoleVerified()) {
+      await assertRuntimeRoleRespectsRls();
+      if (!isRlsRoleVerified()) {
+        logger.error('readyz: runtime DB role not verified as RLS-enforced — refusing ready');
+        res.status(503).json({ status: 'not_ready', db: 'ok', rls_role: 'unverified' });
+        return;
+      }
+    }
     const redis = await getRedisClient();
     const redisConfigured = Boolean(process.env.REDIS_URL);
     const redisStatus = redis ? 'connected' : (redisConfigured ? 'unavailable' : 'not_configured');

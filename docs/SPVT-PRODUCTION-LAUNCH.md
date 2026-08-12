@@ -91,9 +91,18 @@ admin role (`doadmin`), every tenant boundary in the product is inert.
 psql "$DATABASE_URL" -c "SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;"
 ```
 
-Both flags must be `f`. `config/db.ts` fails closed on this in production, but
-verify it rather than relying on the guard — that guard is itself skipped if its
-probe throws.
+Both flags must be `f`.
+
+This is now enforced automatically as well, on two levels: `config/db.ts` refuses
+to start in production when it *detects* a privileged role, and `/readyz`
+refuses to report ready until the role has been positively **proven**
+RLS-enforced. Previously the check was skipped whenever its probe threw — so a
+deploy racing a database failover could serve indefinitely with tenant isolation
+never verified. An unverified instance now simply never receives traffic and the
+platform keeps the previous version serving.
+
+Run the query anyway. An automated gate that has never been observed failing is
+an assumption, not a control.
 
 `DATABASE_URL` = runtime role (`spv_app`, non-superuser).
 `DATABASE_MIGRATE_URL` = owner role (`spv`), used only by the PRE_DEPLOY job.
