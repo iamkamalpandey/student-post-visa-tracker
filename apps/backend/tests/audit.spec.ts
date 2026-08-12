@@ -27,6 +27,11 @@ const { created, getLastEntryHash, setLastEntryHash, prismaMock, loggedErrors } 
       create: undefined as unknown,
     },
     $transaction: undefined as unknown,
+    // SVT-SEC-2026-08 (T0-7) — tenant-scoped audit writes now run inside
+    // withTenantTx, which issues `SELECT set_config('app.tenant_id', …)` before
+    // the insert. Without the GUC the audit_logs policy rejects every
+    // tenant-scoped row under the production role.
+    $executeRaw: undefined as unknown,
   };
 
   return {
@@ -51,6 +56,7 @@ prismaMock.auditLog.create = vi.fn(async ({ data }: { data: Record<string, unkno
   return data;
 });
 prismaMock.$transaction = vi.fn(async (fn: (tx: typeof prismaMock) => Promise<unknown>) => fn(prismaMock));
+prismaMock.$executeRaw = vi.fn(async () => 1);
 
 vi.mock('../src/config/db.js', () => ({
   prisma: prismaMock,
@@ -83,6 +89,53 @@ beforeEach(() => {
   prismaMock.auditLog.findFirst.mockClear();
   prismaMock.auditLog.create.mockClear();
   prismaMock.$transaction.mockClear();
+  prismaMock.$executeRaw.mockClear();
+});
+
+// SVT-SEC-2026-08 (T0-7) — the audit write must set the tenant GUC.
+//
+// audit_logs carries the policy
+//   USING/WITH CHECK (tenant_id = app_current_tenant() OR tenant_id IS NULL)
+// so on a connection with no `app.tenant_id` every tenant-scoped insert fails
+// the WITH CHECK. writeAudit swallows its own failures by design, so the
+// tamper-evident chain this product sells as forensic integrity would have
+// recorded nothing but system rows — silently — from the first day
+// DATABASE_URL pointed at the de-privileged `spv_app` role. Dev and CI never
+// saw it because RLS does not apply to the single superuser role they use.
+describe('audit.writeAudit — tenant GUC (T0-7)', () => {
+  it('sets app.tenant_id before inserting a tenant-scoped row', async () => {
+    await writeAudit({
+      tenantId: '11111111-1111-1111-1111-111111111111',
+      action: 'student.updated',
+      entityType: 'student',
+    });
+
+    expect(prismaMock.auditLog.create).toHaveBeenCalledTimes(1);
+    // The GUC statement is what makes the row insertable at all.
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not set a GUC for a system row, which lands via the tenant_id IS NULL branch', async () => {
+    await writeAudit({
+      tenantId: null,
+      action: 'system.job.ran',
+      entityType: 'job',
+    });
+
+    expect(prismaMock.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('still writes independently of the caller, so a caller rollback cannot lose the row', async () => {
+    // withTenantTx opens its own prisma.$transaction; the pre-existing
+    // guarantee (audit survives business-code rollback) must be preserved.
+    await writeAudit({
+      tenantId: '11111111-1111-1111-1111-111111111111',
+      action: 'student.updated',
+      entityType: 'student',
+    });
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('audit.writeAudit — happy path', () => {

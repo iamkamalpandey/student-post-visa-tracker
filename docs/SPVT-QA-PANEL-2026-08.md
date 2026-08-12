@@ -20,6 +20,70 @@ Status legend: **FIXED** (landed + tested) · **OPEN** · **NEEDS SIGN-OFF**
 These share one property: nothing errors, nobody is alerted, and the damage
 cannot be undone after the fact. They outrank everything else.
 
+### T0-7 · Six cron jobs read through RLS with no tenant GUC — they will return zero rows in production and report success — **OPEN, P0 LAUNCH BLOCKER**
+
+**Found while fixing T1-6. This is the largest defect in the register and it is
+invisible in every environment we have run so far.**
+
+The final RLS policy on every tenant-scoped table is
+
+```sql
+USING (tenant_id = app_current_tenant())
+```
+
+with no `OR app_current_tenant() IS NULL` branch — `20991231235983_rls_remove_escape_hatch`
+stripped it and `20991231236005_rls_reclose_escape_hatch` re-closed the three
+migrations that had re-opened it. `app_current_tenant()` is
+`NULLIF(current_setting('app.tenant_id', true), '')::uuid`, so on a connection
+with the GUC unset it is NULL and **every row fails the policy**.
+
+`shared/tenantTx.ts` says so in its own header: *"service functions that reach
+for the raw `prisma` singleton bypass the extension, so their queries see zero
+rows when RLS is enforced."* The reclose migration says it too: *"A connection
+that forgets the GUC now sees zero rows. That fails safe and is loudly
+debuggable."* It fails safe. It is **not** loud.
+
+Six jobs run their reads on the bare `prisma` singleton with no GUC anywhere:
+
+| Job | What silently stops | Table |
+|---|---|---|
+| `billingDaily` | the **entire receivables pipeline** — invoicing, DUE, OVERDUE, late fees, plan completion | `fee_installments`, `fee_plans`, `fee_adjustments`, `tenants` |
+| `reminderDispatcher` | every reminder send (writes are correctly scoped; the read that *finds* them is not) | `reminders` |
+| `dsarSlaWatch` | DSAR SLA breach detection | `dsar_requests` |
+| `commsCleanup` | comms retention | `comms_messages` |
+| `idempotencyCleanup` | the idempotency table is never pruned and grows forever | `idempotency_records` |
+| `retentionErasure` | document retention never executes | `documents` |
+
+`billingDaily` is the clearest proof. Its first statement per tenant is
+
+```ts
+const tenant = await prisma.tenant.findFirst({ where: { id: tenantId, is_active: true } });
+if (!tenant || !tenant.billing_enabled) return { …all zeros… };
+```
+
+The `tenants` policy is `id = app_current_tenant()`, so in production that
+`findFirst` returns null for **every** tenant and the job returns all-zero
+counters through its normal success path. No error, no throw, no alert — a
+green cron run that did nothing. The business would see zero receivables and no
+dunning, exactly as if no student owed anything.
+
+**Why no environment has caught it.** RLS does not apply to superusers or
+BYPASSRLS roles. Dev and CI run a single-role database — `config/db.ts` even
+logs *"OK for a single-role dev DB"* on that path — so every job works
+perfectly right up until `DATABASE_URL` points at the de-privileged `spv_app`
+role, which is step 3 of the launch runbook. **The act of correctly securing
+the database is what breaks the billing engine.**
+
+The `billingDaily` comment claiming *"every query below explicitly filters
+`tenant_id = tenantId`, so RLS only ever served as belt-and-braces here"* was
+true when written — the escape hatch still existed. It has been false since
+`…235983`.
+
+Fix: enumerate tenants via `prismaAdmin` (inherently cross-tenant, and the
+reclose migration explicitly blesses this for jobs), then run each tenant's
+reads *and* writes inside `withTenantTx` — the pattern `commsDispatcher`,
+`commsDigest` and `v2Ingest` already use. Tracked as T0-7a…f, one per job.
+
 ### T0-1 · KEK rotation destroyed all encrypted PII — **FIXED**
 `src/config/kms.ts:94` (was)
 

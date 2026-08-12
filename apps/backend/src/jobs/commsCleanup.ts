@@ -17,7 +17,7 @@
 // Runs as a scheduled daily job; safe to call concurrently because we DELETE
 // by id and tolerate count<expected.
 
-import { prisma } from '../config/db.js';
+import { prismaAdmin } from '../config/db.js';
 import { logger } from '../config/logger.js';
 
 const RETENTION_DAYS = 30;
@@ -35,7 +35,18 @@ export async function runCommsCleanup(nowOverride?: Date): Promise<CommsCleanupR
   const result: CommsCleanupResult = { scanned: 0, deleted: 0, errors: 0 };
 
   try {
-    const rows = await prisma.commsMessage.findMany({
+    // SVT-SEC-2026-08 (T0-7) — prismaAdmin, not prisma.
+    //
+    // comms_messages is RLS-scoped and this sweep is deliberately tenant-blind:
+    // it is a time-based retention purge across the whole table. On the GUC-less
+    // runtime singleton it matched ZERO rows under the production role, so
+    // retention never executed and the job logged "nothing to purge" every night
+    // no matter how much there was to purge.
+    //
+    // Cross-tenant reach is the actual requirement, so the admin client states
+    // that plainly rather than a per-tenant loop that would add round-trips
+    // without changing what gets deleted.
+    const rows = await prismaAdmin.commsMessage.findMany({
       where: {
         status: { in: ['SENT', 'READ', 'DELIVERED'] },
         direction: 'OUTBOUND',
@@ -50,7 +61,7 @@ export async function runCommsCleanup(nowOverride?: Date): Promise<CommsCleanupR
       return result;
     }
 
-    const r = await prisma.commsMessage.deleteMany({
+    const r = await prismaAdmin.commsMessage.deleteMany({
       where: { id: { in: rows.map((x) => x.id) } },
     });
     result.deleted = r.count;

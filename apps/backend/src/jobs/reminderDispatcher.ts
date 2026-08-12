@@ -8,7 +8,7 @@
 // equivalent for our purposes (the second worker's update touches 0 rows).
 
 import { Prisma, type PrismaClient } from '@prisma/client';
-import { prisma } from '../config/db.js';
+
 import { logger } from '../config/logger.js';
 import { captureJobException } from '../config/sentry.js';
 import { withTenantTx } from '../shared/tenantTx.js';
@@ -24,13 +24,22 @@ const BATCH_LIMIT = 200;
 // refreshed on process restart (cheap given the cadence).
 const fallbackAdminCache = new Map<string, string | null>();
 
-async function fallbackAdminFor(tenantId: string, db: DB): Promise<string | null> {
+async function fallbackAdminFor(tenantId: string, db?: DB): Promise<string | null> {
   if (fallbackAdminCache.has(tenantId)) return fallbackAdminCache.get(tenantId)!;
-  const admin = await db.user.findFirst({
-    where: { tenant_id: tenantId, role: 'ADMIN', is_active: true, deleted_at: null },
-    orderBy: { created_at: 'asc' },
-    select: { id: true },
-  });
+  // SVT-SEC-2026-08 (T0-7) — `users` is RLS-scoped, so this lookup needs the
+  // tenant GUC. Without it every tenant resolved to "no fallback admin" and
+  // unassigned reminders had nowhere to go.
+  const admin = db
+    ? await db.user.findFirst({
+        where: { tenant_id: tenantId, role: 'ADMIN', is_active: true, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+        select: { id: true },
+      })
+    : await withTenantTx(tenantId, async (tx) => tx.user.findFirst({
+        where: { tenant_id: tenantId, role: 'ADMIN', is_active: true, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+        select: { id: true },
+      }));
   const id = admin?.id ?? null;
   fallbackAdminCache.set(tenantId, id);
   return id;
@@ -60,7 +69,7 @@ export type DispatchResult = {
  */
 export async function dispatchPending(
   tenantId: string,
-  db: DB = prisma,
+  db?: DB,
   nowOverride?: Date,
 ): Promise<DispatchResult> {
   const now = nowOverride ?? new Date();
@@ -93,10 +102,19 @@ export async function dispatchPending(
     });
   }
 
-  // Pre-flight read happens via the singleton (no RLS GUC) but is filtered by
-  // tenant_id explicitly. The actual writes use withTenantTx so policies +
-  // triggers see the right tenant.
-  const candidates = await db.reminder.findMany({
+  // SVT-SEC-2026-08 (T0-7) — this read is now scoped like the writes.
+  //
+  // The note here used to read: "Pre-flight read happens via the singleton (no
+  // RLS GUC) but is filtered by tenant_id explicitly." Under the production
+  // `spv_app` role that read matched ZERO rows — `reminders` is RLS-scoped and
+  // the policy has no NULL-GUC branch — so the dispatcher picked up nothing and
+  // no reminder was ever sent. The writes below were correctly scoped all
+  // along; it was the read that FINDS the work which was not, and a job that
+  // finds nothing looks identical to a job with nothing to do.
+  //
+  // The tenant is already known here, so there is no cross-tenant reach to
+  // justify the admin client: withTenantTx keeps RLS enforcing on the read too.
+  const candidates = await withTenantTx(tenantId, async (tx) => tx.reminder.findMany({
     where: {
       tenant_id: tenantId,
       status: 'PENDING',
@@ -115,7 +133,7 @@ export async function dispatchPending(
       source_entity_type: true,
       metadata: true,
     },
-  });
+  }));
   result.picked = candidates.length;
 
   for (const r of candidates) {

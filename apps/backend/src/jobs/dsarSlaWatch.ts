@@ -24,7 +24,8 @@
 // skipped, no duplicate notification. Idempotent re-run is a no-op.
 
 import { DSARStatus } from '@prisma/client';
-import { prisma } from '../config/db.js';
+import { prismaAdmin } from '../config/db.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 import { logger } from '../config/logger.js';
 import { captureJobException } from '../config/sentry.js';
 import { writeAudit } from '../shared/audit.js';
@@ -48,7 +49,15 @@ export async function runDsarSlaWatch(opts: { nowOverride?: Date } = {}): Promis
 
   let candidates: Array<{ id: string; tenant_id: string; type: string; subject_id: string }> = [];
   try {
-    candidates = await prisma.dSARRequest.findMany({
+    // SVT-SEC-2026-08 (T0-7) — the discovery scan is cross-tenant by nature
+    // (which tenants have an overdue request is not known until we look), so it
+    // uses the admin client. On the GUC-less runtime singleton it returned an
+    // EMPTY LIST under the production role, so this job logged "no overdue
+    // requests" every run and no DSAR SLA breach was ever detected.
+    //
+    // The per-row WRITE below is tenant-scoped via withTenantTx — the scan finds
+    // the work, the transaction does it under that tenant's policies.
+    candidates = await prismaAdmin.dSARRequest.findMany({
       where: {
         status: { notIn: [...TERMINAL_STATUSES] },
         due_by: { lt: now },
@@ -73,14 +82,14 @@ export async function runDsarSlaWatch(opts: { nowOverride?: Date } = {}): Promis
       // Race-safe: filter on non-terminal status so a concurrent operator
       // PATCH that just moved the row to COMPLETED resolves to count=0
       // (we don't audit / notify — the operator already did the right thing).
-      const wr = await prisma.dSARRequest.updateMany({
+      const wr = await withTenantTx(row.tenant_id, async (tx) => tx.dSARRequest.updateMany({
         where: {
           id: row.id,
           tenant_id: row.tenant_id,
           status: { notIn: [...TERMINAL_STATUSES] },
         },
         data: { status: DSARStatus.EXPIRED },
-      });
+      }));
       if (wr.count !== 1) {
         logger.info(
           { dsarId: row.id, tenantId: row.tenant_id },

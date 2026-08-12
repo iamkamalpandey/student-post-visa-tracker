@@ -107,9 +107,35 @@ vi.mock('../src/config/db.js', () => {
     feeAdjustment: {
       create: vi.fn(async () => ({})),
       aggregate: vi.fn(async () => ({ _sum: { amount_minor: 0n } })),
+      // Same-day idempotency re-check, now performed under the row lock.
+      findFirst: vi.fn(async () => null),
     },
+    // SVT-SEC-2026-08 (T0-7) — every step now runs inside withTenantTx, which
+    // opens a transaction and issues `SELECT set_config('app.tenant_id', …)`
+    // before touching anything. Without the GUC the RLS policies match no rows
+    // at all under the production role, so the whole job was a silent no-op.
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
+    $executeRaw: vi.fn(async () => 1),
+    // SVT-FIN-2026-08 (T1-6) — the late-fee recompute now re-reads the
+    // installment FOR UPDATE. These tests never enable a late-fee policy, so the
+    // lock path is not exercised here; it is covered in billing-late-fee-lock.spec.ts.
+    $queryRaw: vi.fn(async () => []),
   };
-  return { prisma, disconnectDb: async () => undefined };
+  (prisma.feeInstallment as Record<string, unknown>)['update'] = vi.fn(
+    async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+      const r = store.installments.find((i) => i.id === where['id']);
+      if (r) {
+        for (const [k, v] of Object.entries(data)) {
+          if (k === 'version') continue;
+          (r as Record<string, unknown>)[k] = v;
+        }
+      }
+      return r ?? {};
+    },
+  );
+  // The tenant list + per-tenant lookup are inherently cross-tenant reads and
+  // now go through the admin client; everything else is tenant-scoped.
+  return { prisma, prismaAdmin: prisma, disconnectDb: async () => undefined };
 });
 
 const { runBillingDaily } = await import('../src/jobs/billingDaily.ts');

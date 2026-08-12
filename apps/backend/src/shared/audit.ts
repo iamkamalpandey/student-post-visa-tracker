@@ -61,10 +61,12 @@
 // take down a successful business operation.
 
 import { createHash } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../config/db.js';
 import { logger } from '../config/logger.js';
 import { encryptJson } from './encryption.js';
 import { emailHashHmac, hashIp, hashUa } from './hashing.js';
+import { withTenantTx } from './tenantTx.js';
 
 export type AuditEvent = {
   tenantId?: string | null;
@@ -372,7 +374,33 @@ async function writeAuditImpl(
 
     // Independent transaction: business code may have its own tx that rolls back; the audit
     // row must still land. We pass through the top-level prisma client deliberately.
-    await prisma.$transaction(async (tx) => {
+    //
+    // SVT-SEC-2026-08 (T0-7) — but that top-level client has no tenant GUC, and
+    // the audit_logs policy is
+    //
+    //   USING/WITH CHECK (tenant_id = app_current_tenant() OR tenant_id IS NULL)
+    //
+    // so under the de-privileged production role EVERY tenant-scoped audit write
+    // failed the WITH CHECK — and the catch below (correctly) swallowed it. The
+    // tamper-evident chain that this product sells as forensic integrity would
+    // have recorded nothing but system rows, silently, from the first day
+    // DATABASE_URL pointed at `spv_app`. Dev and CI never saw it because RLS does
+    // not apply to the single superuser role they run as.
+    //
+    // withTenantTx is still an independent transaction — it wraps its own
+    // prisma.$transaction — so the "audit survives a caller rollback" property
+    // above is preserved exactly. Rows with no tenant (system/global events) keep
+    // the plain path and land via the `tenant_id IS NULL` branch of the policy.
+    //
+    // The GUC also makes the DB trigger correct rather than merely permitted:
+    // audit_logs_hash_chain() chains per tenant (`WHERE tenant_id IS NOT
+    // DISTINCT FROM NEW.tenant_id`) and runs as the invoker, so it needs to see
+    // this tenant's rows to find the true chain head.
+    const writeRow = async (tx: Prisma.TransactionClient) => {
+      // NB: the DB trigger overwrites prev_hash/entry_hash and is the authority
+      // (see 20991231235994). This app-side computation is the fallback for
+      // databases built with `prisma db push`, which skips the raw-SQL
+      // migrations that install the trigger.
       const last = await tx.auditLog.findFirst({
         orderBy: { created_at: 'desc' },
         select: { entry_hash: true },
@@ -387,7 +415,13 @@ async function writeAuditImpl(
           entry_hash,
         },
       });
-    });
+    };
+
+    if (partial.tenant_id) {
+      await withTenantTx(partial.tenant_id, writeRow);
+    } else {
+      await prisma.$transaction(writeRow);
+    }
   } catch (err) {
     // Last-resort safety net. We must never propagate audit failures to the caller.
     logger.error(

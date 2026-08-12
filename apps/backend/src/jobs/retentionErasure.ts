@@ -12,7 +12,8 @@
 // module load so the steady-state per-doc cost is just one updateMany.
 
 import { Prisma } from '@prisma/client';
-import { prisma } from '../config/db.js';
+import { prismaAdmin } from '../config/db.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 import { logger } from '../config/logger.js';
 import { captureJobException, withTenantScope } from '../config/sentry.js';
 import { getStorage } from '../modules/documents/storage.js';
@@ -67,7 +68,12 @@ export async function runRetentionErasure(opts: { tenantId?: string; nowOverride
   const tenantWhere = opts.tenantId ? { tenant_id: opts.tenantId } : {};
   const storage = getStorage();
 
-  const candidates = await prisma.document.findMany({
+  // SVT-SEC-2026-08 (T0-7) — the discovery scan spans tenants when no tenantId
+  // is supplied, so it uses the admin client. On the GUC-less runtime singleton
+  // it returned an EMPTY LIST under the production role: document retention
+  // never executed, nothing was ever shredded, and the job reported a clean
+  // pass. The per-document write below is tenant-scoped via withTenantTx.
+  const candidates = await prismaAdmin.document.findMany({
     where: {
       ...tenantWhere,
       deleted_at: null,
@@ -99,10 +105,10 @@ export async function runRetentionErasure(opts: { tenantId?: string; nowOverride
         // deleted_at write so it's one round-trip.
         const encShred: Record<string, Buffer> = {};
         for (const col of activeEncColumns()) encShred[col] = ERASED_ENC;
-        const wr = await prisma.document.updateMany({
+        const wr = await withTenantTx(doc.tenant_id, async (tx) => tx.document.updateMany({
           where: { id: doc.id, tenant_id: doc.tenant_id },
           data: { deleted_at: now, ...encShred } as never,
-        });
+        }));
         if (wr.count === 1) {
           shredded++;
           // SVT-GDPR-2026-05 — write a tamper-evident audit row per shred so

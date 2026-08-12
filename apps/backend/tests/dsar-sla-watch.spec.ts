@@ -54,7 +54,16 @@ vi.mock('../src/config/db.js', () => {
       }),
     },
   };
-  return { prisma, disconnectDb: async () => undefined };
+  // SVT-SEC-2026-08 (T0-7) — jobs now scope their work: cross-tenant discovery
+  // reads go through prismaAdmin (BYPASSRLS) and per-tenant writes run inside
+  // withTenantTx, which opens a transaction and issues
+  // `SELECT set_config('app.tenant_id', …)` first. Without the GUC the RLS
+  // policies match zero rows under the production role and the job silently
+  // does nothing.
+  (prisma as Record<string, unknown>)['$transaction'] =
+    vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+  (prisma as Record<string, unknown>)['$executeRaw'] = vi.fn(async () => 1);
+  return { prisma, prismaAdmin: prisma, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({
