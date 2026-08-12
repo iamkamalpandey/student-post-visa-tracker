@@ -211,7 +211,7 @@ ignored.
 
 ## Tier 2 — visible in a demo
 
-### T2-1 · Students list pagination is decorative — **OPEN, HIGHEST DEMO RISK**
+### T2-1 · Students list pagination was decorative — **FIXED**
 `app/(app)/students/Client.tsx:238`, `:727`
 
 **This corrects a claim I made.** The DataTable pagination fix did *not* cover
@@ -226,6 +226,16 @@ is informational". The API is cursor-paged, so a numeric pager can never work;
 `components/DataTable.tsx:111` · Only 3 of ~31 call sites pass a real server
 `rowCount`; the rest fetch a hard cap of 100. A tenant with 140 consents sees a
 confident "1–25 of 100" and rows 101+ are unreachable and undisclosed.
+
+> Fixed with a cursor stack (the pattern `app/(app)/audit/Client.tsx` already
+> used), the cursor added to the query key so it actually refetches, next/back
+> driven by the server's `hasMore`, and `page` dropped from the URL because a
+> page number cannot be restored under keyset paging. Three contract tests pin
+> `cursor` as accepted and an offset-style `page` as rejected.
+>
+> **T2-2 and T2-3 below are the same family and remain open** — `DataTable`
+> still reports a fetch cap of 100 as the true total on ~28 call sites, and the
+> Users page has no pager at all.
 
 ### T2-3 · Users page truncates at 50 with no pager at all — **OPEN**
 `app/(app)/users/Client.tsx:144`
