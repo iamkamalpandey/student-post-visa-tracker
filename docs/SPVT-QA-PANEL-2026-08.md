@@ -20,7 +20,7 @@ Status legend: **FIXED** (landed + tested) · **OPEN** · **NEEDS SIGN-OFF**
 These share one property: nothing errors, nobody is alerted, and the damage
 cannot be undone after the fact. They outrank everything else.
 
-### T0-7 · Six cron jobs read through RLS with no tenant GUC — they will return zero rows in production and report success — **OPEN, P0 LAUNCH BLOCKER**
+### T0-7 · Jobs and the audit writer read through RLS with no tenant GUC — zero rows in production, reported as success — **FIXED**
 
 **Found while fixing T1-6. This is the largest defect in the register and it is
 invisible in every environment we have run so far.**
@@ -79,10 +79,34 @@ The `billingDaily` comment claiming *"every query below explicitly filters
 true when written — the escape hatch still existed. It has been false since
 `…235983`.
 
-Fix: enumerate tenants via `prismaAdmin` (inherently cross-tenant, and the
-reclose migration explicitly blesses this for jobs), then run each tenant's
-reads *and* writes inside `withTenantTx` — the pattern `commsDispatcher`,
-`commsDigest` and `v2Ingest` already use. Tracked as T0-7a…f, one per job.
+**It reaches past the jobs.** `shared/audit.ts` writes **every** tenant-scoped
+audit row — from request paths too — on the top-level client, deliberately, so
+an audit row survives a caller's rollback. That client has no GUC, so the insert
+fails the `WITH CHECK`, and `writeAudit` swallows its own errors by design. The
+tamper-evident chain this product sells as forensic integrity would have
+recorded nothing but system rows.
+
+**Fixed.** Cross-tenant discovery reads (which tenants exist, which have overdue
+work) go through `prismaAdmin` and are greppable as deliberate; everything
+per-tenant runs inside `withTenantTx` — the pattern `commsDispatcher`,
+`commsDigest` and `v2Ingest` already used, and the one the reclose migration
+prescribes. `audit.ts` routes tenant rows through `withTenantTx`, which is still
+an independent transaction so the survives-a-rollback property is preserved
+exactly; system rows keep the plain path and land via the `tenant_id IS NULL`
+branch. That also makes the DB trigger *correct* rather than merely permitted:
+`audit_logs_hash_chain()` chains per tenant and runs as the invoker, so it needs
+to see that tenant's rows to find the true chain head.
+
+`tests/rls-guc-source-guard.spec.ts` is the regression net — it fails CI when a
+job touches a tenant-scoped table through the bare singleton, naming the file
+and the delegate, and needs no database so it runs everywhere. Its allowlist
+names the exact delegates each infrastructure job may use, so growing a new one
+has to be argued for rather than waved through.
+
+**Why nothing caught this, which is the part worth keeping:**
+`rls-enforcement.integration.spec.ts` proves tenant A cannot read tenant B.
+Nothing proved the app can still read its **own** rows once RLS is real. Both
+halves matter and only one was tested.
 
 ### T0-1 · KEK rotation destroyed all encrypted PII — **FIXED**
 `src/config/kms.ts:94` (was)
@@ -265,14 +289,27 @@ reached only when the waiver actually clears the balance.
 
 `tests/billing-payment-actions.spec.ts` · 4 new tests across T1-5 and T1-5b.
 
-### T1-6 · Late-fee recompute is an unlocked read-modify-write — **OPEN**
-`src/jobs/billingDaily.ts:328`–`:353`
+### T1-6 · Late-fee recompute is an unlocked read-modify-write — **FIXED**
+`src/jobs/billingDaily.ts`
 
 Four statements, no transaction, no version predicate — unlike `applyAdjustment`
 which holds `FOR UPDATE` throughout. A payment landing mid-sequence yields a
 **PAID installment carrying a balance**, excluded from every collection path and
 never rescanned. Crashing mid-sequence orphans the adjustment permanently,
 because the same-day idempotency guard then skips the recompute forever.
+
+Fixed alongside T0-7, which required the transaction anyway. The recompute now
+re-reads the installment `FOR UPDATE` and computes the new balance from the
+**locked** `paid_minor`, so it cannot be written from a stale snapshot.
+
+Two further races the same lock closes, both consequences of a scan capped at
+5,000 rows: the row's status is re-checked (it may have been paid, waived or
+cancelled since the scan — charging a late fee on money already received is its
+own customer-facing error), and the same-day idempotency guard is re-checked
+under the lock rather than only from the scan's snapshot, since the advisory job
+lock is session-scoped and Prisma does not pin connections (T0-6).
+
+`tests/billing-late-fee-lock.spec.ts` · 6 tests.
 
 ### T1-7 · `commissions.summary` dropped legacy PAID rows — **FIXED**
 `src/modules/commissions/service.ts:707`
