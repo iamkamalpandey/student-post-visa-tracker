@@ -8,10 +8,14 @@
 // SVT-PERF-REMINDER-SCANNER-BATCH-2026-05 — Previously the scanner ran one
 // `prisma.$transaction` per candidate reminder (~3000+ round-trips per
 // nightly run at 50 students). Now we collect all candidates per entity
-// type, then issue ONE `createMany` call per type wrapped in a single
-// transaction that sets `app.tenant_id` once. Net: ~8 DB calls per tenant
-// per pass (one per entity-type group + the initial findMany reads),
-// regardless of candidate count.
+// type, then issue a `createMany` per chunk wrapped in a transaction that
+// sets `app.tenant_id` once.
+//
+// SVT-REL-2026-08 — that batching originally sent each entity type in ONE
+// unchunked statement, which runs into Postgres' 32,767 bind-parameter cap at
+// ~2,520 rows (13 columns each) and failed silently. Inserts are now chunked;
+// see INSERT_CHUNK. Cost is still a handful of DB calls per tenant per pass for
+// any realistic candidate count, just bounded rather than unbounded.
 //
 // Background workers don't have a request scope, so RLS is satisfied by
 // setting `app.tenant_id` ourselves at the start of every transaction.
@@ -123,35 +127,72 @@ type ReminderCreateRow = {
   created_by_id: string;
 };
 
-// One transaction per entity-type group. We must `set_config` ourselves
-// because the scanner runs outside the request scope. The unique constraint
-// on (tenant_id, source_entity_type, source_entity_id, scheduled_for) plus
-// skipDuplicates makes the bulk insert idempotent on re-runs.
+/**
+ * SVT-REL-2026-08 — chunk size for the bulk insert.
+ *
+ * Postgres caps a single statement at 32,767 bind parameters. `createMany` is
+ * ONE multi-row INSERT regardless of row count, and ReminderCreateRow has 13
+ * columns, so the hard ceiling is ~2,520 rows per call. The previous code sent
+ * every candidate in one unchunked statement, and the payment scanner alone
+ * emits 3 rows per source row (PAYMENT_OFFSETS_DAYS = [14,7,3]) — which put the
+ * existing dataset at roughly 95% of the limit. This was going to break at
+ * about 1.1x current data, not at some distant scale.
+ *
+ * Worse, it would break SILENTLY: the catch below logged and returned 0, and a
+ * count of 0 is indistinguishable from "every row was a duplicate", because
+ * ON CONFLICT skips are not counted either. Reminders would simply stop and the
+ * job would keep reporting success.
+ *
+ * 500 leaves room for the row shape to grow — even at 40 columns that is 20,000
+ * parameters, still comfortably inside the ceiling.
+ */
+const INSERT_CHUNK = 500;
+
+type InsertTally = { inserted: number; failed: number };
+
+// One transaction per chunk. We must `set_config` ourselves because the scanner
+// runs outside the request scope. The unique constraint on
+// (tenant_id, source_entity_type, source_entity_id, scheduled_for) plus
+// skipDuplicates makes the insert idempotent on re-runs — which is also what
+// makes chunking safe: a chunk that fails leaves the earlier ones committed,
+// and the next scan re-offers the remainder while skipping what landed.
 async function bulkInsertReminders(
   tenantId: string,
   rows: ReminderCreateRow[],
-): Promise<number> {
-  if (rows.length === 0) return 0;
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(
-        Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`,
-      );
-      // `skipDuplicates: true` translates to ON CONFLICT DO NOTHING against
-      // the reminder_source_dedup unique. createMany itself is a single
-      // multi-row INSERT regardless of `rows.length`.
-      return tx.reminder.createMany({
-        data: rows as never,
-        skipDuplicates: true,
+  tally: InsertTally,
+): Promise<void> {
+  if (rows.length === 0) return;
+  for (let offset = 0; offset < rows.length; offset += INSERT_CHUNK) {
+    const chunk = rows.slice(offset, offset + INSERT_CHUNK);
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw(
+          Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`,
+        );
+        // `skipDuplicates: true` translates to ON CONFLICT DO NOTHING against
+        // the reminder_source_dedup unique.
+        return tx.reminder.createMany({
+          data: chunk as never,
+          skipDuplicates: true,
+        });
       });
-    });
-    return result.count;
-  } catch (err) {
-    logger.error(
-      { err, tenantId, count: rows.length, sourceType: rows[0]?.source_entity_type ?? '?' },
-      'reminder bulk insert failed',
-    );
-    return 0;
+      tally.inserted += result.count;
+    } catch (err) {
+      // Count the loss. Returning 0 here used to make a total write failure
+      // look exactly like a run where everything was already present.
+      tally.failed += chunk.length;
+      logger.error(
+        {
+          err,
+          tenantId,
+          chunkSize: chunk.length,
+          offset,
+          totalRows: rows.length,
+          sourceType: chunk[0]?.source_entity_type ?? '?',
+        },
+        'reminder bulk insert failed',
+      );
+    }
   }
 }
 
@@ -164,11 +205,21 @@ export type ScanResult = {
   attempted: number;
   inserted: number; // createMany.count summed across entity-type groups (excludes ON CONFLICT skips)
   skipped: number; // past-dated rows we deliberately ignored
+  /**
+   * SVT-REL-2026-08 — rows a write actually LOST.
+   *
+   * Without this the scan could not report a failure at all: a dead insert
+   * returned 0, and `inserted: 0` is exactly what a healthy re-run produces
+   * when every row is already present (ON CONFLICT skips are not counted). So
+   * "reminders stopped working" and "nothing new to do" were the same number.
+   * Non-zero here means reminders were dropped and the run needs attention.
+   */
+  failed: number;
 };
 
 export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<ScanResult> {
   const now = new Date();
-  const result: ScanResult = { tenantId, attempted: 0, inserted: 0, skipped: 0 };
+  const result: ScanResult = { tenantId, attempted: 0, inserted: 0, skipped: 0, failed: 0 };
 
   const assignee = await defaultAssigneeFor(tenantId, db);
   // Without an admin, we cannot tag a creator either — fall back to the assignee
@@ -241,7 +292,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -295,7 +346,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -332,7 +383,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -375,7 +426,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -412,7 +463,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -461,7 +512,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -510,7 +561,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -573,7 +624,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -649,7 +700,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   // -------------------------------------------------------------------------
@@ -702,7 +753,7 @@ export async function scanForTenant(tenantId: string, db: DB = prisma): Promise<
         });
       }
     }
-    result.inserted += await bulkInsertReminders(tenantId, rows);
+    await bulkInsertReminders(tenantId, rows, result);
   }
 
   logger.info(result, 'reminder scan complete');

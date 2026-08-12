@@ -283,11 +283,28 @@ inert (`visibility: hydrated ? 'visible' : 'visible'`).
 
 Assumption: 20k students, 50k leads, 200k finance rows.
 
-### T3-1 · Reminder insert exceeds Postgres' bind-parameter ceiling — **OPEN**
+### T3-1 · Reminder insert exceeded Postgres' bind-parameter ceiling — **FIXED**
 `src/jobs/reminderScanner.ts:143` · Unchunked `createMany`, 13 columns → ~2,520
-row ceiling. **Currently at ~95% of the limit on the existing dataset** — this
-breaks at roughly 1.1x current data, not 100x. The catch logs and returns 0, so
-the job reports success while inserting nothing and reminders silently stop.
+row ceiling. **Was at ~95% of the limit on the existing dataset** — breaking at
+roughly 1.1x current data, not 100x. The catch logged and returned 0, so the job
+reported success while inserting nothing and reminders silently stopped.
+
+Fixed on both halves:
+- Inserts are chunked at 500 rows (6,500 params — headroom for the row shape to
+  grow to 40 columns and still clear the ceiling). Chunking is safe *because*
+  the insert is idempotent: the `(tenant_id, source_entity_type,
+  source_entity_id, scheduled_for)` unique plus `skipDuplicates` means a failed
+  chunk leaves earlier ones committed and the next scan re-offers the remainder.
+  That was checked before changing anything — chunking a non-idempotent insert
+  would have traded a silent stall for silent duplicates.
+- `ScanResult` gained `failed`. Previously a dead write returned 0, and
+  `inserted: 0` is exactly what a healthy re-run produces when every row is
+  already present, since ON CONFLICT skips are not counted either — so
+  "reminders have stopped" and "nothing new to do" were the same number.
+
+7 tests, including the ceiling assertion with a 4x margin so the batch cannot
+creep back toward the limit, and failure-mid-run cases proving the scan
+continues and reports the loss.
 
 ### T3-2 · Ten unbounded whole-tenant scans in the same job — **OPEN**
 `reminderScanner.ts:200`–`:663` · No `take`, no date window; past-dated rows
