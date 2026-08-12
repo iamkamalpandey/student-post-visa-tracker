@@ -1,9 +1,10 @@
 // SVT-WAVE-BILLING-SEC-P1-F8 — operator sweeper for stuck idempotency rows.
 //
-// When `withIdempotency` finds a PENDING row older than 30 minutes it now
-// throws 409 `idempotency_in_flight` rather than silently re-running the
-// operation (the original behaviour replayed half-applied side effects).
-// Operators reconcile stuck rows via this endpoint:
+// When `withIdempotency` finds a PENDING row it throws 409 rather than
+// silently re-running the operation (the original behaviour replayed
+// half-applied side effects). That is true at any age; rows past
+// PENDING_STALE_MS (5 min) get a detail string telling the operator to
+// investigate. Operators reconcile stuck rows via this endpoint:
 //
 //   POST /api/v1/admin/idempotency/:key/fail
 //   { "scope": "billing.payment.create", "reason": "<why this was stuck>" }
@@ -22,6 +23,16 @@
 // option — those would re-introduce the replay risk this endpoint exists to
 // prevent. Operators who genuinely want a fresh execution should pick a new
 // Idempotency-Key on the client side.
+//
+// PRECONDITION — SVT-FIN-2026-08 (T1-9). Sweeping to FAILED asserts that the
+// operation did NOT complete, and every downstream consumer of that assertion
+// acts on it: the client is replayed an error and a human re-enters the work.
+// A PENDING row does not by itself establish that. Since T1-9 a row also stays
+// PENDING when the operation SUCCEEDED but its outcome could not be written
+// (`withIdempotency` logs that at error level with tenant/scope/key). On a
+// money-mover, sweeping that row is how one payment becomes two — by hand,
+// through the tool built to prevent it. Confirm against the ledger and the
+// audit log FIRST; the `reason` field is where that evidence is recorded.
 
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';

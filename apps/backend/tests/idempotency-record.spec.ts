@@ -367,6 +367,90 @@ describe('withIdempotency()', () => {
     expect(stored.status_code).toBe(500);
   });
 
+  // ---- SVT-FIN-2026-08 (T1-9) — the row records the outcome of the OPERATION,
+  // never the outcome of recording it. -------------------------------------
+  //
+  // The failure this prevents, end to end: a payment commits; the UPDATE that
+  // stamps SUCCESS hits a transient DB error; the row is marked FAILED; the
+  // client retries the key and is replayed the failure; the operator concludes
+  // the payment did not go through and re-enters it under a fresh key. Two
+  // payments taken, by the mechanism whose mandatory Idempotency-Key exists to
+  // prevent exactly that.
+
+  it('T1-9: a failure to PERSIST success must never be recorded as FAILED', async () => {
+    const db = makeDb();
+    const dao = (db as unknown as { idempotencyRecord: { update: ReturnType<typeof vi.fn> } })
+      .idempotencyRecord;
+    // The operation commits, then the outcome write dies.
+    dao.update.mockRejectedValueOnce(new Error('connection reset by peer'));
+
+    const work = vi.fn(async () => ({ status: 201, body: { payment_id: 'pay_1' } }));
+    const out = await withIdempotency(
+      { db, tenantId: TENANT, scope: 'billing.payment.create', key: KEY, requestHash: HASH },
+      work,
+    );
+
+    // The caller is told the truth: it succeeded. Telling them otherwise is
+    // what produces the duplicate payment.
+    expect(out.status).toBe(201);
+    expect(out.body).toEqual({ payment_id: 'pay_1' });
+    expect(out.replayed).toBe(false);
+
+    // And the row is PENDING — "unknown", not "failed".
+    const stored = [...rows.values()][0]!;
+    expect(stored.status).toBe('PENDING');
+    expect(stored.status_code).toBeNull();
+  });
+
+  it('T1-9: the resulting PENDING row makes a retry 409 rather than replay a false failure', async () => {
+    const db = makeDb();
+    const dao = (db as unknown as { idempotencyRecord: { update: ReturnType<typeof vi.fn> } })
+      .idempotencyRecord;
+    dao.update.mockRejectedValueOnce(new Error('connection reset by peer'));
+
+    await withIdempotency(
+      { db, tenantId: TENANT, scope: 'billing.payment.create', key: KEY, requestHash: HASH },
+      async () => ({ status: 201, body: { payment_id: 'pay_1' } }),
+    );
+
+    // Same key again. Under the old behaviour this replayed a cached error and
+    // sent the operator off to re-enter the payment. It must now block.
+    const second = vi.fn(async () => ({ status: 201, body: { payment_id: 'pay_2' } }));
+    await expect(
+      withIdempotency(
+        { db, tenantId: TENANT, scope: 'billing.payment.create', key: KEY, requestHash: HASH },
+        second,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    // Critically: the work did NOT run a second time.
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('T1-9: a failure to persist FAILED still surfaces the ORIGINAL error', async () => {
+    const db = makeDb();
+    const dao = (db as unknown as { idempotencyRecord: { update: ReturnType<typeof vi.fn> } })
+      .idempotencyRecord;
+    dao.update.mockRejectedValueOnce(new Error('connection reset by peer'));
+
+    // Previously the persist error replaced the real one, so the caller saw a
+    // DB message instead of the reason the operation failed.
+    const real = Object.assign(new Error('insufficient funds'), {
+      status: 422,
+      title: 'Unprocessable Entity',
+      detail: 'insufficient funds',
+    });
+    await expect(
+      withIdempotency(
+        { db, tenantId: TENANT, scope: 'billing.payment.create', key: KEY, requestHash: HASH },
+        async () => {
+          throw real;
+        },
+      ),
+    ).rejects.toBe(real);
+
+    expect([...rows.values()][0]!.status).toBe('PENDING');
+  });
+
   // RLS proof — needs a real Postgres with policies, can't be mocked meaningfully here.
   it.todo('respects tenant_id scoping under Postgres RLS (covered by deep-test bash)');
 });

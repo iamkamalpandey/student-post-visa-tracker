@@ -8,6 +8,14 @@
 //   - First request: INSERT a row with status=PENDING + request_hash. Run the
 //     operation. On success/failure, UPDATE the row to SUCCESS/FAILED with the
 //     cached response and a 24h expires_at.
+//
+//     INVARIANT (SVT-FIN-2026-08 / T1-9): the row records the outcome of the
+//     OPERATION, never the outcome of recording it. A failure to write SUCCESS
+//     must never be stamped FAILED — that turns a completed payment into a
+//     cached "it failed", and the operator's natural next step (re-enter under
+//     a fresh key) takes the money twice. When the outcome cannot be written
+//     the row stays PENDING, which is the honest state: unknown, never
+//     auto-rerun, retries 409 until an operator reconciles it.
 //   - Retry with same key:
 //       * row.request_hash !== current  -> 409 Conflict (key reused with a
 //         different payload).
@@ -27,6 +35,7 @@
 // needed so this file compiles either way.
 
 import { Conflict } from './errors.js';
+import { logger } from '../config/logger.js';
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 // SVT-WAVE-BILLING-SEC-P1-F8 (C8) — stale-PENDING handling.
@@ -42,9 +51,16 @@ const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 //   - status === PENDING for ANY duration → 409 Conflict, always.
 //   - If the original worker died before persisting SUCCESS/FAILED, an
 //     operator must investigate via the audit log + downstream ledger
-//     state, then either:
-//         (a) delete the orphan idempotency row (so a retry can run fresh),
-//         (b) hand-write the SUCCESS/FAILED row to match the provider state.
+//     state, and only then resolve the row via
+//     POST /api/v1/admin/idempotency/:key/fail (see admin/idempotency.routes.ts).
+//
+//     That endpoint is ONLY correct once the operator has confirmed the
+//     operation did NOT complete. Since SVT-FIN-2026-08 a PENDING row can also
+//     mean "the operation succeeded but its outcome could not be written"
+//     (see the invariant below) — sweeping THAT row to FAILED re-creates by
+//     hand the exact lie this module now refuses to tell automatically, and
+//     the operator's next step is a duplicate payment. Check the ledger first;
+//     the failure is logged at error level with the tenant, scope and key.
 //   - The PENDING_STALE_MS constant is retained at 5 minutes purely so the
 //     409 response body can include a "row has been PENDING for N minutes,
 //     investigate manually" hint when the row is clearly stuck — this is a
@@ -220,20 +236,28 @@ export async function withIdempotency<T>(
     );
   }
 
-  // Step 3: we now own the row. Run the operation and persist the outcome.
+  // Step 3: we now own the row. Run the operation, THEN persist the outcome.
+  //
+  // SVT-FIN-2026-08 (T1-9) — these two are separate try blocks on purpose, and
+  // the separation is the whole point.
+  //
+  // Previously the SUCCESS write sat inside the same `try` as `run()`, so an
+  // error thrown while *recording* a completed operation fell into the same
+  // catch as an error thrown *by* the operation — and the row was stamped
+  // FAILED. On a money-mover that is the worst possible lie: the payment
+  // committed, the cache says it failed, the client retries the key and is
+  // replayed the failure, and the operator re-enters the payment under a fresh
+  // key. A second payment, taken by the very mechanism whose mandatory
+  // Idempotency-Key exists to prevent it.
+  //
+  // The two states are epistemically different and must be handled differently:
+  //   run() threw            → the operation reported failure. Record FAILED.
+  //   run() returned, persist threw → the operation DEFINITELY succeeded. The
+  //                            only honest outcomes are "success" to the caller
+  //                            and "unknown" in the cache. Never FAILED.
+  let result: { status: number; body: T };
   try {
-    const result = await run();
-    await dao.update({
-      where: { id: row!.id },
-      data: {
-        status: 'SUCCESS',
-        status_code: result.status,
-        response: result.body as unknown as Record<string, unknown>,
-        completed_at: new Date(),
-        expires_at: new Date(Date.now() + TWENTY_FOUR_HOURS_MS),
-      },
-    });
-    return { status: result.status, body: result.body, replayed: false };
+    result = await run();
   } catch (err) {
     // Preserve a structured error payload so a retry replays the same shape.
     const status =
@@ -246,18 +270,69 @@ export async function withIdempotency<T>(
       status,
       detail: (err as { detail?: string }).detail ?? (err as Error).message ?? 'Apply failed',
     };
+    try {
+      await dao.update({
+        where: { id: row!.id },
+        data: {
+          status: 'FAILED',
+          status_code: status,
+          response: errorBody,
+          completed_at: new Date(),
+          expires_at: new Date(Date.now() + TWENTY_FOUR_HOURS_MS),
+        },
+      });
+    } catch (persistErr) {
+      // The FAILED write itself failed. Leaving the row PENDING is the correct
+      // fallback (a retry gets the 409 "investigate" branch rather than a
+      // fabricated outcome), but the caller must still receive the ORIGINAL
+      // error — previously this throw replaced it, so the client saw a
+      // confusing DB error instead of the reason the operation failed.
+      logger.error(
+        { err: persistErr, tenant_id: opts.tenantId, scope: opts.scope, key: opts.key },
+        'idempotency: could not persist FAILED outcome; row left PENDING',
+      );
+    }
+    throw err;
+  }
+
+  // The operation SUCCEEDED. Nothing below may turn that into a failure.
+  try {
     await dao.update({
       where: { id: row!.id },
       data: {
-        status: 'FAILED',
-        status_code: status,
-        response: errorBody,
+        status: 'SUCCESS',
+        status_code: result.status,
+        response: result.body as unknown as Record<string, unknown>,
         completed_at: new Date(),
         expires_at: new Date(Date.now() + TWENTY_FOUR_HOURS_MS),
       },
     });
-    throw err;
+  } catch (persistErr) {
+    // We could not record that the operation succeeded. The row stays PENDING,
+    // which is exactly right: PENDING means "outcome unknown, never auto-rerun"
+    // and a retry of this key gets a 409 telling an operator to investigate,
+    // rather than a fabricated FAILED that invites a duplicate.
+    //
+    // We deliberately still return success. The operation genuinely happened,
+    // and reporting otherwise is the defect this block exists to prevent.
+    //
+    // No retry of the write: it uses the same handle that just carried the
+    // operation, so an immediate re-attempt is unlikely to fare better and
+    // would add a second failure mode to a money path. The loud log is the
+    // recovery channel — it carries the tenant/scope/key needed to find the row.
+    logger.error(
+      {
+        err: persistErr,
+        tenant_id: opts.tenantId,
+        scope: opts.scope,
+        key: opts.key,
+        idempotency_record_id: row!.id,
+        result_status: result.status,
+      },
+      'idempotency: operation SUCCEEDED but the SUCCESS outcome could not be persisted — row left PENDING. Retries of this key will 409 until an operator reconciles it. Do NOT re-run the operation: it already completed.',
+    );
   }
+  return { status: result.status, body: result.body, replayed: false };
 }
 
 /** Convenience: stable scope name for the bulk imports apply endpoint. */

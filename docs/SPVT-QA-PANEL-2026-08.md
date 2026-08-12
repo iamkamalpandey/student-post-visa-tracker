@@ -183,13 +183,45 @@ naturally against a bank statement, but it silently changes what "month" means
 in an existing report and shifts claims across period boundaries. That is a
 product decision, not a bug fix — **left for sign-off**.
 
-### T1-9 · Idempotency caches FAILED for 24h, including for writes that committed — **OPEN**
-`src/shared/idempotency.ts:187`, `:226`
+### T1-9 · Idempotency recorded FAILED for writes that committed — **FIXED**
+`src/shared/idempotency.ts`
 
-The SUCCESS write sits *inside* the try, so a transient error after a committed
-payment records FAILED. The client retries and is replayed the failure; the
-operator re-enters the payment with a fresh key — **a second payment**. The
-mandatory Idempotency-Key on that route exists to prevent exactly this.
+The SUCCESS write sat *inside* the same `try` as the operation, so a transient
+error while **recording** a committed payment landed in the same catch as an
+error thrown **by** the payment — and the row was stamped FAILED. The client
+retries and is replayed the failure; the operator re-enters the payment with a
+fresh key — **a second payment**, taken by the mechanism whose mandatory
+Idempotency-Key exists to prevent exactly this.
+
+Fixed by splitting the two into separate try blocks, because they are
+epistemically different states: `run()` throwing means the operation reported
+failure (record FAILED, unchanged); `run()` returning and the persist throwing
+means the operation **definitely succeeded**, so the only honest outcomes are
+success to the caller and *unknown* in the cache. The row is left PENDING —
+which already means "never auto-rerun, 409 until an operator reconciles" — and
+the caller still receives its success, since telling it otherwise is the defect.
+
+Two adjacent defects closed in the same path:
+- A failure to persist FAILED used to replace the original error, so the caller
+  saw a DB message instead of why the operation failed. The original now
+  always propagates.
+- `admin/idempotency.routes.ts` lets an operator sweep PENDING → FAILED. That
+  now has a stated precondition: since a PENDING row can mean "succeeded but
+  unwritten", sweeping the wrong one re-creates the same lie by hand and turns
+  one payment into two. Its stale "older than 30 minutes" claim (the constant is
+  5 minutes) and `idempotency.ts`'s advice to "delete the orphan row" (the admin
+  API deliberately exposes no delete) were both corrected.
+
+`tests/idempotency-record.spec.ts` · 3 new tests. The two pre-existing tests
+asserting FAILED-on-throw still pass unchanged — that policy was deliberate and
+was not touched here.
+
+**Not changed, deliberately:** a genuine 5xx from `run()` is still cached and
+replayed for 24h. If the operation was non-atomic and partially applied, that
+replay is as misleading as the bug fixed above. Narrowing the FAILED cache to
+deterministic 4xx would address it, but it reverses a documented May-2026 audit
+decision and needs its own sign-off rather than riding along here. Logged as
+T1-13.
 
 ### T1-10 · Regenerating with explicit `lines[]` compounds the scholarship — **OPEN**
 `src/modules/billing/plan.service.ts:534` · Partly a consequence of today's
@@ -206,6 +238,25 @@ silently does nothing.
 Stored via API and CSV import, read by nothing; commission is always derived
 from the institution rate. A negotiated per-enrollment commission is silently
 ignored.
+
+### T1-13 · A cached 5xx is replayed as a settled failure — **OPEN, needs sign-off**
+`src/shared/idempotency.ts` · Raised while fixing T1-9. `withIdempotency` caches
+and replays a FAILED outcome for 24h regardless of the error class. For a
+deterministic 4xx that is correct and useful. For a 5xx it asserts a certainty
+the server does not have: if `run()` was not atomic and partially applied before
+throwing, the replay tells the client "this failed" about work that partly
+happened, and the operator's re-entry under a fresh key duplicates it — the same
+shape as T1-9, reached by a different route.
+
+Every current money-mover wraps `run()` in a transaction, so a throw means a
+rollback and the replay is honest today. The exposure is that `withIdempotency`
+is generic and cannot verify that property of its callers.
+
+Options: (a) cache FAILED only for 4xx and leave 5xx PENDING — safest, but
+reverses the documented May-2026 audit decision and makes transient 5xx errors
+need operator action; (b) let callers declare atomicity and branch on it;
+(c) accept and document. **Product/ops call, not a unilateral fix** — the cost
+lands on operators, not on the code.
 
 ---
 
