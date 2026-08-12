@@ -16,6 +16,7 @@ import CategoryOutlinedIcon from '@mui/icons-material/CategoryOutlined';
 import OutboxOutlinedIcon from '@mui/icons-material/OutboxOutlined';
 import ApartmentOutlinedIcon from '@mui/icons-material/ApartmentOutlined';
 import QuizOutlinedIcon from '@mui/icons-material/QuizOutlined';
+import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import { useAuth } from '@/lib/auth';
 import { api } from '@/lib/api';
 import { useEffect, type ReactNode } from 'react';
@@ -43,7 +44,15 @@ const ADMIN_LINKS: AdminLink[] = [
   // administers, with a help dialog pointing at the onboarding script for new
   // tenants (no auth-less creation surface).
   { href: '/admin/tenants', label: 'Tenants', description: 'Your tenant + settings; onboarding command for new tenants', icon: <ApartmentOutlinedIcon /> },
-  { href: '/interview-questions', label: 'Interview prep', description: 'Question bank for visa interview mock tests + attempt tracking', icon: <QuizOutlinedIcon /> },
+  { href: '/interview-questions', label: 'Interview prep', description: 'Question bank for visa interview mock tests', icon: <QuizOutlinedIcon /> },
+  // SVT-UX-2026-08 — /interview-attempts had NO inbound link anywhere in the
+  // app (verified by grep across app/, components/, features/ and lib/). The
+  // entry above claimed "+ attempt tracking" while linking only to the question
+  // bank, so candidates completed mock interviews via the public prep page,
+  // attempts were created, and the screen where staff review the results was
+  // reachable only by typing the URL. A whole feature produced output nobody
+  // could see.
+  { href: '/interview-attempts', label: 'Interview attempts', description: 'Candidate mock-interview submissions and scores', icon: <FactCheckOutlinedIcon /> },
 ];
 
 // SVT-WAVE11-OUTBOX-HEALTH-2026-05 — compact health card surfaced above the

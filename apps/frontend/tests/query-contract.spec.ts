@@ -127,4 +127,37 @@ describe('students — the filters the list screen and the CSV export both send'
     );
     expect(parsed.success).toBe(true);
   });
+
+  // SVT-UX-2026-08 — the list screen now pages with a keyset cursor. Before
+  // this it sent only `{limit}` and rendered the server's response unsliced,
+  // so "next page" relabelled the footer and showed the SAME rows — student 26
+  // was unreachable on the flagship table. If `cursor` were ever dropped from
+  // StudentListQuery (which is .strict()) paging would 422 on every click, so
+  // it is pinned here alongside the filters.
+  it('accepts a cursor, so keyset paging is not a 422', () => {
+    const parsed = StudentListQuery.safeParse(
+      asWireParams({ limit: 25, cursor: '33333333-3333-7333-8333-333333333333' }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts a cursor combined with the filters, which is the real paging call', () => {
+    const parsed = StudentListQuery.safeParse(
+      asWireParams({
+        search: 'Gurung',
+        stage_id: '33333333-3333-7333-8333-333333333333',
+        status: 'ACTIVE',
+        sla_breached: true,
+        limit: 50,
+        cursor: '44444444-4444-7444-8444-444444444444',
+      }),
+    );
+    expect(parsed.success).toBe(true);
+  });
+
+  it('still rejects an offset-style `page` param — the API has no offset', () => {
+    // Guards against someone "restoring" the numeric pager. StudentListQuery is
+    // .strict(), so this must fail rather than be silently ignored.
+    expect(StudentListQuery.safeParse(asWireParams({ limit: 25, page: 3 })).success).toBe(false);
+  });
 });

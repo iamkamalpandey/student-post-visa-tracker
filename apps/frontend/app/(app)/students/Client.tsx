@@ -147,10 +147,22 @@ export default function StudentsPage() {
     const n = Number(searchParams?.get('limit'));
     return PAGE_SIZE_OPTIONS.includes(n) ? n : 25;
   });
-  const [pageIndex, setPageIndex] = useState<number>(() => {
-    const n = Number(searchParams?.get('page'));
-    return Number.isFinite(n) && n >= 0 ? n : 0;
-  });
+  // SVT-UX-2026-08 — REAL pagination. This used to be a bare `pageIndex` that
+  // nothing acted on: the query sent only `{limit}`, the query key omitted the
+  // page, and `rows.map()` rendered the server's response unsliced. Clicking
+  // "next" relabelled the footer to "26–50 of 340" and re-rendered the SAME 25
+  // rows, so student 26 was unreachable on the product's flagship table. The
+  // file's own comment conceded "the page count is informational".
+  //
+  // The API is keyset-paginated (`{limit, cursor}` — StudentListQuery is
+  // .strict(), so a numeric offset can never work), which means forward/back
+  // only. We keep a stack of the cursors used to reach each page: the top is
+  // the current page's cursor, pushing appends the next one, popping goes back.
+  // Same shape as app/(app)/audit/Client.tsx, which has always done this right.
+  const [cursorStack, setCursorStack] = useState<Array<string | null>>([null]);
+  const currentCursor = cursorStack[cursorStack.length - 1] ?? null;
+  const pageIndex = cursorStack.length - 1;
+  const resetCursor = () => setCursorStack([null]);
   const [createOpen, setCreateOpen] = useState(false);
   const [density] = useDensity();
   const tableSize: 'small' | 'medium' = density === 'compact' ? 'small' : 'medium';
@@ -210,16 +222,20 @@ export default function StudentsPage() {
     if (status) params.set('status', status);
     if (slaBreached) params.set('sla_breached', 'true');
     if (pageSize !== 25) params.set('limit', String(pageSize));
-    if (pageIndex !== 0) params.set('page', String(pageIndex));
+    // `page` is deliberately NOT synced to the URL any more. Paging is keyset,
+    // so a page NUMBER carries no information the app can act on — reloading
+    // ?page=3 could only ever land on page 1 while claiming to be on page 3,
+    // which is the same lie the old decorative pager told. Filters stay in the
+    // URL because those genuinely restore.
     const qs = params.toString();
     router.replace(qs ? `/students?${qs}` : '/students');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, stageId, status, slaBreached, pageSize, pageIndex]);
+  }, [debouncedSearch, stageId, status, slaBreached, pageSize]);
 
   // Filter changes reset page + clear selection. Page-only navigation does
   // not clear selection so a user can multi-select across pages.
   useEffect(() => {
-    setPageIndex(0);
+    resetCursor();
     clearSelection();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, stageId, status, slaBreached, pageSize]);
@@ -236,13 +252,19 @@ export default function StudentsPage() {
 
   // Students list — server-driven query string
   const listQuery = useQuery<StudentsResponse, ApiError>({
-    queryKey: ['students', { search: debouncedSearch, stageId, status, slaBreached, pageSize }],
+    // `currentCursor` MUST be in the key — it was omitted, which is why paging
+    // never refetched and the same rows came back for every page.
+    queryKey: [
+      'students',
+      { search: debouncedSearch, stageId, status, slaBreached, pageSize, cursor: currentCursor },
+    ],
     queryFn: async () => {
       const params: Record<string, string | number> = { limit: pageSize };
       if (debouncedSearch) params['search'] = debouncedSearch;
       if (stageId) params['stage_id'] = stageId;
       if (status) params['status'] = status;
       if (slaBreached) params['sla_breached'] = 'true';
+      if (currentCursor) params['cursor'] = currentCursor;
       const res = await api.get<StudentsResponse>('/students', { params });
       return res.data;
     },
@@ -259,6 +281,10 @@ export default function StudentsPage() {
 
   const rows = listQuery.data?.data ?? [];
   const total = listQuery.data?.page.total ?? rows.length;
+  // Keyset paging state straight from the server. `hasMore` is authoritative —
+  // a cursor page cannot infer whether more rows exist from count alone.
+  const nextCursor = listQuery.data?.page.nextCursor ?? null;
+  const hasMore = listQuery.data?.page.hasMore ?? false;
 
   const stagesById = useMemo(() => {
     const map = new Map<string, StageOption>();
@@ -724,17 +750,31 @@ export default function StudentsPage() {
               </TableBody>
             </Table>
           </TableContainer>
+          {/*
+            SVT-UX-2026-08 — driven by the cursor stack, so the buttons now do
+            what they say. `count` is the real server-side total (used for the
+            "x–y of N" label); `nextIconButtonProps.disabled` comes from the
+            server's `hasMore` rather than being inferred from count, because a
+            keyset page cannot know its own position. Jumping to an arbitrary
+            page is not offered — the API has no offset — so only next/back are
+            reachable, which is honest rather than decorative.
+          */}
           <TablePagination
             component="div"
             count={total}
             page={pageIndex}
             rowsPerPage={pageSize}
             rowsPerPageOptions={PAGE_SIZE_OPTIONS}
-            onPageChange={(_, p) => setPageIndex(p)}
+            onPageChange={(_, p) => {
+              if (p > pageIndex) {
+                if (nextCursor) setCursorStack((s) => [...s, nextCursor]);
+              } else if (cursorStack.length > 1) {
+                setCursorStack((s) => s.slice(0, -1));
+              }
+            }}
             onRowsPerPageChange={(e) => setPageSize(parseInt(e.target.value, 10))}
-            // Note: cursor pagination only supports forward navigation server-side.
-            // For now we render the current page-size window and rely on filters
-            // for navigation; the page count is informational.
+            nextIconButtonProps={{ disabled: !hasMore || listQuery.isFetching }}
+            backIconButtonProps={{ disabled: pageIndex === 0 || listQuery.isFetching }}
           />
         </Paper>
       )}
