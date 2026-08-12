@@ -235,6 +235,43 @@ subject-access and erasure, MFA, session-wide token revocation, breach-password
 checks that fail closed. Certification attests to controls; we can demonstrate
 the controls.
 
+### 3.8 Commission claimed-vs-received cannot be recorded through the UI
+`CommissionClaim.received_minor` exists, the API accepts it, and `summary()` was
+explicitly fixed to report cash received rather than claimed. But
+`features/commissions/MarkPaidDialog.tsx` sends only `paid_on` and
+`payment_reference`, so the service defaults `received_minor` to the full
+claimed amount — the variance is structurally always zero — and no table column
+displays it. A university remitting £18,400 against a £20,000 claim books as
+paid in full.
+**Answer:** the ledger is built and the last mile is one field and one column.
+Do not claim reconciliation until it ships. **This is the cheapest high-value
+fix in the whole register.**
+
+### 3.9 A commission clawback cannot be recorded at all
+`PAID` and `WAIVED` are terminal in the commission FSM with no outbound
+transitions. The three guards that refuse a change on a PAID claim point at a
+"credit-note workflow", a dispute (which itself refuses PAID), and "an
+adjustment" — none of which exist; there is no `CommissionAdjustment` or credit
+-note model in the schema. A student who withdraws after the university has paid,
+where the money is then deducted from a later remittance, cannot be recorded.
+The register permanently overstates revenue.
+**Answer:** own it. The withdrawal hook already flags *unpaid* claims DISPUTED,
+so the gap is specifically post-payment reversal. Do not raise the topic first.
+
+### 3.10 Converted lead fees leave every finance rollup
+`FinanceItem` — where every CRM lead fee lands on conversion — is aggregated
+nowhere. The dashboard, `/reports/outstanding-by-age` and the exports all read
+`fee_installments`. So the agency's own service fee is tracked before conversion
+and goes dark the moment the counsellor converts. A competitor finds this by
+creating a lead, adding a fee, converting, and watching the total drop to zero.
+
+### 3.11 Country-specific stage templates are dead seed data
+`prisma/data/country-stage-templates.json` holds complete per-country ladders
+(US OPT, UK Graduate Route, AU 485, CA PGWP) and `seed.ts` never loads it. Every
+tenant starts on the generic ladder. The differentiator is real at the generic
+level — `graduated` and `post_study_work` do exist — but the country detail we
+have already written is not wired up.
+
 ### 3.7 Coverage is measured but not gated, and there are no end-to-end tests in CI
 1,361 backend tests and 86 frontend tests pass, and every migration runs in CI.
 Coverage thresholds exist but do not yet block a merge, and the Playwright specs
@@ -248,16 +285,24 @@ A pitch that only defends loses. These are where a post-visa product is usually
 weakest, and where our design is deliberate.
 
 1. **"Where does your student lifecycle end?"** Every readable competitor stops
-   at visa granted or enrolled. Ours continues through arrival, compliance
-   checks, graduation and the post-study work route.
-2. **"How do you reconcile commission you claimed against commission you were
-   actually paid?"** Most cannot, at all.
-3. **"What happens to a commission when a student withdraws after you have been
-   paid?"** Clawback is a first-class event here, not a manual edit.
-4. **"Show me your tenant isolation at the database layer."** Not the ORM — the
-   database.
-5. **"When did you last restore from backup, and what was the measured RTO?"**
-   Ask this only if §3.2 has been addressed, or it comes straight back.
+   at visa granted or enrolled. Ours continues through arrival, engagement
+   checks, graduation and the post-study work route. Safe to ask — the stage
+   ladder in `default-stages.json` genuinely runs to `post_study_work`.
+2. **"Show me your tenant isolation at the database layer."** Not the ORM — the
+   database. Safe to ask, and our strongest ground.
+3. **"When did you last restore from backup, and what was the measured RTO?"**
+   Ask only once §3.2 is addressed, or it comes straight back.
+
+> **Two questions were removed from this list on 2026-08-12 because the claims
+> behind them were false.** Both are recorded in §3.8 and §3.9. Do not ask a
+> competitor a question we cannot answer ourselves — it is the fastest way to
+> lose a room, and the seller raises it voluntarily.
+>
+> - ~~"How do you reconcile commission claimed against commission actually
+>   paid?"~~ The backend field exists; the UI never sends it, so our own
+>   variance is structurally always zero.
+> - ~~"What happens to a commission when a student withdraws after you have been
+>   paid?"~~ Not a manual edit here — **impossible**. `PAID` is terminal.
 
 ---
 

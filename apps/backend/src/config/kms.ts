@@ -85,16 +85,57 @@ export class LocalKms implements Kms {
     if (kek.length !== KEK_LEN) {
       throw new Error(`LocalKms: KEK must be ${KEK_LEN} bytes, got ${kek.length}`);
     }
+    // SVT-CRYPTO-2026-08 — fail closed when the active id collides with a
+    // retired one.
+    //
+    // KMS_KEK_ID has a DEFAULT ('local-kek-v1'), so it need never be set. The
+    // documented rotation is "mint a new key, set KMS_KEK_BASE64 + a NEW
+    // KMS_KEK_ID, move the old pair into KMS_KEK_PREVIOUS". An operator who
+    // does everything except change KMS_KEK_ID stamps brand-new key material
+    // with the id every existing envelope already carries. decryptDek then
+    // matches on that id, hands back the NEW key for OLD ciphertext, and the
+    // retired key is never tried — every encrypted column becomes permanently
+    // unreadable, silently, during the operation designed to be safe.
+    //
+    // That mistake is detectable: the active id also appearing in the retired
+    // registry is never legitimate. Refuse to boot rather than serve a process
+    // that will destroy data on its next write.
+    if (previous?.has(kekId)) {
+      throw new Error(
+        `LocalKms: KMS_KEK_ID "${kekId}" also appears in KMS_KEK_PREVIOUS. That means the active ` +
+          `key material is being stamped with an id already used by retired material, so existing ` +
+          `ciphertext would resolve to the wrong key and become undecryptable. Give the new key a ` +
+          `NEW KMS_KEK_ID (the rotation step most easily missed, because KMS_KEK_ID has a default).`,
+      );
+    }
     this.kek = kek;
     this.kekId = kekId;
     this.previous = previous ?? new Map();
   }
 
-  /** Resolve the key for an envelope's recorded id. */
-  private keyFor(kekId?: string): Buffer {
-    // v1 envelopes carry no id — they predate rotation support, so by
-    // definition they were written with the only key that ever existed.
-    if (kekId === undefined || kekId === this.kekId) return this.kek;
+  /**
+   * Candidate keys for an envelope's recorded id, in the order to try them.
+   *
+   * SVT-CRYPTO-2026-08 — this returned a SINGLE key and short-circuited v1 on
+   * the reasoning that a v1 envelope "was written with the only key that ever
+   * existed". That holds only until the first rotation. The documented
+   * procedure (see shared/encryption.ts) makes the NEW key active at deploy and
+   * moves the old one into KMS_KEK_PREVIOUS — at which point every v1 blob was
+   * written by a key that is now retired, `keyFor(undefined)` handed back the
+   * active key, GCM failed, and `previous` was never consulted. rewrap-secrets
+   * could not rescue those rows either, because it decrypts through this exact
+   * path. That is unrecoverable loss of pre-rotation PII, caused by the routine
+   * operation v2 envelopes exist to make safe.
+   *
+   * A v1 envelope records no id, so the only honest answer is "we do not know
+   * which key wrote this" — try the active key first (overwhelmingly the common
+   * case) and then every retired key before declaring the data unreadable.
+   * AES-GCM authenticates, so a wrong key fails the tag rather than returning
+   * plausible garbage; trying candidates is safe, not a guess.
+   */
+  private candidateKeys(kekId?: string): Buffer[] {
+    if (kekId === undefined) return [this.kek, ...this.previous.values()];
+    if (kekId === this.kekId) return [this.kek];
     const old = this.previous.get(kekId);
     if (!old) {
       throw new Error(
@@ -103,7 +144,7 @@ export class LocalKms implements Kms {
           `KMS_KEK_PREVIOUS as "${kekId}:<base64>" — this data CANNOT be decrypted without it.`,
       );
     }
-    return old;
+    return [old];
   }
 
   async generateDek(): Promise<{ dek: Buffer; encryptedDek: Buffer }> {
@@ -120,13 +161,28 @@ export class LocalKms implements Kms {
     if (encryptedDek.length < IV_LEN + TAG_LEN) {
       throw new Error('LocalKms.decryptDek: wrapped DEK too short');
     }
-    const key = this.keyFor(kekId);
     const iv = encryptedDek.subarray(0, IV_LEN);
     const tag = encryptedDek.subarray(encryptedDek.length - TAG_LEN);
     const ct = encryptedDek.subarray(IV_LEN, encryptedDek.length - TAG_LEN);
-    const decipher = createDecipheriv(ALG, key, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ct), decipher.final()]);
+    const candidates = this.candidateKeys(kekId);
+    let lastErr: unknown;
+    for (const key of candidates) {
+      try {
+        const decipher = createDecipheriv(ALG, key, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([decipher.update(ct), decipher.final()]);
+      } catch (err) {
+        // GCM tag mismatch — wrong key. Keep the error and try the next
+        // candidate; only a v1 envelope ever has more than one.
+        lastErr = err;
+      }
+    }
+    throw new Error(
+      `LocalKms.decryptDek: could not unwrap the DEK with the active key or any of the ` +
+        `${this.previous.size} key(s) in KMS_KEK_PREVIOUS. The key that wrapped this ciphertext ` +
+        `is not loaded — restore it to KMS_KEK_PREVIOUS as "<id>:<base64>". ` +
+        `Underlying error: ${(lastErr as Error | undefined)?.message ?? 'unknown'}`,
+    );
   }
 
   rotateKekId(): string {
