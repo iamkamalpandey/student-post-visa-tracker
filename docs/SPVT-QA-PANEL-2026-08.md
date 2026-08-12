@@ -437,12 +437,30 @@ caller at all and returns every student in the tenant, with names, DOB, both
 emails, both phones, religion, ethnicity and notes. `redactSensitive` strips only
 `*_enc` keys. The comment at `:55` claims this hole was closed.
 
-### T6-3 · `POST /users` mints an ADMIN with no MFA step-up — **OPEN**
+### T6-3 · `POST /users` minted an ADMIN with no MFA step-up — **FIXED**
 `src/modules/users/users.routes.ts:31` · Every other privileged route on the
-router requires a fresh `X-MFA-Code`; create does not, and `role` is
-client-supplied. A stolen ADMIN token cannot patch a user — but can create a new
-ADMIN with a chosen password and no MFA. That is persistence, and strictly more
-valuable than the operations that *are* gated.
+router requires a fresh `X-MFA-Code`; create did not, and `role` is
+client-supplied. A stolen ADMIN token could not patch a user — but could create a
+new ADMIN with a chosen password and no MFA. That is persistence, and strictly
+more valuable than the operations that *were* gated.
+
+Gated, after confirming no bootstrap deadlock: the first admin comes from
+`prisma/seed.ts`, not this route, and `/auth/mfa/setup` + `/auth/mfa/verify`
+require only `authenticate`, so an unenrolled admin can always self-enrol.
+
+**This also exposed a testing weakness worth keeping in mind elsewhere.**
+`tests/users-admin-mfa-routes.spec.ts` cannot mount the real router — it
+self-applies `authenticate`, which would need a real JWT — so it re-declares the
+routes in a local express app and asserts a COPY of the wiring. Delete
+`requireMfa` from the production router and every one of those tests still
+passes; that is how this hole survived. Added
+`tests/users-routes-mfa-wiring.spec.ts`, which reads the router SOURCE and
+asserts every mutating route carries the gate (and that reads deliberately do
+not, so it cannot pass by gating everything). Verified it genuinely fails when
+the gate is removed rather than being decorative.
+
+Any other spec in this repo that "mirrors production wiring" has the same blind
+spot and is worth auditing the same way.
 
 ### T6-4 · Plaintext passwords reach logs on malformed JSON — **OPEN**
 `src/middlewares/errorHandler.ts:59` · body-parser attaches the raw request body

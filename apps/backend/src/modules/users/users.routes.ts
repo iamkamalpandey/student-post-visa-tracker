@@ -24,11 +24,34 @@ usersRouter.use(authenticate, tenantContext);
 //       legacy admin must enrol before reaching these routes), AND
 //   (b) every request carries a fresh X-MFA-Code header (60s replay
 //       window, defeats session-hijack pivots from a stolen access token).
-// Read endpoints (GET /users) and the role-gated create flow keep the legacy
-// shape — they don't mutate existing accounts. PATCH+DELETE+reset-password+
-// revoke-sessions are the privileged-pivot surface and ALL get the gate.
+// Read endpoints (GET /users) keep the legacy shape.
+//
+// SVT-SEC-2026-08 — CREATE now carries the gate too. The original exemption
+// reasoned that create "doesn't mutate existing accounts", which is true and
+// beside the point: `role` is a client-supplied field on CreateUserRequest and
+// RoleEnum includes ADMIN, so an attacker holding a stolen admin access token
+// could not PATCH a user, reset a password, revoke sessions or disable anyone's
+// MFA — every one of those demands a fresh X-MFA-Code — but could POST a brand
+// new ADMIN with a password of their choosing and no MFA enrolled, then simply
+// log in as it. That is persistence, and it is worth strictly more to an
+// attacker than any of the mutations the gate was protecting.
+//
+// This is the same correction already applied to /:id/mfa/disable below, which
+// was likewise exempt on plausible-sounding reasoning until someone traced what
+// a stolen token could actually reach.
+//
+// No bootstrap deadlock: the first admin is created by prisma/seed.ts, not this
+// route, and /auth/mfa/setup + /auth/mfa/verify require only `authenticate`, so
+// an unenrolled admin can always self-enrol first. A legacy admin who has not
+// enrolled now has to, which is already true for every other mutation here.
 usersRouter.get('/', requireRole('ADMIN'), usersController.list);
-usersRouter.post('/', requireRole('ADMIN'), validate(CreateUserRequest), usersController.create);
+usersRouter.post(
+  '/',
+  requireRole('ADMIN'),
+  requireMfa({ enrollmentRequired: true }),
+  validate(CreateUserRequest),
+  usersController.create,
+);
 usersRouter.get('/:id', uuidParam('id'), requireRole('ADMIN'), usersController.getById);
 usersRouter.patch(
   '/:id',

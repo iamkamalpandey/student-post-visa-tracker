@@ -88,7 +88,7 @@ const { requireRole } = await import('../src/middlewares/auth.js');
 const { uuidParam } = await import('../src/middlewares/uuidParam.js');
 const { validate } = await import('../src/middlewares/validate.js');
 const { errorHandler } = await import('../src/middlewares/errorHandler.js');
-const { UpdateUserRequest, ResetPasswordRequest } = await import('@spv/zod-schemas');
+const { UpdateUserRequest, ResetPasswordRequest, CreateUserRequest } = await import('@spv/zod-schemas');
 
 const ADMIN_NOMFA = randomUUID();
 const ADMIN_MFA = randomUUID();
@@ -136,6 +136,14 @@ function makeApp(actor: { sub: string; role: 'ADMIN' | 'COUNSELLOR' | 'VIEWER' }
     requireRole('ADMIN'),
     requireMfa({ enrollmentRequired: true }),
     usersController.revokeAllSessions,
+  );
+  // SVT-SEC-2026-08 — create, now gated like every other mutation here.
+  app.post(
+    '/users',
+    requireRole('ADMIN'),
+    requireMfa({ enrollmentRequired: true }),
+    validate(CreateUserRequest),
+    usersController.create,
   );
   app.use(errorHandler);
   return app;
@@ -230,5 +238,39 @@ describe('admin user mutation routes — MFA enrolment gate (P1-5)', () => {
     const res = await request(app).post(`/users/${TARGET}/sessions/revoke`);
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('mfa_enrollment_required');
+  });
+
+  // SVT-SEC-2026-08 — CREATE was exempt from this gate on the reasoning that it
+  // "doesn't mutate existing accounts". True, and beside the point: `role` is
+  // client-supplied and RoleEnum includes ADMIN, so a stolen admin token that
+  // could not patch, delete, reset or revoke anything could still mint a fresh
+  // ADMIN with a chosen password and no MFA, then log in as it. Persistence is
+  // worth more than any single mutation the gate was guarding.
+  //
+  // These two cases exist so the exemption cannot be reinstated quietly.
+  it('POST /users — admin WITHOUT MFA cannot mint a new ADMIN → 403 mfa_enrollment_required', async () => {
+    const app = makeApp({ sub: ADMIN_NOMFA, role: 'ADMIN' });
+    const res = await request(app).post('/users').send({
+      email: 'attacker@example.com',
+      password: 'BrandNewLongPwd!2026',
+      given_name: 'A',
+      family_name: 'B',
+      role: 'ADMIN',
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('mfa_enrollment_required');
+  });
+
+  it('POST /users — enrolled admin still needs a fresh X-MFA-Code → 401 mfa_required', async () => {
+    const app = makeApp({ sub: ADMIN_MFA, role: 'ADMIN' });
+    const res = await request(app).post('/users').send({
+      email: 'newjoiner@example.com',
+      password: 'BrandNewLongPwd!2026',
+      given_name: 'C',
+      family_name: 'D',
+      role: 'COUNSELLOR',
+    });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('mfa_required');
   });
 });
