@@ -339,12 +339,30 @@ scoping, so a COUNSELLOR gets a tenant-wide financial total.
 
 ## Tier 4 — configuration with outsized blast radius
 
-### T4-1 · Health check points at an endpoint that checks nothing — **OPEN**
+### T4-1 · Health check probed an endpoint that checks nothing — **FIXED**
+Moved to `/readyz`, after confirming `/readyz` 503s only on the DB probe so an
+absent Redis cannot turn it into a deploy blocker. Also stopped `/readyz`
+echoing the driver error, which leaked DB host/port/role on a route that is
+unauthenticated and is now the public platform probe.
+
+### T4-1-ORIGINAL · (superseded)
 `.do/app.yaml` → `/livez`, which returns `{status:'ok'}` unconditionally.
 `/readyz` probes the DB and nothing uses it. A deploy with a bad `DATABASE_URL`
 is promoted as healthy while every request 500s.
 
-### T4-2 · `REDIS_URL` is a dummy, so every Redis-backed control is degraded — **OPEN**
+### T4-2 · `REDIS_URL` dummy degraded every Redis-backed control — **FIXED**
+Made genuinely optional and the dummy removed. The placeholder was not inert:
+`server.ts` gates its multi-replica MFA-replay warning on
+`!process.env.REDIS_URL`, so a fake value permanently silenced the one warning
+that says scaling past one instance breaks TOTP anti-replay and splits every
+rate limiter into per-process buckets. It also pinned `redis_up` at 0 forever.
+
+**Bonus finding:** `backend-ci.yml` never set `REDIS_URL`, and the env schema
+required it. CI has no `.env` (local runs get it via `tests/setup.ts`), so
+backend env validation would have `process.exit(1)` there — a latent CI blocker
+that this change also removes. Worth confirming on the next CI run.
+
+### T4-2-ORIGINAL · (superseded)
 `.do/app.yaml` sets `redis://localhost:6379` to satisfy the schema. The client
 really dials it, fails, and caches `null` permanently. Consequences: rate limits
 fall back to per-process memory (the 5/min auth brute-force cap becomes 5×N),
