@@ -9,6 +9,26 @@ fail at the PRE_DEPLOY job.
 
 ---
 
+## Live as of 2026-08-13
+
+The app is deployed and serving: `GET /api/v1/health/readyz` → 200
+`{"status":"ready","db":"ok"}`, 58 migrations applied, and the runtime role
+verified RLS-enforced by the readiness gate.
+
+**But it has never served a real user session.** Production holds 1 tenant and
+1 user, and `audit_logs` contains 3,567 rows of which **zero** are tenant-scoped
+— only cron rows and 18 `auth.login.failed`. There has never been a successful
+login.
+
+That matters for how much the green ticks below are worth. The T0-7 and T0-8
+fixes are proven against a real de-privileged Postgres **locally**, not by
+production traffic, because there is no production traffic to prove them with.
+The first real login is still a genuine test: a tenant-scoped
+`auth.login.success` row appearing in `audit_logs` is the confirmation that
+tenant-scoped audit writes work end to end in this environment.
+
+Two live-spec items remain open and are called out under Step 2 and Step 4.
+
 ## Status at a glance
 
 | Gate | State |

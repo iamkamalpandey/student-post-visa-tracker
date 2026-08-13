@@ -171,6 +171,24 @@ Static analysis predicted it; production data confirms it.
 **Found by standing a real de-privileged Postgres up and running the actual code
 against it** — something this repo had never done.
 
+> **Scope correction, checked against production on 2026-08-13.** `pgcrypto` was
+> **already installed** in the live database (`pg_extension` shows 1.3, and
+> `audit.chain.verify` — which calls `digest()` — has succeeded daily since at
+> least Aug 9, before this migration existed). So this was **latent here, not an
+> active outage**: something installed the extension at some point, and the
+> audit chain has been working in this particular database.
+>
+> The defect is still real and still worth fixing: on a **virgin** database the
+> extension is absent, which is exactly what a fresh environment is — a restore
+> into a new instance, a second region, a self-hosted customer, disaster
+> recovery. I proved it on a virgin PostgreSQL 18.3, where the whole migration
+> chain applied cleanly and the first audit insert then failed. The migration
+> turns "works because this database happens to have pgcrypto" into a guarantee.
+>
+> I originally wrote this up as though the production audit trail was dead. It
+> was not. The correct claim is narrower and I should have checked before making
+> the broader one.
+
 `audit_logs_hash_chain()` and `audit_logs_verify()` hash every row with
 `encode(digest(payload,'sha256'),'hex')`. `digest()` is not built in; it comes
 from **pgcrypto**. Six call sites across three migrations, and not one of them
