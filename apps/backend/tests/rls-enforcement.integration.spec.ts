@@ -77,6 +77,24 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
   const studentA = randomUUID();
   const studentB = randomUUID();
 
+  /**
+   * Read as the admin connection, scoped to a tenant.
+   *
+   * SVT-SEC-2026-08 — FORCE ROW LEVEL SECURITY binds the table owner too, so
+   * even these verification reads need the GUC. Without it the admin sees zero
+   * rows and an assertion like `check.rows[0].given_name` throws — which looks
+   * like an isolation failure when it is really the fixture being unable to
+   * look.
+   */
+  async function adminRead(tid: string, sql: string, params: unknown[]) {
+    await admin.query(`SET app.tenant_id = '${tid}'`);
+    try {
+      return await admin.query(sql, params);
+    } finally {
+      await admin.query(`RESET app.tenant_id`).catch(() => undefined);
+    }
+  }
+
   beforeAll(async () => {
     admin = new Client({ connectionString: ADMIN_URL });
     await admin.connect();
@@ -91,32 +109,72 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
       );
     }
 
-    // De-privileged role. DROP first so a crashed prior run cannot poison this one.
-    await admin.query(`
-      DO $$
-      BEGIN
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${TEST_ROLE}') THEN
-          EXECUTE 'REASSIGN OWNED BY ${TEST_ROLE} TO CURRENT_USER';
-          EXECUTE 'DROP OWNED BY ${TEST_ROLE}';
-          EXECUTE 'DROP ROLE ${TEST_ROLE}';
-        END IF;
-      END $$;
-    `);
-    await admin.query(
-      `CREATE ROLE ${TEST_ROLE} LOGIN PASSWORD '${TEST_ROLE_PASSWORD}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
-    );
+    // De-privileged role, created-or-reused.
+    //
+    // SVT-SEC-2026-08 — this used to REASSIGN OWNED / DROP OWNED / DROP ROLE
+    // first. That needs role-management rights the connecting account often
+    // does not have: the launch runbook prescribes DATABASE_MIGRATE_URL = the
+    // *owner* role (`spv`), not a superuser, and an owner cannot DROP OWNED BY
+    // another role. So this suite failed — loudly, but for an environment
+    // reason — in exactly the configuration the project tells you to run. It
+    // also raced the sibling rls-tenant-guc spec when both ran against one
+    // database, one tearing a role down while the other held connections.
+    //
+    // The role carries no state worth resetting; the assertions below own their
+    // fixtures. Create it if absent, otherwise reuse it — but only after
+    // confirming what exists is genuinely de-privileged, because asserting
+    // isolation through a superuser would pass no matter how broken RLS was.
+    const created = await admin
+      .query(
+        `CREATE ROLE ${TEST_ROLE} LOGIN PASSWORD '${TEST_ROLE_PASSWORD}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!created) {
+      const r = await admin.query(
+        `SELECT rolsuper, rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname = $1`,
+        [TEST_ROLE],
+      );
+      const row = r.rows[0] as
+        | { rolsuper: boolean; rolbypassrls: boolean; rolcanlogin: boolean }
+        | undefined;
+      if (!row || row.rolsuper || row.rolbypassrls || !row.rolcanlogin) {
+        throw new Error(
+          `Cannot provision a de-privileged ${TEST_ROLE}: this suite must not assert tenant ` +
+            'isolation through a privileged role, because Postgres ignores RLS for superusers ' +
+            'and BYPASSRLS roles and every assertion would pass vacuously.',
+        );
+      }
+      await admin.query(`ALTER ROLE ${TEST_ROLE} LOGIN PASSWORD '${TEST_ROLE_PASSWORD}'`);
+    }
     await admin.query(`GRANT USAGE ON SCHEMA public TO ${TEST_ROLE}`);
     await admin.query(
       `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${TEST_ROLE}`,
     );
     await admin.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${TEST_ROLE}`);
 
-    // Seed two tenants with one student each, as the owner (bypasses RLS).
-    await admin.query(
-      `INSERT INTO tenants (id, name, created_at, updated_at) VALUES ($1,$2,now(),now()), ($3,$4,now(),now())`,
-      [tenantA, 'RLS Test Tenant A', tenantB, 'RLS Test Tenant B'],
-    );
+    // Seed two tenants with one student each.
+    //
+    // SVT-SEC-2026-08 — this used to say "as the owner (bypasses RLS)". That is
+    // false: the migrations apply FORCE ROW LEVEL SECURITY, which makes the
+    // policies bind the table OWNER too — plain RLS exempts the owner, FORCE
+    // does not. The seed only ever worked because the connection happened to be
+    // a SUPERUSER, which genuinely does bypass. Run it as the owner role the
+    // launch runbook prescribes for DATABASE_MIGRATE_URL (`spv`) and every
+    // INSERT below is rejected by the very policies under test.
+    //
+    // So the fixture sets the GUC per tenant, exactly like application code has
+    // to. (DDL is unaffected, which is why `prisma migrate deploy` runs fine as
+    // the owner while its DML would not.)
+    for (const [tid, name] of [[tenantA, 'RLS Test Tenant A'], [tenantB, 'RLS Test Tenant B']] as const) {
+      await admin.query(`SET app.tenant_id = '${tid}'`);
+      await admin.query(
+        `INSERT INTO tenants (id, name, created_at, updated_at) VALUES ($1,$2,now(),now())`,
+        [tid, name],
+      );
+    }
     for (const [tid, sid] of [[tenantA, stageA], [tenantB, stageB]] as const) {
+      await admin.query(`SET app.tenant_id = '${tid}'`);
       await admin.query(
         `INSERT INTO lifecycle_stages (id, tenant_id, key, label, sequence, category, is_initial, is_terminal, created_at, updated_at)
          VALUES ($1,$2,'rls_test','RLS Test',1,'IN_PROGRESS',true,false,now(),now())`,
@@ -144,14 +202,24 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
     // decrypts anything. (This omission went unnoticed because the whole file
     // skips unless the migrations have been applied, and they could not be —
     // see the …235995 fix in this same change.)
-    await admin.query(
-      `INSERT INTO students (id, tenant_id, student_code, given_name, family_name, date_of_birth,
-                             nationality_code, current_stage_id, stage_entered_at,
-                             name_in_passport_enc, created_at, updated_at)
-       VALUES ($1,$2,'RLS-A-1','Alice','Anderson','2000-01-01','NP',$3,now(),decode('00','hex'),now(),now()),
-              ($4,$5,'RLS-B-1','Bob','Brown','2000-01-01','NP',$6,now(),decode('00','hex'),now(),now())`,
-      [studentA, tenantA, stageA, studentB, tenantB, stageB],
-    );
+    // One INSERT per tenant, because the GUC can only name one tenant at a time
+    // and the WITH CHECK is evaluated per row.
+    for (const [sid, tid, stg, code, given, family] of [
+      [studentA, tenantA, stageA, 'RLS-A-1', 'Alice', 'Anderson'],
+      [studentB, tenantB, stageB, 'RLS-B-1', 'Bob', 'Brown'],
+    ] as const) {
+      await admin.query(`SET app.tenant_id = '${tid}'`);
+      await admin.query(
+        `INSERT INTO students (id, tenant_id, student_code, given_name, family_name, date_of_birth,
+                               nationality_code, current_stage_id, stage_entered_at,
+                               name_in_passport_enc, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,'2000-01-01','NP',$6,now(),decode('00','hex'),now(),now())`,
+        [sid, tid, code, given, family, stg],
+      );
+    }
+    // Leave no tenant pinned, so the assertions below cannot accidentally
+    // inherit a GUC the application would not have set.
+    await admin.query(`RESET app.tenant_id`);
 
     app = new Client({ connectionString: roleUrl() });
     await app.connect();
@@ -162,9 +230,16 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
     if (app) { try { await app.end(); } catch { /* ignore */ } }
     if (admin) {
       try {
-        await admin.query(`DELETE FROM students WHERE tenant_id = ANY($1)`, [[tenantA, tenantB]]);
-        await admin.query(`DELETE FROM lifecycle_stages WHERE tenant_id = ANY($1)`, [[tenantA, tenantB]]);
-        await admin.query(`DELETE FROM tenants WHERE id = ANY($1)`, [[tenantA, tenantB]]);
+        // FORCE RLS binds the owner on DELETE too — same reason as the seed.
+        for (const tid of [tenantA, tenantB]) {
+          await admin.query(`SET app.tenant_id = '${tid}'`);
+          await admin.query(`DELETE FROM students WHERE tenant_id = $1`, [tid]);
+          await admin.query(`DELETE FROM lifecycle_stages WHERE tenant_id = $1`, [tid]);
+          await admin.query(`DELETE FROM tenants WHERE id = $1`, [tid]);
+        }
+        await admin.query(`RESET app.tenant_id`);
+        // Best-effort: dropping a role needs rights an owner-level admin does
+        // not have. The role is inert and is reused on the next run.
         await admin.query(`
           DO $$
           BEGIN
@@ -251,7 +326,7 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
     // The row is invisible, so the UPDATE matches nothing — no error, zero rows.
     expect(r.rowCount).toBe(0);
 
-    const check = await admin.query(`SELECT given_name FROM students WHERE id = $1`, [studentB]);
+    const check = await adminRead(tenantB, `SELECT given_name FROM students WHERE id = $1`, [studentB]);
     expect(check.rows[0].given_name).toBe('Bob');
   });
 
@@ -262,7 +337,7 @@ describe.skipIf(!dbReachable)('RLS tenant isolation (real Postgres)', () => {
     await app.query('COMMIT');
 
     expect(r.rowCount).toBe(0);
-    const check = await admin.query(`SELECT 1 FROM students WHERE id = $1`, [studentB]);
+    const check = await adminRead(tenantB, `SELECT 1 FROM students WHERE id = $1`, [studentB]);
     expect(check.rowCount).toBe(1);
   });
 

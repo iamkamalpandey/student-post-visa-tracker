@@ -1,0 +1,54 @@
+-- ============================================================================
+-- SVT-SEC-2026-08 (T0-8) — install pgcrypto, which the audit chain has always
+-- required and no migration ever created.
+--
+-- WHAT WAS WRONG
+-- --------------
+-- The tamper-evident audit chain hashes each row with
+--
+--     NEW.entry_hash := encode(digest(payload, 'sha256'), 'hex');
+--
+-- in audit_logs_hash_chain(), and audit_logs_verify() recomputes the same way.
+-- `digest()` is not a built-in: it is provided by the **pgcrypto** extension.
+-- Across 20991231235959_init_rls_and_triggers,
+-- 20991231235984b_audit_chain_utc_timestamp and
+-- 20991231235994_audit_chain_forensic_fields there are six call sites, and not
+-- one migration ever ran `CREATE EXTENSION pgcrypto`. The only extension the
+-- chain creates is pg_trgm (20991231235960_perf_indexes), for search.
+--
+-- WHY IT WAS INVISIBLE
+-- --------------------
+-- PL/pgSQL function bodies are not resolved when the function is CREATEd, only
+-- when it EXECUTEs. So the whole migration chain applies cleanly to a virgin
+-- database and reports success. The failure appears at the first INSERT into
+-- audit_logs, when the trigger fires and Postgres answers
+--
+--     42883: function digest(text, unknown) does not exist
+--
+-- and `writeAudit` catches its own errors by design — deliberately, so an audit
+-- failure can never take down the business operation that triggered it. The two
+-- behaviours compose badly: the audit write fails, the error is logged and
+-- swallowed, and the tamper-evident chain this product sells as forensic
+-- integrity records NOTHING. Every unit test mocks Prisma, so nothing caught it.
+--
+-- It only surfaced when the T0-7 work stood a real de-privileged Postgres up and
+-- exercised writeAudit against it end to end.
+--
+-- WHY `CREATE EXTENSION` RATHER THAN DROPPING THE DEPENDENCY
+-- ----------------------------------------------------------
+-- Postgres 11+ does have a built-in sha256(bytea), so the chain could avoid
+-- pgcrypto entirely. That was rejected here: it changes how every entry_hash is
+-- computed, and getting the text→bytea encoding subtly wrong would silently
+-- invalidate existing chains rather than fail loudly. Installing the extension
+-- the code already expects changes no hash and is idempotent. pgcrypto is on
+-- DigitalOcean Managed Postgres' supported list and the PRE_DEPLOY migrate job
+-- runs as the database owner, so it is permitted there.
+--
+-- If the role ever cannot create it, THIS migration fails loudly at deploy time
+-- and the deployment aborts — which is the correct failure mode, and strictly
+-- better than a silent, permanent loss of the audit trail.
+--
+-- Idempotent: IF NOT EXISTS. Safe to re-run.
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
