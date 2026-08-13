@@ -64,6 +64,14 @@ vi.mock('../src/config/db.js', () => {
     },
     refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
   };
+  // SVT-SEC-2026-08 (T0-7) — users.service resolves its client via scoped(),
+  // which falls back to withTenantTx when the caller passes no req.db. That
+  // opens a transaction and sets the tenant GUC; without it the RLS policy on
+  // `users` matches zero rows under the production role.
+  (prisma as Record<string, unknown>)['$transaction'] =
+    vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+  (prisma as Record<string, unknown>)['$executeRaw'] = vi.fn(async () => 1);
+
   return { prisma, disconnectDb: async () => undefined };
 });
 

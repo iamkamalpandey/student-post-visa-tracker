@@ -36,8 +36,20 @@ const CONTACT = '66666666-6666-7666-8666-666666666666';
 // assertion (student.findFirst).
 const studentContact = { findFirst: vi.fn() };
 const student = { findFirst: vi.fn() };
+// SVT-SEC-2026-08 (T0-7) — the ownership gates take their client from the
+// request when tenantContext supplied one, and otherwise open their own
+// tenant-scoped transaction. These tests mount the middleware without
+// tenantContext, so they exercise the withTenantTx fallback: it needs
+// $transaction + $executeRaw on the mocked client.
+const dbMock = {
+  studentContact,
+  student,
+  $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(dbMock)),
+  $executeRaw: vi.fn(async () => 1),
+};
 vi.mock('../src/config/db.js', () => ({
-  prisma: { studentContact, student },
+  prisma: dbMock,
+  prismaAdmin: dbMock,
   disconnectDb: async () => undefined,
 }));
 

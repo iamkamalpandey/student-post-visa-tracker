@@ -25,7 +25,20 @@
 //      - Audit row.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { prisma } from '../../config/db.js';
+import * as dbModule from '../../config/db.js';
+
+// SVT-SEC-2026-08 (T0-7) — auth-domain client, matching auth.service.ts.
+//
+// `users` and `refresh_tokens` are RLS-scoped, and every function here runs as
+// an authentication primitive keyed by the session's own user id, before any
+// tenant GUC exists to scope to. On the plain singleton each lookup returned
+// null under the production `spv_app` role, so MFA enrolment, verification,
+// disable and recovery-code consumption all failed with "Invalid session" for
+// every user — while dev and CI (single superuser role) showed them working.
+//
+// The `?? prisma` fallback mirrors auth.service.ts: specs that mock only
+// `prisma` keep working without declaring a second delegate tree.
+const adminDb = (dbModule as { prismaAdmin?: typeof dbModule.prisma }).prismaAdmin ?? dbModule.prisma;
 import { BadRequest, Conflict, Forbidden, Unauthorized } from '../../shared/errors.js';
 import { encryptField, decryptField } from '../../shared/encryption.js';
 import { verifyPassword } from '../../shared/passwords.js';
@@ -66,7 +79,7 @@ export async function setupMfa(
   otpauth_url: string;
   status: 'PENDING_VERIFICATION';
 }> {
-  const user = await prisma.user.findUnique({
+  const user = await adminDb.user.findUnique({
     where: { id: userId },
     select: {
       id: true,
@@ -106,7 +119,7 @@ export async function setupMfa(
   // tenant via the KMS layer). Match middlewares/requireMfa.ts which uses the
   // single-arg form.
   const enc = await encryptField(Buffer.from(secret, 'utf8'));
-  await prisma.user.update({
+  await adminDb.user.update({
     where: { id: userId },
     data: { mfa_secret_enc: enc, mfa_enabled: false },
   });
@@ -128,7 +141,7 @@ export async function verifyAndEnableMfa(
   userId: string,
   code: string,
 ): Promise<{ enabled: boolean; recovery_codes: string[] }> {
-  const user = await prisma.user.findUnique({
+  const user = await adminDb.user.findUnique({
     where: { id: userId },
     select: { id: true, tenant_id: true, mfa_secret_enc: true, mfa_enabled: true },
   });
@@ -151,7 +164,7 @@ export async function verifyAndEnableMfa(
   // caller ONCE in this response; they are never persisted in plaintext.
   const codes = Array.from({ length: 10 }, () => mintRecoveryCode());
   const recoveryHashesCsv = codes.map(hashRecoveryCode).join(',');
-  await prisma.user.update({
+  await adminDb.user.update({
     where: { id: userId },
     data: {
       mfa_enabled: true,
@@ -175,7 +188,7 @@ export async function disableMfa(
   userId: string,
   currentPassword: string,
 ): Promise<void> {
-  const user = await prisma.user.findUnique({
+  const user = await adminDb.user.findUnique({
     where: { id: userId },
     select: { id: true, tenant_id: true, password_hash: true, mfa_enabled: true },
   });
@@ -196,7 +209,7 @@ export async function disableMfa(
   // middleware. Revoking the refresh family afterwards is a separate
   // statement on purpose — if it failed, the session is already dead by the
   // stamp, so there is no window where the weakened posture is exploitable.
-  await prisma.user.update({
+  await adminDb.user.update({
     where: { id: userId },
     data: {
       mfa_enabled: false,
@@ -205,7 +218,7 @@ export async function disableMfa(
       sessions_valid_from: now,
     },
   });
-  await prisma.refreshToken.updateMany({
+  await adminDb.refreshToken.updateMany({
     where: { user_id: userId, revoked_at: null },
     data: { revoked_at: now },
   });
@@ -239,7 +252,7 @@ export async function disableMfa(
 export async function consumeRecoveryCode(userId: string, code: string): Promise<boolean> {
   if (!code || typeof code !== 'string') return false;
 
-  const user = await prisma.user.findUnique({
+  const user = await adminDb.user.findUnique({
     where: { id: userId },
     select: { id: true, mfa_enabled: true, mfa_recovery_hashes: true },
   });
@@ -272,7 +285,7 @@ export async function consumeRecoveryCode(userId: string, code: string): Promise
   // so the caller treats it as "already consumed".
   const remaining = hashes.filter((_, i) => i !== matchIdx);
   const nextCsv = remaining.length > 0 ? remaining.join(',') : '';
-  const updated = await prisma.user.updateMany({
+  const updated = await adminDb.user.updateMany({
     where: { id: userId, mfa_recovery_hashes: user.mfa_recovery_hashes },
     data: { mfa_recovery_hashes: nextCsv },
   });

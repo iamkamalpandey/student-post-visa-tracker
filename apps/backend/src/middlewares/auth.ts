@@ -1,7 +1,9 @@
 import type { Request, Response, NextFunction } from 'express';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { verifyAccessToken } from '../shared/jwt.js';
 import { Unauthorized, Forbidden, ServiceUnavailable } from '../shared/errors.js';
-import { prisma, prismaAdmin } from '../config/db.js';
+import { prismaAdmin } from '../config/db.js';
+import { withTenantTx } from '../shared/tenantTx.js';
 import { logger } from '../config/logger.js';
 import type { Role } from '@spv/zod-schemas';
 
@@ -21,7 +23,18 @@ async function bumpIdleStamp(userId: string): Promise<void> {
   const prev = lastBumpAt.get(userId) ?? 0;
   if (now - prev < IDLE_BUMP_THROTTLE_MS) return;
   lastBumpAt.set(userId, now);
-  await prisma.refreshToken.updateMany({
+  // SVT-SEC-2026-08 (T0-7) — prismaAdmin, like the denylist lookup below.
+  //
+  // `refresh_tokens` is RLS-scoped and this runs inside `authenticate`, before
+  // tenantContext has set the GUC, so on the singleton the updateMany matched
+  // zero rows under the production role and `last_used_at` never advanced. The
+  // idle check in refresh() reads that stamp, so every active session would
+  // have looked idle and users would have been signed out mid-work — with the
+  // throttle map above making it look like the code had run.
+  //
+  // Scoping by user_id is sound here: it is globally unique, and this is an
+  // authentication primitive with no tenant context by construction.
+  await prismaAdmin.refreshToken.updateMany({
     where: { user_id: userId, revoked_at: null, expires_at: { gt: new Date() } },
     data: { last_used_at: new Date(now) },
   });
@@ -222,46 +235,56 @@ export function requireRole(...roles: Role[]) {
  * `child_id → parent_student_id` cheaply. Each child route registers its own
  * resolver via `requireStudentOwnershipViaChild('<model>', '<idParam>')`.
  */
+// SVT-SEC-2026-08 (T0-7) — the resolvers take their client from the caller.
+//
+// Every table below is RLS-scoped and the `prisma` singleton carries no tenant
+// GUC, so under the production `spv_app` role each of these lookups returned
+// null. The call site treats null as "not authorised", so this fails CLOSED —
+// no data leak — but every COUNSELLOR would have been 403'd out of every child
+// resource in the product: contacts, visas, documents, reminders, enrolments,
+// the lot. ADMIN short-circuits before the lookup ever runs, so an admin-only
+// smoke test would have shown the whole app working.
+type ChildDb = PrismaClient | Prisma.TransactionClient;
 const CHILD_STUDENT_RESOLVERS: Record<
   string,
-  (id: string, tenantId: string) => Promise<{ student_id: string | null } | null>
+  (id: string, tenantId: string, db: ChildDb) => Promise<{ student_id: string | null } | null>
 > = {
-  contact: (id, tenantId) =>
-    prisma.studentContact.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  visa: (id, tenantId) =>
-    prisma.studentVisa.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  identification: (id, tenantId) =>
-    prisma.studentIdentification.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  dependent: (id, tenantId) =>
-    prisma.studentDependent.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  employment: (id, tenantId) =>
-    prisma.studentEmployment.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  qualification: (id, tenantId) =>
-    prisma.academicQualification.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  languageTest: (id, tenantId) =>
-    prisma.languageTestResult.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  travel: (id, tenantId) =>
-    prisma.travelRecord.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  accommodation: (id, tenantId) =>
-    prisma.accommodation.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  insurance: (id, tenantId) =>
-    prisma.insuranceRecord.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  finance: (id, tenantId) =>
-    prisma.financeItem.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  compliance: (id, tenantId) =>
-    prisma.complianceCheck.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  engagement: (id, tenantId) =>
-    prisma.engagementCheck.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  regulatorId: (id, tenantId) =>
-    prisma.studentRegulatorIdentifier.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  sponsorship: (id, tenantId) =>
-    prisma.studentSponsorship.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  enrollment: (id, tenantId) =>
-    prisma.enrollment.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  document: (id, tenantId) =>
-    prisma.document.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
-  reminder: (id, tenantId) =>
-    prisma.reminder.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  contact: (id, tenantId, db) =>
+    db.studentContact.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  visa: (id, tenantId, db) =>
+    db.studentVisa.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  identification: (id, tenantId, db) =>
+    db.studentIdentification.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  dependent: (id, tenantId, db) =>
+    db.studentDependent.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  employment: (id, tenantId, db) =>
+    db.studentEmployment.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  qualification: (id, tenantId, db) =>
+    db.academicQualification.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  languageTest: (id, tenantId, db) =>
+    db.languageTestResult.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  travel: (id, tenantId, db) =>
+    db.travelRecord.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  accommodation: (id, tenantId, db) =>
+    db.accommodation.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  insurance: (id, tenantId, db) =>
+    db.insuranceRecord.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  finance: (id, tenantId, db) =>
+    db.financeItem.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  compliance: (id, tenantId, db) =>
+    db.complianceCheck.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  engagement: (id, tenantId, db) =>
+    db.engagementCheck.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  regulatorId: (id, tenantId, db) =>
+    db.studentRegulatorIdentifier.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  sponsorship: (id, tenantId, db) =>
+    db.studentSponsorship.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  enrollment: (id, tenantId, db) =>
+    db.enrollment.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  document: (id, tenantId, db) =>
+    db.document.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
+  reminder: (id, tenantId, db) =>
+    db.reminder.findFirst({ where: { id, tenant_id: tenantId }, select: { student_id: true } }),
 };
 
 export type StudentOwnerChild = keyof typeof CHILD_STUDENT_RESOLVERS;
@@ -276,10 +299,20 @@ export async function assertStudentOwnership(
 ): Promise<void> {
   if (!req.user) throw Unauthorized();
   if (req.user.role === 'ADMIN') return; // ADMIN always bypasses ownership.
-  const student = await prisma.student.findFirst({
-    where: { id: studentId, tenant_id: req.user.tid, deleted_at: null },
-    select: { assigned_to_id: true },
-  });
+  // SVT-SEC-2026-08 (T0-7) — `students` is RLS-scoped; the singleton has no
+  // tenant GUC, so under the production role this read returned null and every
+  // counsellor was 403'd from every student. Fails closed, but the product does
+  // not work. ADMIN returns above, so admin testing would never surface it.
+  const stid = req.user.tid;
+  const student = req.db
+    ? await req.db.student.findFirst({
+        where: { id: studentId, tenant_id: stid, deleted_at: null },
+        select: { assigned_to_id: true },
+      })
+    : await withTenantTx(stid, (tx) => tx.student.findFirst({
+        where: { id: studentId, tenant_id: stid, deleted_at: null },
+        select: { assigned_to_id: true },
+      }));
   if (!student) {
     // Tenant-leakage-safe: same 404-ish behaviour as if the row didn't exist.
     throw Forbidden('Not authorised for this student');
@@ -342,7 +375,14 @@ export function requireStudentOwnershipViaChild(
       if (req.user.role === 'ADMIN') return next();
       const id = req.params[idParam];
       if (!id) return next(Forbidden('Missing entity id'));
-      const row = await lookup(id, req.user.tid);
+      // Prefer the request-scoped client. Fall back to our own tenant-scoped
+      // transaction rather than the singleton, so a route mounted without
+      // tenantContext resolves correctly instead of silently 403ing every
+      // non-admin caller.
+      const tid = req.user.tid;
+      const row = req.db
+        ? await lookup(id, tid, req.db)
+        : await withTenantTx(tid, (tx) => lookup(id, tid, tx));
       if (!row || !row.student_id) return next(Forbidden('Not authorised for this resource'));
       await assertStudentOwnership(row.student_id, req);
       next();
@@ -379,10 +419,18 @@ export function requireLeadOwnership(idParam = 'id') {
       if (req.user.role === 'ADMIN') return next();
       const id = req.params[idParam];
       if (!id) return next(Forbidden('Missing lead id'));
-      const lead = await prisma.crmLead.findFirst({
-        where: { id, tenant_id: req.user.tid, deleted_at: null },
-        select: { assigned_to_id: true },
-      });
+      // SVT-SEC-2026-08 (T0-7) — same as assertStudentOwnership above: on the
+      // GUC-less singleton this returned null for every lead in production.
+      const ltid = req.user.tid;
+      const lead = req.db
+        ? await req.db.crmLead.findFirst({
+            where: { id, tenant_id: ltid, deleted_at: null },
+            select: { assigned_to_id: true },
+          })
+        : await withTenantTx(ltid, (tx) => tx.crmLead.findFirst({
+            where: { id, tenant_id: ltid, deleted_at: null },
+            select: { assigned_to_id: true },
+          }));
       if (!lead) return next(Forbidden('Not authorised for this lead'));
       if (lead.assigned_to_id !== null && lead.assigned_to_id !== req.user.sub) {
         return next(Forbidden('Not authorised for this lead'));

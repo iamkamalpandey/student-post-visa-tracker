@@ -36,10 +36,20 @@ const STUDENT = '44444444-4444-7444-8444-444444444444';
 /** What the mocked lookup returns for the student under test. */
 let studentRow: { assigned_to_id: string | null } | null = null;
 
+// SVT-SEC-2026-08 (T0-7) — assertStudentOwnership takes its client from
+// `req.db` when tenantContext supplied one, and otherwise opens its own
+// tenant-scoped transaction. These tests call it with a bare request object, so
+// they exercise the withTenantTx fallback and the mock needs $transaction +
+// $executeRaw. Without a tenant GUC the `students` policy matches no rows, and
+// this gate would 403 every counsellor in production.
+const studentDb: Record<string, unknown> = {
+  student: { findFirst: vi.fn(async () => studentRow) },
+};
+studentDb['$transaction'] = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(studentDb));
+studentDb['$executeRaw'] = vi.fn(async () => 1);
+
 vi.mock('../src/config/db.js', () => ({
-  prisma: {
-    student: { findFirst: vi.fn(async () => studentRow) },
-  },
+  prisma: studentDb,
   prismaAdmin: {},
 }));
 

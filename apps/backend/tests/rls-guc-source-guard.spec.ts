@@ -140,6 +140,51 @@ describe('T0-7 — jobs must not touch tenant tables on the GUC-less singleton',
   }
 });
 
+// The same defect class outside src/jobs. These files were verified by hand and
+// converted; the assertions below stop them drifting back.
+//
+// Not yet swept, and deliberately not asserted here so this guard stays honest
+// about what it covers: exports.service.ts, imports.service.ts, and a handful of
+// single-call sites (comms webhooks/unsubscribe routes, billing/middleware.ts,
+// dsar/controller.ts, interview-prep/controller.ts, jobs/service.ts,
+// requireMfa.ts). Tracked in the register under T0-7.
+describe('T0-7 — converted request-path files must not regress', () => {
+  const CONVERTED: Array<{ file: string; why: string }> = [
+    {
+      file: 'src/middlewares/auth.ts',
+      why:
+        'ownership gates read students/crm_leads/18 child tables; on the GUC-less ' +
+        'singleton they returned null, which the call sites treat as "not authorised" — ' +
+        'failing closed, but 403ing every COUNSELLOR out of every child resource. ' +
+        'prismaAdmin remains correct for the auth primitives (denylist, idle bump).',
+    },
+    {
+      file: 'src/modules/users/users.service.ts',
+      why: 'every method but list() used the singleton; user administration did not work at all.',
+    },
+    {
+      file: 'src/modules/users/users.controller.ts',
+      why: 'the actor MFA lookup used the singleton, silently blocking every role change.',
+    },
+    {
+      file: 'src/modules/auth/mfa.service.ts',
+      why: 'auth-domain primitives keyed by the session user id; converted to the adminDb idiom auth.service.ts already uses.',
+    },
+  ];
+
+  for (const { file, why } of CONVERTED) {
+    it(file, () => {
+      const src = readFileSync(join(process.cwd(), file), 'utf8');
+      const delegates = [...new Set(bareSingletonDelegates(src))];
+      expect(
+        delegates,
+        `${file} reaches the bare \`prisma\` singleton again (${delegates.join(', ')}). ` +
+          `It was converted because: ${why}`,
+      ).toEqual([]);
+    });
+  }
+});
+
 describe('T0-7 — the audit writer must scope its own transaction', () => {
   it('shared/audit.ts routes tenant-scoped rows through withTenantTx', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'shared', 'audit.ts'), 'utf8');

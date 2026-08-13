@@ -1,12 +1,36 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { CreateUserRequest, UpdateUserRequest } from '@spv/zod-schemas';
-import { prisma } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { hashPassword } from '../../shared/passwords.js';
 import { ensurePasswordNotPwned } from '../../shared/hibp.js';
 import { Conflict, Forbidden, NotFound } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
 
 type DB = PrismaClient | Prisma.TransactionClient;
+
+// SVT-SEC-2026-08 (T0-7) — resolve the client, never the bare singleton.
+//
+// `users` is RLS-scoped with the policy `tenant_id = app_current_tenant()`, and
+// that GUC is only set by the per-request client or by withTenantTx. Every
+// method here except `list` reached for the `prisma` singleton, so under the
+// production `spv_app` role the reads returned NOTHING and the writes failed
+// the WITH CHECK — user administration simply did not work, while dev and CI
+// (single superuser role, RLS never applies) showed it working perfectly.
+//
+// The migration to the request-scoped client was started — `list` takes a `db`
+// and the controller passes `req.db` — and then stopped. The old fallback was
+// the singleton, so a caller that forgot `db` was silently wrong. This helper
+// makes the fallback *correct* instead: no client supplied means we open our
+// own tenant-scoped transaction. Forgetting to thread `req.db` now costs one
+// extra transaction rather than returning an empty result set.
+async function scoped<T>(
+  tenantId: string,
+  db: DB | undefined,
+  fn: (client: DB) => Promise<T>,
+): Promise<T> {
+  if (db) return fn(db);
+  return withTenantTx(tenantId, (tx) => fn(tx));
+}
 
 export type ListUsersInput = {
   tenantId: string;
@@ -55,13 +79,14 @@ export const usersService = {
           }
         : {}),
     };
-    const client: DB = input.db ?? prisma;
-    const rows = await client.user.findMany({
-      where,
-      take: input.limit + 1,
-      orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
-      select: PUBLIC_FIELDS,
-    });
+    const rows = await scoped(input.tenantId, input.db, (client) =>
+      client.user.findMany({
+        where,
+        take: input.limit + 1,
+        orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
+        select: PUBLIC_FIELDS,
+      }),
+    );
     const hasMore = rows.length > input.limit;
     return {
       data: rows.slice(0, input.limit),
@@ -69,10 +94,12 @@ export const usersService = {
     };
   },
 
-  async create(tenantId: string, input: CreateUserRequest, actorId: string) {
-    const existing = await prisma.user.findUnique({
-      where: { tenant_id_email: { tenant_id: tenantId, email: input.email.toLowerCase() } },
-    });
+  async create(tenantId: string, input: CreateUserRequest, actorId: string, db?: DB) {
+    const existing = await scoped(tenantId, db, (c) =>
+      c.user.findUnique({
+        where: { tenant_id_email: { tenant_id: tenantId, email: input.email.toLowerCase() } },
+      }),
+    );
     if (existing) throw Conflict('A user with that email already exists in this tenant');
 
     // SVT-WAVE25-DEFAULTS-2026-05 — when caller doesn't pass locale/timezone,
@@ -81,10 +108,12 @@ export const usersService = {
     let inheritedLocale: string | undefined;
     let inheritedTz: string | undefined;
     if (input.locale === undefined || input.timezone === undefined) {
-      const tenant = await prisma.tenant.findFirst({
-        where: { id: tenantId },
-        select: { default_locale: true, default_timezone: true },
-      });
+      const tenant = await scoped(tenantId, db, (c) =>
+        c.tenant.findFirst({
+          where: { id: tenantId },
+          select: { default_locale: true, default_timezone: true },
+        }),
+      );
       inheritedLocale = tenant?.default_locale;
       inheritedTz = tenant?.default_timezone;
     }
@@ -92,11 +121,12 @@ export const usersService = {
     // SVT-SEC-2026-05 — HIBP check on initial password set (admin-created
     // accounts). NODE_ENV=test bypasses.
     await ensurePasswordNotPwned(input.password, { tenantId });
-    const created = await prisma.user.create({
+    const passwordHash = await hashPassword(input.password);
+    const created = await scoped(tenantId, db, (c) => c.user.create({
       data: {
         tenant_id: tenantId,
         email: input.email.toLowerCase(),
-        password_hash: await hashPassword(input.password),
+        password_hash: passwordHash,
         given_name: input.given_name,
         family_name: input.family_name,
         display_name: input.display_name ?? null,
@@ -106,7 +136,7 @@ export const usersService = {
         password_changed_at: new Date(),
       },
       select: PUBLIC_FIELDS,
-    });
+    }));
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — account-creation is a privileged
     // lifecycle event (a new principal gains a role in the tenant). Record an
     // append-only audit row. NEVER log the password or its hash; capture only
@@ -127,11 +157,13 @@ export const usersService = {
     return created;
   },
 
-  async getById(tenantId: string, id: string) {
-    const user = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      select: PUBLIC_FIELDS,
-    });
+  async getById(tenantId: string, id: string, db?: DB) {
+    const user = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        select: PUBLIC_FIELDS,
+      }),
+    );
     if (!user) throw NotFound('User not found');
     return user;
   },
@@ -166,11 +198,14 @@ export const usersService = {
       actorMfaEnabled?: boolean;
       actorMfaVerifiedAt?: Date | undefined;
     },
+    db?: DB,
   ) {
-    const target = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      select: { id: true, role: true, is_active: true },
-    });
+    const target = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        select: { id: true, role: true, is_active: true },
+      }),
+    );
     if (!target) throw NotFound('User not found');
 
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — snapshot the pre-mutation state for
@@ -222,23 +257,27 @@ export const usersService = {
       target.role === 'ADMIN' &&
       ((wantsRoleChange && input.role !== 'ADMIN') || wantsDeactivation)
     ) {
-      const adminCount = await prisma.user.count({
-        where: {
-          tenant_id: tenantId,
-          role: 'ADMIN',
-          is_active: true,
-          deleted_at: null,
-        },
-      });
+      const adminCount = await scoped(tenantId, db, (c) =>
+        c.user.count({
+          where: {
+            tenant_id: tenantId,
+            role: 'ADMIN',
+            is_active: true,
+            deleted_at: null,
+          },
+        }),
+      );
       if (adminCount <= 1) {
         throw Conflict('Cannot demote or deactivate the last active admin');
       }
     }
 
-    const updated = await prisma.user.updateMany({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      data: input,
-    });
+    const updated = await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        data: input,
+      }),
+    );
     if (updated.count === 0) throw NotFound('User not found');
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — privilege-escalation (promoting a
     // peer to ADMIN) and deactivation are the security-critical mutations, so
@@ -260,18 +299,20 @@ export const usersService = {
         is_active: input.is_active ?? beforeIsActive,
       },
     } as never);
-    return this.getById(tenantId, id);
+    return this.getById(tenantId, id, db);
   },
 
-  async softDelete(tenantId: string, id: string, actorId: string) {
+  async softDelete(tenantId: string, id: string, actorId: string, db?: DB) {
     if (id === actorId) throw Conflict('You cannot delete your own account');
     // SVT-SEC-2026-05 — last-admin guard. Deleting the only remaining active
     // admin locks the entire tenant out (no one can do admin-only work like
     // password resets, role mutations, breach review).
-    const target = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      select: { role: true, is_active: true },
-    });
+    const target = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        select: { role: true, is_active: true },
+      }),
+    );
     if (!target) throw NotFound('User not found');
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — snapshot prior state before the
     // updateMany mutates the (possibly shared) row reference, so the audit
@@ -279,25 +320,31 @@ export const usersService = {
     const beforeRole = target.role;
     const beforeIsActive = target.is_active;
     if (target.role === 'ADMIN' && target.is_active) {
-      const adminCount = await prisma.user.count({
-        where: {
-          tenant_id: tenantId, role: 'ADMIN', is_active: true, deleted_at: null,
-        },
-      });
+      const adminCount = await scoped(tenantId, db, (c) =>
+        c.user.count({
+          where: {
+            tenant_id: tenantId, role: 'ADMIN', is_active: true, deleted_at: null,
+          },
+        }),
+      );
       if (adminCount <= 1) {
         throw Conflict('Cannot delete the last active admin');
       }
     }
-    const updated = await prisma.user.updateMany({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      data: { deleted_at: new Date(), is_active: false },
-    });
+    const updated = await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        data: { deleted_at: new Date(), is_active: false },
+      }),
+    );
     if (updated.count === 0) throw NotFound('User not found');
     // Revoke all refresh tokens so the deleted user cannot continue active sessions.
-    await prisma.refreshToken.updateMany({
-      where: { user_id: id, revoked_at: null },
-      data: { revoked_at: new Date() },
-    });
+    await scoped(tenantId, db, (c) =>
+      c.refreshToken.updateMany({
+        where: { user_id: id, revoked_at: null },
+        data: { revoked_at: new Date() },
+      }),
+    );
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — soft-deletion removes a principal
     // from the tenant; capture the prior (role, is_active) so a forensic
     // reviewer can see what was deactivated.
@@ -312,11 +359,13 @@ export const usersService = {
     } as never);
   },
 
-  async resetPassword(tenantId: string, id: string, newPassword: string, actorId: string) {
-    const exists = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      select: { id: true },
-    });
+  async resetPassword(tenantId: string, id: string, newPassword: string, actorId: string, db?: DB) {
+    const exists = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        select: { id: true },
+      }),
+    );
     if (!exists) throw NotFound('User not found');
     // SVT-SEC-2026-05 — admin-driven password reset still flows through HIBP.
     await ensurePasswordNotPwned(newPassword, { tenantId, userId: id });
@@ -324,21 +373,26 @@ export const usersService = {
     // SVT-QA-2026-08 — stamp sessions_valid_from so admin-driven reset also
     // invalidates any live access token for the target user.
     const now = new Date();
-    const wr = await prisma.user.updateMany({
-      where: { id, tenant_id: tenantId, deleted_at: null },
-      data: {
-        password_hash: await hashPassword(newPassword),
-        password_changed_at: now,
-        failed_login_count: 0,
-        locked_until: null,
-        sessions_valid_from: now,
-      },
-    });
+    const newHash = await hashPassword(newPassword);
+    const wr = await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { id, tenant_id: tenantId, deleted_at: null },
+        data: {
+          password_hash: newHash,
+          password_changed_at: now,
+          failed_login_count: 0,
+          locked_until: null,
+          sessions_valid_from: now,
+        },
+      }),
+    );
     if (wr.count !== 1) throw NotFound('User not found');
-    await prisma.refreshToken.updateMany({
-      where: { user_id: id, revoked_at: null },
-      data: { revoked_at: now },
-    });
+    await scoped(tenantId, db, (c) =>
+      c.refreshToken.updateMany({
+        where: { user_id: id, revoked_at: null },
+        data: { revoked_at: now },
+      }),
+    );
     const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
     invalidateSessionsValidFrom(id);
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — admin password reset is an
@@ -355,11 +409,13 @@ export const usersService = {
     } as never);
   },
 
-  async revokeAllSessions(tenantId: string, id: string, actorId: string) {
-    const exists = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id, deleted_at: null },
-      select: { id: true },
-    });
+  async revokeAllSessions(tenantId: string, id: string, actorId: string, db?: DB) {
+    const exists = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id, deleted_at: null },
+        select: { id: true },
+      }),
+    );
     if (!exists) throw NotFound('User not found');
     // SVT-QA-2026-08 — stamp sessions_valid_from alongside refresh revoke so
     // access tokens fall over within one cache cycle, not the full 15-min TTL.
@@ -369,14 +425,18 @@ export const usersService = {
     // Stamp first: once `sessions_valid_from` lands, every live access token
     // for the target is rejected by the authenticate middleware, so the
     // refresh revoke that follows can never leave an exploitable window.
-    await prisma.user.updateMany({
-      where: { id, tenant_id: tenantId },
-      data: { sessions_valid_from: now },
-    });
-    const result = await prisma.refreshToken.updateMany({
-      where: { user_id: id, revoked_at: null },
-      data: { revoked_at: now },
-    });
+    await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { id, tenant_id: tenantId },
+        data: { sessions_valid_from: now },
+      }),
+    );
+    const result = await scoped(tenantId, db, (c) =>
+      c.refreshToken.updateMany({
+        where: { user_id: id, revoked_at: null },
+        data: { revoked_at: now },
+      }),
+    );
     const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
     invalidateSessionsValidFrom(id);
     // SVT-WAVE-AUDIT-USERS-2026-06 (W1.3) — force session revocation is an
@@ -423,6 +483,7 @@ export const usersService = {
     targetUserId: string,
     actorId: string,
     reason: string,
+    db?: DB,
   ): Promise<void> {
     // Self-guard FIRST so the 403 is consistent regardless of whether the
     // target row exists. Prevents a captured-session attacker from clearing
@@ -434,10 +495,12 @@ export const usersService = {
       );
     }
 
-    const target = await prisma.user.findFirst({
-      where: { tenant_id: tenantId, id: targetUserId, deleted_at: null },
-      select: { id: true, mfa_enabled: true },
-    });
+    const target = await scoped(tenantId, db, (c) =>
+      c.user.findFirst({
+        where: { tenant_id: tenantId, id: targetUserId, deleted_at: null },
+        select: { id: true, mfa_enabled: true },
+      }),
+    );
     if (!target) throw NotFound('User not found');
     // Snapshot the pre-mutation state for the audit row. We capture this BEFORE
     // the updateMany below because some Prisma test doubles return live row
@@ -450,14 +513,16 @@ export const usersService = {
     // secret/recovery state and revoke tokens — the runbook caller may have
     // partially completed the recovery in a previous attempt. Writing the
     // audit row regardless captures the operator intent.
-    await prisma.user.updateMany({
-      where: { tenant_id: tenantId, id: targetUserId, deleted_at: null },
-      data: {
-        mfa_enabled: false,
-        mfa_secret_enc: null,
-        mfa_recovery_hashes: null,
-      },
-    });
+    await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { tenant_id: tenantId, id: targetUserId, deleted_at: null },
+        data: {
+          mfa_enabled: false,
+          mfa_secret_enc: null,
+          mfa_recovery_hashes: null,
+        },
+      }),
+    );
 
     // Force the target to re-login. Any live session must not be allowed to
     // continue without going through fresh authentication — otherwise the
@@ -470,14 +535,18 @@ export const usersService = {
     const now = new Date();
     // SVT-RLS-2026-05 — tenant_id in the where on BOTH writes.
     // Stamp first (see revokeAllSessions for the ordering rationale).
-    await prisma.user.updateMany({
-      where: { id: targetUserId, tenant_id: tenantId },
-      data: { sessions_valid_from: now },
-    });
-    await prisma.refreshToken.updateMany({
-      where: { user_id: targetUserId, revoked_at: null },
-      data: { revoked_at: now },
-    });
+    await scoped(tenantId, db, (c) =>
+      c.user.updateMany({
+        where: { id: targetUserId, tenant_id: tenantId },
+        data: { sessions_valid_from: now },
+      }),
+    );
+    await scoped(tenantId, db, (c) =>
+      c.refreshToken.updateMany({
+        where: { user_id: targetUserId, revoked_at: null },
+        data: { revoked_at: now },
+      }),
+    );
     const { invalidateSessionsValidFrom } = await import('../../middlewares/auth.js');
     invalidateSessionsValidFrom(targetUserId);
 

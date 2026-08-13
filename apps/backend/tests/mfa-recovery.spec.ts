@@ -68,7 +68,13 @@ vi.mock('../src/config/db.js', () => {
       ),
     },
   };
-  return { prisma, disconnectDb: async () => undefined };
+    // SVT-SEC-2026-08 (T0-7) — mfa.service now uses the auth-domain admin client
+    // (prismaAdmin), matching auth.service.ts. `users` and `refresh_tokens` are
+    // RLS-scoped and these are authentication primitives keyed by the session's
+    // own user id, running before any tenant GUC exists — on the plain singleton
+    // every lookup returned null under the production role and MFA enrolment,
+    // verify, disable and recovery all failed with "Invalid session".
+  return { prisma, prismaAdmin: prisma, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({

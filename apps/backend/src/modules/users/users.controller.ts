@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { usersService } from './users.service.js';
 import { Unauthorized } from '../../shared/errors.js';
 import { readIfMatch } from '../../shared/ifMatch.js';
-import { prisma } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import type {
   CreateUserRequest,
   UpdateUserRequest,
@@ -47,6 +47,7 @@ export const usersController = {
         tenant(req),
         req.body as CreateUserRequest,
         req.user.sub,
+        req.db,
       );
       res.status(201).json({ data: created });
     } catch (err) {
@@ -56,7 +57,7 @@ export const usersController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const user = await usersService.getById(tenant(req), req.params['id']!);
+      const user = await usersService.getById(tenant(req), req.params['id']!, req.db);
       res.json({ data: user });
     } catch (err) {
       next(err);
@@ -78,10 +79,27 @@ export const usersController = {
       // presented a valid X-MFA-Code header. The route is already gated by
       // `requireMfa` so an MFA-enabled admin always reaches here with
       // mfaVerifiedAt populated; the service check is defence-in-depth.
-      const actorRow = await prisma.user.findUnique({
-        where: { id: req.user.sub },
-        select: { mfa_enabled: true },
-      });
+      // SVT-SEC-2026-08 (T0-7) — `users` is RLS-scoped, so this must use the
+      // request-scoped client. On the singleton it returned null under the
+      // production role, which silently made actorMfaEnabled false and turned
+      // the defence-in-depth role-mutation gate into a hard block on every
+      // role change.
+      //
+      // The fallback must NOT be `null`: that reads as "actor has no MFA" and
+      // turns this defence-in-depth check into a hard block on every role
+      // change — the same silently-wrong shape as the bug being fixed. Fall
+      // back to our own tenant-scoped transaction instead.
+      const actorTid = tenant(req);
+      const actorSub = req.user.sub;
+      const actorRow = req.db
+        ? await req.db.user.findFirst({
+            where: { id: actorSub, tenant_id: actorTid },
+            select: { mfa_enabled: true },
+          })
+        : await withTenantTx(actorTid, (tx) => tx.user.findFirst({
+            where: { id: actorSub, tenant_id: actorTid },
+            select: { mfa_enabled: true },
+          }));
       const user = await usersService.update(
         tenant(req),
         req.params['id']!,
@@ -92,6 +110,7 @@ export const usersController = {
           actorMfaEnabled: actorRow?.mfa_enabled ?? false,
           actorMfaVerifiedAt: req.mfaVerifiedAt,
         },
+        req.db,
       );
       res.json({ data: user });
     } catch (err) {
@@ -102,7 +121,7 @@ export const usersController = {
   async softDelete(req: Request, res: Response, next: NextFunction) {
     try {
       if (!req.user?.sub) throw Unauthorized();
-      await usersService.softDelete(tenant(req), req.params['id']!, req.user.sub);
+      await usersService.softDelete(tenant(req), req.params['id']!, req.user.sub, req.db);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -118,6 +137,7 @@ export const usersController = {
         req.params['id']!,
         new_password,
         req.user.sub,
+        req.db,
       );
       res.status(204).end();
     } catch (err) {
@@ -132,6 +152,7 @@ export const usersController = {
         tenant(req),
         req.params['id']!,
         req.user.sub,
+        req.db,
       );
       res.json({ data: result });
     } catch (err) {
@@ -152,6 +173,7 @@ export const usersController = {
         req.params['id']!,
         req.user.sub,
         reason,
+        req.db,
       );
       res.status(204).end();
     } catch (err) {

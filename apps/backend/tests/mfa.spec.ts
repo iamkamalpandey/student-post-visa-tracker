@@ -40,11 +40,18 @@ vi.mock('../src/config/db.js', () => {
     // under the stronger posture kept working unchanged after the downgrade.
     refreshToken: { updateMany: vi.fn(async () => ({ count: 0 })) },
   };
+    // SVT-SEC-2026-08 (T0-7) — mfa.service now uses the auth-domain admin client
+    // (prismaAdmin), matching auth.service.ts. `users` and `refresh_tokens` are
+    // RLS-scoped and these are authentication primitives keyed by the session's
+    // own user id, running before any tenant GUC exists — on the plain singleton
+    // every lookup returned null under the production role and MFA enrolment,
+    // verify, disable and recovery all failed with "Invalid session".
+    //
+    // `authenticate` also reads User.sessions_valid_from through this client;
+    // the seeded rows carry no such field, which reads as "no revocation".
   return {
     prisma,
-    // `authenticate` reads User.sessions_valid_from through the BYPASS-RLS
-    // client; null = "no revocation on record".
-    prismaAdmin: { user: { findUnique: async () => ({ sessions_valid_from: null }) } },
+    prismaAdmin: prisma,
     disconnectDb: async () => undefined,
   };
 });
