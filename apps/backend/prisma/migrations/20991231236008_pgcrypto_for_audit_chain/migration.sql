@@ -40,13 +40,20 @@
 -- pgcrypto entirely. That was rejected here: it changes how every entry_hash is
 -- computed, and getting the text→bytea encoding subtly wrong would silently
 -- invalidate existing chains rather than fail loudly. Installing the extension
--- the code already expects changes no hash and is idempotent. pgcrypto is on
--- DigitalOcean Managed Postgres' supported list and the PRE_DEPLOY migrate job
--- runs as the database owner, so it is permitted there.
+-- the code already expects changes no hash and is idempotent.
 --
--- If the role ever cannot create it, THIS migration fails loudly at deploy time
--- and the deployment aborts — which is the correct failure mode, and strictly
--- better than a silent, permanent loss of the audit trail.
+-- CAN THE MIGRATE ROLE ACTUALLY DO THIS? Yes, and it was checked rather than
+-- assumed. pgcrypto is a **trusted** extension (PostgreSQL 13+ marks it
+-- `trusted = true`), which means a plain database OWNER may create it without
+-- being a superuser. Confirmed empirically: this whole migration chain,
+-- including this file, was applied end to end by a NOSUPERUSER NOBYPASSRLS
+-- owner role on PostgreSQL 18.3. That matters because the launch runbook
+-- deliberately points DATABASE_MIGRATE_URL at the owner (`spv`), not at a
+-- superuser.
+--
+-- If some environment nonetheless refuses, THIS migration fails loudly at
+-- deploy time and the deployment aborts — the correct failure mode, and
+-- strictly better than a silent, permanent loss of the audit trail.
 --
 -- Idempotent: IF NOT EXISTS. Safe to re-run.
 -- ============================================================================
