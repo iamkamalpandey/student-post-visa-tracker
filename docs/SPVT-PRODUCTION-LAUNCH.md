@@ -14,6 +14,7 @@ fail at the PRE_DEPLOY job.
 | Gate | State |
 |---|---|
 | Code builds and tests | **GREEN** — 155 backend files / 1489 tests, 89 frontend, 0 failed |
+| Frontend production build | **GREEN** — `next build` compiles all routes |
 | Typecheck (backend + frontend) | **GREEN** |
 | Lint | **GREEN** (0 errors, 49 warnings) |
 | Migration chain replays from empty | **GREEN** — verified again on a virgin PostgreSQL 18.3 |
