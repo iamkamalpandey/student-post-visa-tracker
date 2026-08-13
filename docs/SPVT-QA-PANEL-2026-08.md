@@ -129,10 +129,19 @@ branch. That also makes the DB trigger *correct* rather than merely permitted:
 to see that tenant's rows to find the true chain head.
 
 `tests/rls-guc-source-guard.spec.ts` is the regression net — it fails CI when a
-job touches a tenant-scoped table through the bare singleton, naming the file
-and the delegate, and needs no database so it runs everywhere. Its allowlist
-names the exact delegates each infrastructure job may use, so growing a new one
-has to be argued for rather than waved through.
+job or a converted request-path file touches a tenant-scoped table through the
+bare singleton, naming the file, the delegate, and the consequence, and needs no
+database so it runs everywhere. Its allowlist names the exact delegates each
+infrastructure job may use, so growing a new one has to be argued for rather
+than waved through.
+
+**Closure verified**, not assumed: `grep -rP "(?<![A-Za-z])prisma\.[a-zA-Z]+\."
+src` returns nothing outside `config/db.ts`, where the client is defined. Every
+remaining database access in the backend now goes through `req.db`,
+`withTenantTx`, or an explicitly-named `prismaAdmin`/`adminDb` call.
+
+Two files were checked and deliberately left alone: `jobs/service.ts` and
+`comms/controller.ts` touch only `job_runs`, which has no tenant dimension.
 
 **Why nothing caught this, which is the part worth keeping:**
 `rls-enforcement.integration.spec.ts` proves tenant A cannot read tenant B.
