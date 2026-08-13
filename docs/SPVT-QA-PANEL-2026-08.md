@@ -148,6 +148,24 @@ Two files were checked and deliberately left alone: `jobs/service.ts` and
 Nothing proved the app can still read its **own** rows once RLS is real. Both
 halves matter and only one was tested.
 
+**CONFIRMED IN PRODUCTION (2026-08-13).** This was not theoretical. Queried the
+live `spvt-db` directly:
+
+- The runtime role is `spv_app` with `rolsuper = f, rolbypassrls = f` — RLS
+  genuinely applies, so launch runbook step 3 is already satisfied and T0-7 was
+  live.
+- `audit_logs` holds **3,528 rows, every single one `tenant_id IS NULL`**. Zero
+  tenant-scoped rows, ever.
+
+That is the exact predicted signature. The policy is
+`tenant_id = app_current_tenant() OR tenant_id IS NULL`, so on the GUC-less
+client the system rows land via the NULL branch while every tenant-scoped write
+fails the `WITH CHECK` and is swallowed by `writeAudit`'s catch. **The live
+system has been running with a completely empty tenant audit trail** — the
+feature sold as forensic integrity — and nothing anywhere reported it.
+
+Static analysis predicted it; production data confirms it.
+
 ### T0-8 · The audit chain calls `digest()` from pgcrypto, which no migration ever installed — **FIXED**
 
 **Found by standing a real de-privileged Postgres up and running the actual code
@@ -169,8 +187,18 @@ Two things kept it invisible, and they compound:
    failure can never take down the business operation that triggered it. But
    with (1), the tamper-evident audit trail is simply empty and nothing says so.
 
-Every unit test mocks Prisma, so none could see it. Stacked on T0-7, the audit
-trail would have been dead twice over.
+Every unit test mocks Prisma, so none could see it.
+
+**Correction, from checking production directly (2026-08-13):** pgcrypto *is*
+already installed on the live `spvt-db` (`pg_trgm`, `pgcrypto`, `plpgsql`), so
+T0-8 was **not** biting production — someone installed it out-of-band at some
+point. I originally wrote that the audit trail "would have recorded nothing"
+because of this; in production the cause was T0-7, not T0-8.
+
+T0-8 remains a genuine P0, but a **latent** one: it breaks any database built
+from the migrations alone — CI, a new environment, and above all **the restore
+drill in launch step 6**. A restore that cannot write an audit row is not a
+usable recovery, and that is precisely when nobody is in a position to debug it.
 
 Fixed by `20991231236008_pgcrypto_for_audit_chain`. Postgres 11+ does have a
 built-in `sha256(bytea)`, but switching to it changes how every `entry_hash` is
