@@ -3,6 +3,7 @@ import { prisma, isRlsRoleVerified, assertRuntimeRoleRespectsRls } from '../../c
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { getRedisClient } from '../../shared/redisClient.js';
+import { isSentryActive } from '../../config/sentry.js';
 import { dbUp, redisUp } from '../../config/metrics.js';
 
 export const healthRouter: Router = Router();
@@ -48,7 +49,20 @@ healthRouter.get('/readyz', async (_req, res) => {
     // to fire on. An unconfigured Redis (a valid single-node topology) stays 1
     // so the alert doesn't page on an intentional absence.
     redisUp.set(redis ? 1 : redisConfigured ? 0 : 1);
-    res.json({ status: 'ready', db: 'ok', redis: redisStatus });
+    // SVT-OBS-2026-08 — surface whether error tracking is actually active.
+    //
+    // `SENTRY_DSN` was found absent from the live App Platform spec on
+    // 2026-08-13 — not empty, not declared — so production had been running
+    // with error tracking off. The only prior signal was one boot-time log
+    // line, which the runbook itself calls "indistinguishable from working".
+    // Reporting it here puts a missing observability control somewhere it can
+    // actually be observed, alongside db and redis, and costs nothing.
+    res.json({
+      status: 'ready',
+      db: 'ok',
+      redis: redisStatus,
+      sentry: isSentryActive() ? 'active' : 'not_configured',
+    });
   } catch (err) {
     dbUp.set(0);
     // SVT-SEC-2026-08 — do NOT echo the driver error to an unauthenticated

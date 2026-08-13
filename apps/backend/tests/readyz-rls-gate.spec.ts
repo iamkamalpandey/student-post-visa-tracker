@@ -104,6 +104,21 @@ describe('/readyz — RLS role gate in production', () => {
     expect(db.assertRuntimeRoleRespectsRls).not.toHaveBeenCalled();
   });
 
+  // SVT-OBS-2026-08 — a missing observability control must itself be observable.
+  //
+  // SENTRY_DSN was found absent from the live App Platform spec (not empty —
+  // not declared), so production ran with error tracking off. The only signal
+  // was one boot-time log line, which the runbook itself calls
+  // "indistinguishable from working". Reporting it on readyz puts it where
+  // operators already look.
+  it('reports whether error tracking is actually active', async () => {
+    reprobeOutcome = 'verify';
+    const res = await request(app()).get('/api/v1/health/readyz');
+    expect(res.status).toBe(200);
+    // No DSN in the test env, so it must say so rather than stay silent.
+    expect(res.body.sentry).toBe('not_configured');
+  });
+
   it('never leaks the driver error detail on a failure response', async () => {
     // The route is public and is now the platform probe; Prisma connection
     // errors embed host, port and role.

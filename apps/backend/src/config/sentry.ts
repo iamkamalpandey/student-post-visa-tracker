@@ -101,11 +101,36 @@ export function scrubPii(input: unknown, seen = new WeakSet<object>()): unknown 
   return input;
 }
 
+/**
+ * SVT-OBS-2026-08 — is error tracking actually active?
+ *
+ * Exposed so `/readyz` can report it. Verified absent from the live App
+ * Platform spec on 2026-08-13: `SENTRY_DSN` was not merely empty, it was not
+ * declared at all, so production has been running with error tracking off.
+ *
+ * The old behaviour was a single `logger.warn` at boot — which the runbook
+ * itself describes as "indistinguishable from working", because one warn line
+ * scrolls away in seconds and nothing afterwards ever mentions it again. A
+ * missing observability control that is itself unobservable is the worst
+ * possible arrangement: the first real incident is the thing that tells you.
+ *
+ * Reporting it on the readiness endpoint puts it where operators already look,
+ * next to `db` and `redis`, without touching availability.
+ */
+export function isSentryActive(): boolean {
+  return sentry !== null;
+}
+
 export async function initSentry(): Promise<void> {
   if (initialised) return;
   initialised = true;
   if (!env.SENTRY_DSN) {
-    logger.warn('sentry: SENTRY_DSN unset — error tracking disabled');
+    // error, not warn: this is a missing production control, not a note.
+    logger.error(
+      'sentry: SENTRY_DSN is not set — error tracking is DISABLED. Every unhandled ' +
+        'error in production will go unreported. Set it in the app spec and redeploy; ' +
+        '/readyz reports sentry: "not_configured" until you do.',
+    );
     return;
   }
   try {

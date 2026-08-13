@@ -42,7 +42,7 @@ Two live-spec items remain open and are called out under Step 2 and Step 4.
 | **App works under the de-privileged role** | **GREEN** — see below; this was never tested before and hid two P0s |
 | CI runs real migrations | **GREEN** |
 | Deploy pipeline can run | **LIVE** — P3009 cleared, 58 migrations applied, deploys succeeding |
-| Error tracking receives events | **STILL BLOCKED** — `SENTRY_DSN` is absent from the live spec entirely (verified 2026-08-13) |
+| Error tracking receives events | **STILL BLOCKED** — `SENTRY_DSN` absent from the live spec entirely (verified 2026-08-13). Now *visible*: `/readyz` reports `sentry: not_configured` and boot logs at error level |
 | Health check detects a bad deploy | **NO** — live spec still probes `/livez`; confirmed in runtime logs. Operator declined the change; see Step 4 |
 | Rate limiting honest about Redis | **LIVE** — dummy `REDIS_URL` removed from the live spec; `/readyz` reports `redis: not_configured` |
 | Restore from backup tested | **DONE 2026-08-13** — RTO 429s, RPO 0 rows (step 6) |
@@ -103,6 +103,17 @@ which is indistinguishable from working.
 
 Set it in the DigitalOcean app settings for **both** the `backend` service and
 the `migrate` job, then confirm an event actually arrives before believing it.
+
+**Verified 2026-08-13: the variable is not present in the live spec at all** —
+not empty, not declared. So the app has been running with error tracking off.
+
+Because "disabled" and "working" used to look identical from outside, the
+absence is now observable rather than silent:
+
+- `/api/v1/health/readyz` reports `sentry: "active" | "not_configured"`
+- boot logs the absence at **error** level, not `warn`
+
+Neither substitutes for setting the DSN. They just mean you can tell.
 
 ## Step 3 — Confirm the runtime DB role is NOT a superuser
 
@@ -238,9 +249,28 @@ daily backup list (13:11 UTC) and called it "~16 hours". That was wrong:
 not a restore of last night's snapshot. The observed recovery point was current
 to the second the request was made.
 
-**Still not proven by this drill:** that the *application* boots against a
-restored cluster. The drill verified the data; pointing a staging deploy at it
-is a separate step and remains untested.
+**The application boot half — now covered.** The drill verified the data. The
+remaining question was whether the app actually *runs* against such a database,
+which was closed separately on 2026-08-13 by booting the built server
+(`node dist/server.js`) against a `migrate deploy`-built PostgreSQL 18.3 as a
+`NOSUPERUSER NOBYPASSRLS` role:
+
+```
+/api/v1/health/readyz → 200 {"status":"ready","db":"ok","redis":"connected"}
+/api/v1/health/livez  → 200 {"status":"ok"}
+```
+
+`pg_stat_activity` confirmed the serving process held its connections as
+`spv_app_rlsguc` (`rolsuper=f, rolbypassrls=f`) — so `ready` means the RLS role
+assertion genuinely passed under a role RLS applies to, not a privileged one.
+It held exactly **6** connections, matching `DB_CONNECTION_LIMIT`, so the pool
+bound added after the 04:23Z cron failure is observably working.
+
+**What that still does not prove:** the boot was against a migrate-built
+database, not a literal restored cluster. The two were measured identical on
+applied migrations, tables, RLS policies and extensions, so the gap is narrow —
+but a full DR rehearsal (restore → point a deploy at it → serve traffic) has
+not been run end to end.
 
 ## Step 7 — Alerting (NOT DONE)
 
