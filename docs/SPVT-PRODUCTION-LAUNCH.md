@@ -13,10 +13,11 @@ fail at the PRE_DEPLOY job.
 
 | Gate | State |
 |---|---|
-| Code builds and tests | **GREEN** — 149 backend files / 1407 tests, 89 frontend, 0 failed |
+| Code builds and tests | **GREEN** — 155 backend files / 1489 tests, 89 frontend, 0 failed |
 | Typecheck (backend + frontend) | **GREEN** |
-| Lint | **GREEN** (0 errors) |
-| Migration chain replays from empty | **GREEN** — all 57 verified on a virgin Postgres 16 |
+| Lint | **GREEN** (0 errors, 49 warnings) |
+| Migration chain replays from empty | **GREEN** — verified again on a virgin PostgreSQL 18.3 |
+| **App works under the de-privileged role** | **GREEN** — see below; this was never tested before and hid two P0s |
 | CI runs real migrations | **GREEN** |
 | Deploy pipeline can run | **BLOCKED** — step 1 |
 | Error tracking receives events | **BLOCKED** — step 2 |
@@ -103,6 +104,33 @@ platform keeps the previous version serving.
 
 Run the query anyway. An automated gate that has never been observed failing is
 an assumption, not a control.
+
+### Step 3b — The de-privileged role is now actually exercised, not assumed
+
+Until 2026-08-13 nothing verified that the application **works** under that role.
+The existing integration test proved tenant A cannot read tenant B; nothing
+proved the app can still read its **own** rows once RLS is real. That single gap
+hid two P0 defects — **T0-7** (jobs, the audit writer and a dozen request-path
+files read through a connection with no tenant GUC, matching zero rows and
+failing every insert, silently) and **T0-8** (the audit chain calls `digest()`
+from pgcrypto, which no migration installed).
+
+Both are fixed, and `tests/rls-tenant-guc.integration.spec.ts` now connects the
+real application client as a `NOSUPERUSER NOBYPASSRLS` role and exercises the
+real helpers. To run the whole suite that way against any database:
+
+```bash
+pnpm --filter backend exec vitest run
+```
+
+with `DATABASE_URL` pointing at a de-privileged role and `DATABASE_MIGRATE_URL`
+at the owner. Verified locally on PostgreSQL 18.3: 155 files / 1489 tests, all
+passing, with the app connected as a role RLS genuinely applies to.
+
+Note for anyone writing fixtures: the migrations apply **FORCE ROW LEVEL
+SECURITY**, so the policies bind the table *owner* as well. Plain RLS exempts
+the owner; FORCE does not. DDL is unaffected — which is why `prisma migrate
+deploy` runs fine as the owner while its DML would not.
 
 `DATABASE_URL` = runtime role (`spv_app`, non-superuser).
 `DATABASE_MIGRATE_URL` = owner role (`spv`), used only by the PRE_DEPLOY job.

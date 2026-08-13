@@ -148,6 +148,42 @@ Two files were checked and deliberately left alone: `jobs/service.ts` and
 Nothing proved the app can still read its **own** rows once RLS is real. Both
 halves matter and only one was tested.
 
+### T0-8 · The audit chain calls `digest()` from pgcrypto, which no migration ever installed — **FIXED**
+
+**Found by standing a real de-privileged Postgres up and running the actual code
+against it** — something this repo had never done.
+
+`audit_logs_hash_chain()` and `audit_logs_verify()` hash every row with
+`encode(digest(payload,'sha256'),'hex')`. `digest()` is not built in; it comes
+from **pgcrypto**. Six call sites across three migrations, and not one of them
+runs `CREATE EXTENSION pgcrypto`. The only extension the chain creates is
+`pg_trgm`, for search.
+
+Two things kept it invisible, and they compound:
+
+1. **PL/pgSQL bodies are not resolved at CREATE time, only at EXECUTE time.**
+   The whole migration chain applies to a virgin database and reports success.
+   The failure waits for the first `INSERT` into `audit_logs`, which answers
+   `42883: function digest(text, unknown) does not exist`.
+2. **`writeAudit` catches its own errors by design** — correctly, so an audit
+   failure can never take down the business operation that triggered it. But
+   with (1), the tamper-evident audit trail is simply empty and nothing says so.
+
+Every unit test mocks Prisma, so none could see it. Stacked on T0-7, the audit
+trail would have been dead twice over.
+
+Fixed by `20991231236008_pgcrypto_for_audit_chain`. Postgres 11+ does have a
+built-in `sha256(bytea)`, but switching to it changes how every `entry_hash` is
+computed, and a subtly wrong text→bytea encoding would silently invalidate
+existing chains rather than fail loudly. Installing the extension the code
+already expects changes no hash, is idempotent, is on DigitalOcean's supported
+list, and the PRE_DEPLOY job runs as the owner. If the role ever cannot create
+it, the migration fails at deploy and the deployment aborts — the right failure.
+
+`tests/migration-extension-deps.spec.ts` is the guard: it scans the migrations
+for calls to functions that only exist inside an extension and requires that
+extension to be created. No database needed.
+
 ### T0-1 · KEK rotation destroyed all encrypted PII — **FIXED**
 `src/config/kms.ts:94` (was)
 
