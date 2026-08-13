@@ -645,19 +645,54 @@ scoping, so a COUNSELLOR gets a tenant-wide financial total.
 
 ## Tier 4 — configuration with outsized blast radius
 
-### T4-1 · Health check probed an endpoint that checks nothing — **FIXED**
-Moved to `/readyz`, after confirming `/readyz` 503s only on the DB probe so an
-absent Redis cannot turn it into a deploy blocker. Also stopped `/readyz`
-echoing the driver error, which leaked DB host/port/role on a route that is
-unauthenticated and is now the public platform probe.
+> ### ⚠ `.do/app.yaml` IS NOT THE SOURCE OF TRUTH — read before trusting T4-1/T4-2
+>
+> Verified against the running app on 2026-08-13: the live App Platform spec is
+> managed in the DigitalOcean console and **does not track the repo file**. The
+> two differ today:
+>
+> | Setting | Repo `.do/app.yaml` | **Live spec** |
+> |---|---|---|
+> | backend `health_check.http_path` | `/api/v1/health/readyz` | **`/api/v1/health/livez`** |
+> | `REDIS_URL` | removed | **`redis://localhost:6379`** |
+>
+> So T4-1 and T4-2 are fixed **in the repo and inert in production**. I marked
+> them FIXED on the strength of the committed file without confirming the change
+> reached the running system, and that was wrong — editing a config file is not
+> the same as changing a deployment.
+>
+> Live consequences, right now:
+> - The platform still promotes on `/livez`, which returns 200 unconditionally.
+>   The readiness gate built for T4-4 runs and passes, but **the platform is not
+>   using it as the promotion gate**, so a deploy with a broken `DATABASE_URL`
+>   would still be promoted healthy.
+> - Rate limiting runs per-process while the config claims Redis, and `redis_up`
+>   sits at 0, so an alert on that gauge would page continuously.
+>
+> Both need an edit to the **live spec**, which is a production configuration
+> change and therefore an operator decision, not something to apply unilaterally.
+
+### T4-1 · Health check probed an endpoint that checks nothing — **FIXED IN REPO, NOT LIVE**
+Moved to `/readyz` in `.do/app.yaml`, after confirming `/readyz` 503s only on the
+DB probe so an absent Redis cannot turn it into a deploy blocker. Also stopped
+`/readyz` echoing the driver error, which leaked DB host/port/role on a route
+that is unauthenticated and is now the public platform probe. **That last part
+did ship** — it is application code. The health-check path did not: see the
+warning above.
 
 ### T4-1-ORIGINAL · (superseded)
 `.do/app.yaml` → `/livez`, which returns `{status:'ok'}` unconditionally.
 `/readyz` probes the DB and nothing uses it. A deploy with a bad `DATABASE_URL`
 is promoted as healthy while every request 500s.
 
-### T4-2 · `REDIS_URL` dummy degraded every Redis-backed control — **FIXED**
-Made genuinely optional and the dummy removed. The placeholder was not inert:
+### T4-2 · `REDIS_URL` dummy degraded every Redis-backed control — **PARTLY FIXED; DUMMY STILL LIVE**
+The env-schema half shipped (application code): `REDIS_URL` is genuinely
+optional now, which is what unblocked CI. The **dummy value is still set in the
+live spec** (`redis://localhost:6379`), so every consequence below is still
+true in production — confirmed by `/readyz` reporting `redis: unavailable`.
+See the warning at the top of this tier.
+
+The placeholder was not inert:
 `server.ts` gates its multi-replica MFA-replay warning on
 `!process.env.REDIS_URL`, so a fake value permanently silenced the one warning
 that says scaling past one instance breaks TOTP anti-replay and splits every
