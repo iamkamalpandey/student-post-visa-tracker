@@ -3,9 +3,10 @@
 Goal: a live production system. This is the ordered path, what is already done,
 and the exact commands for the steps only a human can run.
 
-**Read this before touching production.** Steps 1 and 2 are blocking — the
-deploy pipeline currently cannot succeed, and skipping straight to "deploy" will
-fail at the PRE_DEPLOY job.
+**Read this before touching production.** Step 1 is DONE — the P3009 blockage
+was cleared on 2026-08-13 and deploys now succeed. Step 2 (`SENTRY_DSN`) is
+still open: the variable is not present in the live spec at all, so the app runs
+with error tracking silently disabled.
 
 ---
 
@@ -40,9 +41,9 @@ Two live-spec items remain open and are called out under Step 2 and Step 4.
 | Migration chain replays from empty | **GREEN** — verified again on a virgin PostgreSQL 18.3 |
 | **App works under the de-privileged role** | **GREEN** — see below; this was never tested before and hid two P0s |
 | CI runs real migrations | **GREEN** |
-| Deploy pipeline can run | **BLOCKED** — step 1 |
-| Error tracking receives events | **BLOCKED** — step 2 |
-| Health check detects a bad deploy | **FIXED** — was probing `/livez`, now `/readyz` |
+| Deploy pipeline can run | **LIVE** — P3009 cleared, 58 migrations applied, deploys succeeding |
+| Error tracking receives events | **STILL BLOCKED** — `SENTRY_DSN` is absent from the live spec entirely (verified 2026-08-13) |
+| Health check detects a bad deploy | **NO** — live spec still probes `/livez`; confirmed in runtime logs. Operator declined the change; see Step 4 |
 | Rate limiting honest about Redis | **LIVE** — dummy `REDIS_URL` removed from the live spec; `/readyz` reports `redis: not_configured` |
 | Restore from backup tested | **DONE 2026-08-13** — RTO 429s, RPO 0 rows (step 6) |
 | Alerting / on-call | **NOT DONE** — step 7 |
@@ -162,10 +163,22 @@ Deploy from `main`. The PRE_DEPLOY job runs migrations first; if it fails, the
 deployment aborts and the previous version keeps serving — that is the intended
 behaviour and the reason step 1 matters.
 
-The platform health check now probes `/api/v1/health/readyz`, which executes
-`SELECT 1` and returns 503 on failure. Previously it probed `/livez`, which
-returns 200 unconditionally, so a deploy with a bad `DATABASE_URL` would have
-been promoted as healthy while every request 500'd.
+**The platform health check still probes `/api/v1/health/livez`**, which returns
+200 unconditionally. Verified in the live spec and in runtime logs
+(`kube-probe` hitting `/livez` every 10s). `.do/app.yaml` in this repo says
+`/readyz`, but the live spec is managed in the DigitalOcean console and does not
+track that file — see the warning in the QA register's Tier 4.
+
+So a deploy with a bad `DATABASE_URL`, or one whose RLS role cannot be verified,
+would still be promoted as healthy. The `/readyz` readiness gate is real and
+passing, but it is an application-level control the platform does not consult.
+
+Changing it was offered and **deliberately declined by the operator** on
+2026-08-13, on the grounds that `/readyz` 503s on DB failure *and* on an
+unproven RLS role, so a transient blip could cycle instances rather than merely
+log. That is a legitimate trade. To adopt it later, set
+`services[].health_check.http_path` to `/api/v1/health/readyz` in the live
+spec.
 
 **Rollback** is the DigitalOcean "Rollback" action to the previous deployment.
 Migrations are forward-only — a rollback of the app does NOT revert schema, so
