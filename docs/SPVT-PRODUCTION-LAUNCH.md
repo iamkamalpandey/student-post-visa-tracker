@@ -43,8 +43,8 @@ Two live-spec items remain open and are called out under Step 2 and Step 4.
 | Deploy pipeline can run | **BLOCKED** — step 1 |
 | Error tracking receives events | **BLOCKED** — step 2 |
 | Health check detects a bad deploy | **FIXED** — was probing `/livez`, now `/readyz` |
-| Rate limiting honest about Redis | **FIXED** — dummy `REDIS_URL` removed |
-| Restore from backup tested | **NOT DONE** — step 6 |
+| Rate limiting honest about Redis | **LIVE** — dummy `REDIS_URL` removed from the live spec; `/readyz` reports `redis: not_configured` |
+| Restore from backup tested | **DONE 2026-08-13** — RTO 429s, RPO 0 rows (step 6) |
 | Alerting / on-call | **NOT DONE** — step 7 |
 
 ---
@@ -188,16 +188,46 @@ codebase, which is why they are on the list.
 - [ ] Upload a document, then download it
 - [ ] Confirm a Sentry event appears for a deliberately triggered error
 
-## Step 6 — Backup and restore (NOT DONE — do not claim otherwise)
+## Step 6 — Backup and restore — **DRILL PERFORMED 2026-08-13, MEASURED**
 
-DigitalOcean managed Postgres takes automatic daily backups. **No restore has
-ever been performed**, so the recovery time is unknown and the backups are
-unverified. Untested backups are not backups.
+Executed end to end: a real restore into a separate cluster, verified against
+the source, then destroyed. Numbers below are measured, not estimated.
 
-Before carrying real customer data:
-1. Restore the latest snapshot into a scratch database
-2. Point a staging deploy at it and confirm the app boots and serves
-3. Record the measured RPO and RTO here
+| Metric | Measured |
+|---|---|
+| **RTO** (request → online, verified cluster) | **429 s ≈ 7 min 9 s** |
+| **RPO** (data lost vs. the moment of request) | **0 rows** |
+
+**Method** (repeat with these exact commands):
+
+```bash
+doctl databases create spvt-restoredrill --engine pg --version 16 \
+  --size db-s-1vcpu-1gb --region blr1 --num-nodes 1 \
+  --restore-from-cluster-name spvt-db
+```
+
+Then compare source vs restored and destroy:
+
+```bash
+doctl databases delete <restored-cluster-id> --force
+```
+
+**Verified equal** between source and restored: applied migrations (58),
+tables (114), RLS policies (105), tenants, users, and the presence of
+`pgcrypto`. `audit_logs` differed by 4 rows — all four written **after** the
+fork was requested, and nothing at all was written between the restored
+high-water mark (05:09:52Z) and the request (05:22:29Z). So the fork captured
+everything that existed when it was asked for.
+
+**Correction to an earlier estimate in this document.** I first read RPO off the
+daily backup list (13:11 UTC) and called it "~16 hours". That was wrong:
+`--restore-from-cluster-name` performs a point-in-time fork from continuous WAL,
+not a restore of last night's snapshot. The observed recovery point was current
+to the second the request was made.
+
+**Still not proven by this drill:** that the *application* boots against a
+restored cluster. The drill verified the data; pointing a staging deploy at it
+is a separate step and remains untested.
 
 ## Step 7 — Alerting (NOT DONE)
 
