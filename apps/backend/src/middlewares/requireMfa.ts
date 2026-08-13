@@ -34,7 +34,7 @@
 //       at boot if NODE_ENV=production and SPV_ALLOW_SINGLE_REPLICA != true.
 
 import type { Request, Response, NextFunction } from 'express';
-import { prisma } from '../config/db.js';
+import { prisma, prismaAdmin } from '../config/db.js';
 import { decryptField } from '../shared/encryption.js';
 import { verifyTotp } from '../modules/auth/auth.totp.js';
 import { writeAudit } from '../shared/audit.js';
@@ -264,7 +264,12 @@ async function runRequireMfa(
     if (!req.user) return next(Unauthorized());
 
     const userId = req.user.sub;
-    const user = await prisma.user.findUnique({
+    // SVT-SEC-2026-08 (T0-7) — prismaAdmin. `users` is RLS-scoped and this
+    // gate runs as an authentication primitive keyed by the session's own user
+    // id, before tenantContext has set the GUC. On the singleton it returned
+    // null under the production role and every MFA-gated route answered
+    // "Invalid session" — locking admins out of exactly the routes MFA protects.
+    const user = await prismaAdmin.user.findUnique({
       where: { id: userId },
       select: { id: true, tenant_id: true, role: true, mfa_enabled: true, mfa_secret_enc: true },
     });
@@ -297,7 +302,10 @@ async function runRequireMfa(
       if (user.role === 'ADMIN') {
         let policyOn = false;
         try {
-          const tenant = await prisma.tenant.findUnique({
+          // Same reason: `tenants` is RLS-scoped (`id = app_current_tenant()`).
+          // A null here silently read as "policy off", quietly disabling the
+          // require-MFA-for-admins enforcement this block exists to apply.
+          const tenant = await prismaAdmin.tenant.findUnique({
             where: { id: user.tenant_id },
             select: { require_mfa_for_admins: true },
           });

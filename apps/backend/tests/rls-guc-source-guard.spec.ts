@@ -140,14 +140,8 @@ describe('T0-7 — jobs must not touch tenant tables on the GUC-less singleton',
   }
 });
 
-// The same defect class outside src/jobs. These files were verified by hand and
-// converted; the assertions below stop them drifting back.
-//
-// Not yet swept, and deliberately not asserted here so this guard stays honest
-// about what it covers: exports.service.ts, imports.service.ts, and a handful of
-// single-call sites (comms webhooks/unsubscribe routes, billing/middleware.ts,
-// dsar/controller.ts, interview-prep/controller.ts, jobs/service.ts,
-// requireMfa.ts). Tracked in the register under T0-7.
+// The same defect class outside src/jobs. Every file below was verified by hand
+// and converted; these assertions stop them drifting back.
 describe('T0-7 — converted request-path files must not regress', () => {
   const CONVERTED: Array<{ file: string; why: string }> = [
     {
@@ -157,6 +151,10 @@ describe('T0-7 — converted request-path files must not regress', () => {
         'singleton they returned null, which the call sites treat as "not authorised" — ' +
         'failing closed, but 403ing every COUNSELLOR out of every child resource. ' +
         'prismaAdmin remains correct for the auth primitives (denylist, idle bump).',
+    },
+    {
+      file: 'src/middlewares/requireMfa.ts',
+      why: 'the MFA gate answered "Invalid session" for everyone, locking admins out of exactly the routes MFA protects.',
     },
     {
       file: 'src/modules/users/users.service.ts',
@@ -169,6 +167,34 @@ describe('T0-7 — converted request-path files must not regress', () => {
     {
       file: 'src/modules/auth/mfa.service.ts',
       why: 'auth-domain primitives keyed by the session user id; converted to the adminDb idiom auth.service.ts already uses.',
+    },
+    {
+      file: 'src/modules/exports/exports.service.ts',
+      why: 'counts returned 0 and the row stream yielded nothing, so exports produced empty files and jobs never left RUNNING.',
+    },
+    {
+      file: 'src/modules/imports/imports.service.ts',
+      why: 'import_jobs reads returned nothing and writes failed the WITH CHECK; bulk import did not work at all.',
+    },
+    {
+      file: 'src/modules/billing/middleware.ts',
+      why: 'billing_enabled read as false and was then CACHED, 403ing the whole billing surface for the TTL.',
+    },
+    {
+      file: 'src/modules/dsar/controller.ts',
+      why: 'every completed DSAR export answered 404.',
+    },
+    {
+      file: 'src/modules/interview-prep/controller.ts',
+      why: 'public token routes: every question set came back empty and valid links reported "Invalid access token".',
+    },
+    {
+      file: 'src/modules/comms/webhooks.routes.ts',
+      why: 'bounce/complaint suppression silently never happened — invisible until sender reputation drops.',
+    },
+    {
+      file: 'src/modules/comms/unsubscribe.routes.ts',
+      why: 'unsubscribes silently did nothing, hidden behind the anti-enumeration "silently succeed" branch.',
     },
   ];
 

@@ -44,7 +44,17 @@ vi.mock('../src/config/db.js', () => {
       }),
     },
   };
-  return { prisma, disconnectDb: async () => undefined };
+
+  // SVT-SEC-2026-08 (T0-7) — these paths now scope their queries: cross-tenant
+  // discovery reads use prismaAdmin, and everything with a known tenant runs
+  // inside withTenantTx, which opens a transaction and sets the app.tenant_id
+  // GUC first. Without the GUC the RLS policies match zero rows under the
+  // production role, so the code silently did nothing.
+  (prisma as Record<string, unknown>)['$transaction'] =
+    vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+  (prisma as Record<string, unknown>)['$executeRaw'] = vi.fn(async () => 1);
+
+  return { prisma, prismaAdmin: prisma, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({

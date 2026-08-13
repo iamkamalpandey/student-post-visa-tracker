@@ -20,7 +20,8 @@
 
 import { Router, type Request, type Response } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { prisma } from '../../config/db.js';
+import { prismaAdmin } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { writeAudit } from '../../shared/audit.js';
@@ -61,16 +62,23 @@ export function buildUnsubscribeUrl(baseUrl: string, userId: string): string {
 
 async function applyUnsubscribe(userId: string, ctx: { ip?: string; ua?: string }): Promise<void> {
   try {
-    const user = await prisma.user.findFirst({
+    // SVT-SEC-2026-08 (T0-7) — prismaAdmin. A one-click unsubscribe link carries
+    // a signed user id and nothing else: no session, no tenant to scope to
+    // before the row is read. On the singleton this returned null under the
+    // production role and every unsubscribe silently did nothing — the
+    // anti-enumeration "silently succeed" branch made it indistinguishable from
+    // success, while the user kept receiving mail they had opted out of.
+    const user = await prismaAdmin.user.findFirst({
       where: { id: userId, deleted_at: null },
       select: { id: true, tenant_id: true, notifications_email_enabled: true },
     });
     if (!user) return; // anti-enumeration: silently succeed
     if (user.notifications_email_enabled === false) return; // already unsubscribed
-    await prisma.user.update({
+    // Scoped to the tenant that owns the row we just found.
+    await withTenantTx(user.tenant_id, (tx) => tx.user.update({
       where: { id: user.id },
       data: { notifications_email_enabled: false },
-    });
+    }));
     await writeAudit({
       action: 'comms.unsubscribed',
       entityType: 'user',

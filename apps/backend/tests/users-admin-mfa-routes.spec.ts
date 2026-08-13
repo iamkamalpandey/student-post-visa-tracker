@@ -72,7 +72,16 @@ vi.mock('../src/config/db.js', () => {
     vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
   (prisma as Record<string, unknown>)['$executeRaw'] = vi.fn(async () => 1);
 
-  return { prisma, disconnectDb: async () => undefined };
+  // SVT-SEC-2026-08 (T0-7) — requireMfa reads the actor (and the tenant policy
+  // flag) through the BYPASS-RLS client: `users` and `tenants` are RLS-scoped
+  // and the gate runs before tenantContext sets the GUC, so on the plain
+  // singleton it answered "Invalid session" for everyone — locking admins out
+  // of exactly the routes MFA protects. Pointing prismaAdmin at the same store
+  // keeps the fixture honest about which rows exist.
+  (prisma as Record<string, unknown>)['tenant'] = {
+    findUnique: async () => ({ require_mfa_for_admins: false }),
+  };
+  return { prisma, prismaAdmin: prisma, disconnectDb: async () => undefined };
 });
 
 vi.mock('../src/shared/audit.js', () => ({ writeAudit: vi.fn(async () => undefined) }));

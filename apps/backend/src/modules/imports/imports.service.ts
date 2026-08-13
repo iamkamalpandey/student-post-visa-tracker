@@ -26,7 +26,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { writeAudit } from '../../shared/audit.js';
-import { prisma } from '../../config/db.js';
+// SVT-SEC-2026-08 (T0-7) — `import_jobs` is RLS-scoped and the tenant GUC is
+// only set inside the request client or withTenantTx. On the bare singleton
+// every read here returned nothing and every write failed the WITH CHECK under
+// the production role, so bulk import did not work at all. Each call carries
+// ctx.tenantId already, so scoping is a direct wrap.
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { getStorage } from '../documents/storage.js';
 import { BadRequest, NotFound, Conflict } from '../../shared/errors.js';
 import { withIdempotency, SCOPE_IMPORTS_APPLY, type PrismaLike } from '../../shared/idempotency.js';
@@ -120,7 +125,7 @@ export async function startImport(
     }
   }
 
-  const job = await prisma.importJob.create({
+  const job = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.create({
     data: {
       id: jobId,
       tenant_id: ctx.tenantId,
@@ -132,7 +137,7 @@ export async function startImport(
       mapping_json: suggested,
       created_by_id: ctx.userId,
     },
-  });
+  }));
 
   await writeAudit({
     tenantId: ctx.tenantId,
@@ -160,9 +165,9 @@ export async function startImport(
 // getStatus / getReport / cancel
 // ----------------------------------------------------------------------------
 export async function getStatus(ctx: ImportCtx, jobId: string) {
-  const job = await prisma.importJob.findFirst({
+  const job = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.findFirst({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
   if (!job) throw NotFound('Import job not found');
   // SVT-SEC-2026-05 — import payloads often contain unmasked student PII.
   // Counsellors must not read another counsellor's import job (incl. its
@@ -182,15 +187,20 @@ export async function getReport(ctx: ImportCtx, jobId: string) {
   const rows = await parseByExt(buf, ext);
   const mapping = (job.mapping_json as Record<string, string>) ?? {};
 
-  // Use the singleton client for the report-time lookups; the report endpoint
-  // is a pure read of pre-validated rows + a few cheap probe queries.
-  const summary = await runDryRun({
-    resource: job.resource as ImportResource,
-    rows,
-    mapping,
-    tenantId: ctx.tenantId,
-    db: prisma as unknown as PrismaClient,
-  });
+  // SVT-SEC-2026-08 (T0-7) — the note here used to read "use the singleton
+  // client for the report-time lookups". The validator resolves tenant
+  // reference data (institutions, programs, stages) to check the rows, and on
+  // the GUC-less singleton every one of those probes came back empty under the
+  // production role — so the report declared every lookup value invalid.
+  const summary = await withTenantTx(ctx.tenantId, (tx) =>
+    runDryRun({
+      resource: job.resource as ImportResource,
+      rows,
+      mapping,
+      tenantId: ctx.tenantId,
+      db: tx as unknown as PrismaClient,
+    }),
+  );
 
   // Persist the JSONL error report (for /errors.jsonl).
   // Defence-in-depth: pin the updates to (id, tenant_id) via updateMany so
@@ -203,10 +213,10 @@ export async function getReport(ctx: ImportCtx, jobId: string) {
     await getStorage().put(errKey, Buffer.from(lines, 'utf8'), 'application/x-ndjson');
     data.error_report_key = errKey;
   }
-  const r = await prisma.importJob.updateMany({
+  const r = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.updateMany({
     where: { id: jobId, tenant_id: ctx.tenantId },
     data,
-  });
+  }));
   if (r.count !== 1) throw NotFound('Import job not found');
 
   return {
@@ -225,14 +235,14 @@ export async function cancel(ctx: ImportCtx, jobId: string) {
   if (job.status === 'COMPLETED') throw Conflict('Cannot cancel a completed job');
   // Defence-in-depth: pin the update to (id, tenant_id) so the write is
   // tenant-scoped even if a future code path skips getStatus().
-  const r = await prisma.importJob.updateMany({
+  const r = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.updateMany({
     where: { id: jobId, tenant_id: ctx.tenantId },
     data: { status: 'CANCELLED', completed_at: new Date() },
-  });
+  }));
   if (r.count !== 1) throw NotFound('Import job not found');
-  const updated = await prisma.importJob.findFirstOrThrow({
+  const updated = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.findFirstOrThrow({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
   await writeAudit({
     tenantId: ctx.tenantId,
     actorId: ctx.userId,
@@ -264,7 +274,10 @@ export async function apply(
   // Prefer the RLS-scoped client attached by tenantContext middleware so all
   // idempotency_records reads/writes carry the correct app.tenant_id GUC.
   // Fall back to the singleton for code paths that don't go through HTTP.
-  const db: PrismaLike = (req.db as unknown as PrismaLike) ?? (prisma as unknown as PrismaLike);
+  // T0-7: no silent singleton fallback. idempotency_records is RLS-scoped, so
+  // a GUC-less client reads nothing and writes nothing — which for an
+  // idempotency table means the guard quietly stops guarding.
+  const db: PrismaLike = req.db as unknown as PrismaLike;
 
   // Canonical hash of the request: jobId + body. Anything else (headers, IP)
   // is intentionally excluded so a legit retry from a different host still
@@ -315,7 +328,7 @@ async function doApply(
 
   // Defence-in-depth: pin update to (id, tenant_id) via updateMany.
   {
-    const r = await prisma.importJob.updateMany({
+    const r = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.updateMany({
       where: { id: jobId, tenant_id: ctx.tenantId },
       data: {
         status: 'APPLYING',
@@ -324,7 +337,7 @@ async function doApply(
         webhook_url: body.webhook_url ?? null,
         row_total: rows.length,
       },
-    });
+    }));
     if (r.count !== 1) throw NotFound('Import job not found');
   }
 
@@ -342,7 +355,7 @@ async function doApply(
     const end = Math.min(start + CHUNK, rows.length);
     const slice = rows.slice(start, end);
     try {
-      await prisma.$transaction(async (tx) => {
+      await withTenantTx(ctx.tenantId, async (tx) => {
         const txClient = tx as unknown as PrismaClient;
         for (let k = 0; k < slice.length; k++) {
           const rowNumber = start + k + 1;
@@ -410,7 +423,7 @@ async function doApply(
 
     // Persist running counters so /status is live.
     // Defence-in-depth: pin to (id, tenant_id) via updateMany.
-    const r = await prisma.importJob.updateMany({
+    const r = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.updateMany({
       where: { id: jobId, tenant_id: ctx.tenantId },
       data: {
         row_processed: processed,
@@ -419,7 +432,7 @@ async function doApply(
         row_skipped: skipped,
         row_failed: failed,
       },
-    });
+    }));
     if (r.count !== 1) throw NotFound('Import job not found');
   }
 
@@ -430,19 +443,19 @@ async function doApply(
 
   // Defence-in-depth: pin to (id, tenant_id) via updateMany then re-read.
   {
-    const r = await prisma.importJob.updateMany({
+    const r = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.updateMany({
       where: { id: jobId, tenant_id: ctx.tenantId },
       data: {
         status: 'COMPLETED',
         completed_at: new Date(),
         result_key: resultKey,
       },
-    });
+    }));
     if (r.count !== 1) throw NotFound('Import job not found');
   }
-  const finalJob = await prisma.importJob.findFirstOrThrow({
+  const finalJob = await withTenantTx(ctx.tenantId, (tx) => tx.importJob.findFirstOrThrow({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
 
   const responseBody: ApplyResultBody = {
     job: finalJob,

@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type {
   CreateInterviewQuestionRequest,
   UpdateInterviewQuestionRequest,
@@ -9,7 +9,11 @@ import type {
 } from '@spv/zod-schemas';
 import { Conflict, NotFound, UnprocessableEntity } from '../../shared/errors.js';
 
-type DB = PrismaClient;
+// SVT-SEC-2026-08 (T0-7) — callers pass either the request-scoped client or a
+// withTenantTx transaction client, because these tables are RLS-scoped and the
+// GUC is only set inside one of those. Widened from PrismaClient so the
+// transaction client is accepted.
+type DB = PrismaClient | Prisma.TransactionClient;
 
 function isUniqueViolation(err: unknown): boolean {
   return (err as { code?: string })?.code === 'P2002';
@@ -275,7 +279,11 @@ export async function submitAnswers(
     }),
   );
 
-  await db.$transaction(upserts);
+  // SVT-SEC-2026-08 (T0-7) — `db` may now be a transaction client (callers wrap
+  // in withTenantTx so the RLS GUC is set), and a transaction client has no
+  // $transaction of its own. Awaiting the upserts in order gives the same
+  // atomicity, because the caller's transaction is already the enclosing one.
+  for (const upsert of upserts) await upsert;
 
   const answeredCount = await db.interviewAnswer.count({ where: { attempt_id: attemptId } });
   await db.interviewAttempt.update({

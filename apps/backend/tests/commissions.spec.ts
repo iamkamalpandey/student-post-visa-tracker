@@ -415,7 +415,25 @@ vi.mock('../src/config/db.js', () => ({
     // SVT-QA-2026-08 — `authenticate` reads User.sessions_valid_from through the
     // BYPASS-RLS client (it runs before tenantContext sets the tenant GUC) and
     // fails CLOSED when the lookup throws. null = "no revocation on record".
-    user: { findUnique: async () => ({ sessions_valid_from: null }) },
+    //
+    // SVT-SEC-2026-08 (T0-7) — requireMfa now reads the actor through this same
+    // client, for the same reason: `users` is RLS-scoped and the gate runs
+    // before the GUC exists, so on the plain singleton it answered "Invalid
+    // session" for everyone. The row therefore has to carry the MFA fields too,
+    // not just sessions_valid_from.
+    user: {
+      findUnique: async ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        tenant_id: TENANT_A,
+        role: where.id === COUNSELLOR_ID ? ('COUNSELLOR' as const) : ('ADMIN' as const),
+        mfa_enabled: true,
+        mfa_secret_enc: Buffer.from('TESTSECRET', 'utf8'),
+        sessions_valid_from: null,
+      }),
+    },
+    // requireMfa's admin-policy branch reads the tenant flag through the same
+    // client; `tenants` is RLS-scoped with `id = app_current_tenant()`.
+    tenant: { findUnique: async () => ({ require_mfa_for_admins: false }) },
   },
   disconnectDb: async () => undefined,
 }));

@@ -5,7 +5,7 @@ import { writeAudit } from '../../shared/audit.js';
 import { Forbidden, NotFound } from '../../shared/errors.js';
 import { getStorage } from '../documents/storage.js';
 import { dsarService as svc, signExportDownload, _consumeExportNonce } from './service.js';
-import { prisma } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 
 export const dsarController = {
   async create(req: Request, res: Response, next: NextFunction) {
@@ -49,10 +49,18 @@ export const dsarController = {
     try {
       const id = req.params['id']!;
       const tenantId = req.user!.tid;
-      const row = await prisma.dSARRequest.findFirst({
-        where: { id, tenant_id: tenantId },
-        select: { id: true, status: true, type: true, export_storage_key: true },
-      });
+      // SVT-SEC-2026-08 (T0-7) — dsar_requests is RLS-scoped; the singleton has
+      // no tenant GUC, so this returned null under the production role and every
+      // completed DSAR export answered 404.
+      const row = req.db
+        ? await req.db.dSARRequest.findFirst({
+            where: { id, tenant_id: tenantId },
+            select: { id: true, status: true, type: true, export_storage_key: true },
+          })
+        : await withTenantTx(tenantId, (tx) => tx.dSARRequest.findFirst({
+            where: { id, tenant_id: tenantId },
+            select: { id: true, status: true, type: true, export_storage_key: true },
+          }));
       if (!row) throw NotFound('DSAR request not found');
       if (row.status !== 'COMPLETED') throw Forbidden('Export only available once DSAR is COMPLETED');
       if (!(row.type === 'ACCESS' || row.type === 'PORTABILITY')) {

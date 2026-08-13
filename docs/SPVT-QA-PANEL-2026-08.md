@@ -86,11 +86,42 @@ fails the `WITH CHECK`, and `writeAudit` swallows its own errors by design. The
 tamper-evident chain this product sells as forensic integrity would have
 recorded nothing but system rows.
 
+**And past the jobs entirely.** The same class runs through request-path code,
+where it is just as silent. Everything below was verified by hand and converted:
+
+| Surface | What silently broke |
+|---|---|
+| `middlewares/auth.ts` | the ownership gates — `assertStudentOwnership`, `requireLeadOwnership` and 18 child resolvers. Reads returned null, which the call sites treat as "not authorised": **fails closed**, no leak, but every COUNSELLOR 403'd out of every child resource. ADMIN short-circuits before the lookup, so admin-only testing shows the app working. |
+| `middlewares/auth.ts` (`bumpIdleStamp`) | `last_used_at` never advanced, so every active session looked idle and users were signed out mid-work |
+| `middlewares/requireMfa.ts` | answered "Invalid session" for everyone, locking admins out of exactly the routes MFA protects |
+| `users.service.ts` | every method but `list()` — user administration did not work at all |
+| `mfa.service.ts` | MFA enrolment, verify, disable and recovery all failed |
+| `exports.service.ts` | counts returned 0 and the row stream yielded nothing: empty files, jobs stuck RUNNING |
+| `imports.service.ts` | reads empty, writes rejected — bulk import did not work |
+| `billing/middleware.ts` | `billing_enabled` read false and was then **cached**, 403ing the billing surface for the TTL |
+| `dsar/controller.ts` | every completed DSAR export answered 404 |
+| `interview-prep/controller.ts` | public token routes: empty question sets, valid links reporting "Invalid access token" |
+| `comms/webhooks.routes.ts` | bounce/complaint suppression never happened — invisible until sender reputation drops |
+| `comms/unsubscribe.routes.ts` | unsubscribes did nothing, hidden behind the anti-enumeration "silently succeed" branch |
+
 **Fixed.** Cross-tenant discovery reads (which tenants exist, which have overdue
-work) go through `prismaAdmin` and are greppable as deliberate; everything
-per-tenant runs inside `withTenantTx` — the pattern `commsDispatcher`,
-`commsDigest` and `v2Ingest` already used, and the one the reclose migration
-prescribes. `audit.ts` routes tenant rows through `withTenantTx`, which is still
+work, which tenant owns this job) go through `prismaAdmin` and are greppable as
+deliberate; everything per-tenant runs inside `withTenantTx` — the pattern
+`commsDispatcher`, `commsDigest` and `v2Ingest` already used, and the one the
+reclose migration prescribes. Auth-domain primitives keyed by the session's own
+user id (MFA, the idle stamp, the MFA gate) use the `adminDb` idiom
+`auth.service.ts` already established, since they run before any tenant context
+exists.
+
+One design point worth keeping: in `users.service.ts` the old fallback for a
+missing client was the bare singleton, so a caller who forgot to pass `db` was
+silently wrong. The new `scoped()` helper falls back to `withTenantTx` instead —
+forgetting to thread `req.db` now costs one extra transaction rather than an
+empty result set. **A default that is merely slower beats a default that is
+quietly incorrect.** I got this wrong once mid-fix: the controller's actor-MFA
+lookup initially fell back to `null`, which reads as "actor has no MFA" and
+turned a defence-in-depth check into a hard block on every role change. An
+existing test caught it. `audit.ts` routes tenant rows through `withTenantTx`, which is still
 an independent transaction so the survives-a-rollback property is preserved
 exactly; system rows keep the plain path and land via the `tenant_id IS NULL`
 branch. That also makes the DB trigger *correct* rather than merely permitted:

@@ -12,7 +12,7 @@ import type {
 import { Unauthorized, BadRequest } from '../../shared/errors.js';
 import { writeAudit } from '../../shared/audit.js';
 import { runIdempotent } from '../../shared/idempotencyHandler.js';
-import { prisma } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import * as service from './service.js';
 import { verifyPrepToken } from './token.js';
 
@@ -139,10 +139,14 @@ export async function publicValidateToken(req: Request, res: Response, next: Nex
     if (!token) throw BadRequest('Missing access token');
     const payload = await verifyPrepToken(token);
 
-    const tenant = await prisma.tenant.findUnique({
+    // SVT-SEC-2026-08 (T0-7) — public token route: there is no session and so
+    // no tenantContext, but the token names its tenant. Scope to it rather than
+    // using the GUC-less singleton, which returned null under the production
+    // role and made every valid prep link report "Invalid access token".
+    const tenant = await withTenantTx(payload.tid, (tx) => tx.tenant.findUnique({
       where: { id: payload.tid },
       select: { id: true, name: true },
-    });
+    }));
     if (!tenant) throw BadRequest('Invalid access token');
 
     res.json({ tenant_id: tenant.id, tenant_name: tenant.name });
@@ -156,14 +160,22 @@ export async function publicStartTest(req: Request, res: Response, next: NextFun
     const payload = await verifyPrepToken(token);
 
     const body = req.body as InterviewPrepStartRequest;
-    const { questions, institution_id } = await service.buildQuestionSet(prisma, payload.tid, body);
+    // SVT-SEC-2026-08 (T0-7) — the interview_* tables are RLS-scoped and this
+    // is a public token route with no session, so nothing sets the GUC. Passing
+    // the bare singleton meant every question set came back empty under the
+    // production role and the page reported "No questions available".
+    const { questions, institution_id } = await withTenantTx(payload.tid, (tx) =>
+      service.buildQuestionSet(tx, payload.tid, body),
+    );
 
     if (questions.length === 0) {
       res.json({ attempt: null, questions: [], message: 'No questions available for this configuration.' });
       return;
     }
 
-    const attempt = await service.createAttempt(prisma, payload.tid, body, questions.length, institution_id);
+    const attempt = await withTenantTx(payload.tid, (tx) =>
+      service.createAttempt(tx, payload.tid, body, questions.length, institution_id),
+    );
 
     // Return questions without revealing institution_id (proprietary system stance)
     const sanitized = questions.map((q) => ({
@@ -184,7 +196,9 @@ export async function publicSubmitAnswers(req: Request, res: Response, next: Nex
 
     const attemptId = req.params['attemptId']!;
     const body = req.body as InterviewPrepSubmitBatchRequest;
-    const result = await service.submitAnswers(prisma, payload.tid, attemptId, body.answers);
+    const result = await withTenantTx(payload.tid, (tx) =>
+      service.submitAnswers(tx, payload.tid, attemptId, body.answers),
+    );
     res.json(result);
   } catch (err) { next(err); }
 }
@@ -196,7 +210,9 @@ export async function publicCompleteAttempt(req: Request, res: Response, next: N
     const payload = await verifyPrepToken(token);
 
     const attemptId = req.params['attemptId']!;
-    const result = await service.completeAttempt(prisma, payload.tid, attemptId);
+    const result = await withTenantTx(payload.tid, (tx) =>
+      service.completeAttempt(tx, payload.tid, attemptId),
+    );
     res.json(result);
   } catch (err) { next(err); }
 }

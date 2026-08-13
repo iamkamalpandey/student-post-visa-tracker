@@ -7,7 +7,16 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../../config/db.js';
+import { prismaAdmin } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
+
+// SVT-SEC-2026-08 (T0-7) — every table this module touches is RLS-scoped, and
+// the tenant GUC is only set inside the request client or withTenantTx. On the
+// bare singleton the counts all returned 0, the row stream yielded nothing, and
+// exportJob writes failed the WITH CHECK under the production role — so exports
+// produced empty files and jobs never left RUNNING. Each call already carries a
+// tenantId, so scoping is a direct wrap.
+const scoped = withTenantTx;
 import { getStorage } from '../documents/storage.js';
 import { writeAudit } from '../../shared/audit.js';
 import { Forbidden, NotFound, PayloadTooLarge } from '../../shared/errors.js';
@@ -83,7 +92,7 @@ async function estimateExportBytes(
     const ids = Array.isArray(filter['ids'])
       ? (filter['ids'] as unknown[]).filter((v): v is string => typeof v === 'string')
       : undefined;
-    where = (await buildStudentListWhere(prisma as never, tenantId, {
+    where = (await scoped(tenantId, (tx) => buildStudentListWhere(tx as never, tenantId, {
       stage_id: typeof filter['stage_id'] === 'string' ? filter['stage_id'] : undefined,
       status: typeof filter['status'] === 'string' ? (filter['status'] as never) : undefined,
       assigned_to_id:
@@ -91,21 +100,21 @@ async function estimateExportBytes(
       ...(slaBreached ? { sla_breached: true as const } : {}),
       search: typeof filter['search'] === 'string' ? filter['search'] : undefined,
       ...(ids && ids.length > 0 ? { ids } : {}),
-    })) as Record<string, unknown>;
-    rowCount = await prisma.student.count({ where: where as Prisma.StudentWhereInput });
+    }))) as Record<string, unknown>;
+    rowCount = await scoped(tenantId, (tx) => tx.student.count({ where: where as Prisma.StudentWhereInput }));
   } else if (resource === 'institutions') {
-    rowCount = await prisma.institution.count({ where: where as Prisma.InstitutionWhereInput });
+    rowCount = await scoped(tenantId, (tx) => tx.institution.count({ where: where as Prisma.InstitutionWhereInput }));
   } else if (resource === 'programs') {
-    rowCount = await prisma.program.count({ where: where as Prisma.ProgramWhereInput });
+    rowCount = await scoped(tenantId, (tx) => tx.program.count({ where: where as Prisma.ProgramWhereInput }));
   } else if (resource === 'enrollments') {
-    rowCount = await prisma.enrollment.count({ where: where as Prisma.EnrollmentWhereInput });
+    rowCount = await scoped(tenantId, (tx) => tx.enrollment.count({ where: where as Prisma.EnrollmentWhereInput }));
   } else if (resource === 'program_fees') {
     // ProgramFee — tenancy is reachable only via program_intake.program.
     // Mirror the where clause used by streamRows so the estimate matches
     // the eventual row set.
-    rowCount = await prisma.programFee.count({
+    rowCount = await scoped(tenantId, (tx) => tx.programFee.count({
       where: { program_intake: { program: { tenant_id: tenantId, deleted_at: null } } } as Prisma.ProgramFeeWhereInput,
-    });
+    }));
   }
 
   const perRow = AVG_ROW_BYTES[resource] ?? DEFAULT_AVG_ROW_BYTES;
@@ -205,7 +214,7 @@ export async function enqueueExport(ctx: ExportCtx, req: CreateExportRequest) {
     );
   }
 
-  const job = await prisma.exportJob.create({
+  const job = await scoped(ctx.tenantId, (tx) => tx.exportJob.create({
     data: {
       tenant_id: ctx.tenantId,
       resource: req.resource,
@@ -216,7 +225,7 @@ export async function enqueueExport(ctx: ExportCtx, req: CreateExportRequest) {
       status: 'QUEUED',
       created_by_id: ctx.userId,
     },
-  });
+  }));
 
   await writeAudit({
     tenantId: ctx.tenantId,
@@ -243,13 +252,15 @@ export async function enqueueExport(ctx: ExportCtx, req: CreateExportRequest) {
 // runExport
 // ----------------------------------------------------------------------------
 export async function runExport(jobId: string): Promise<void> {
-  const job = await prisma.exportJob.findUnique({ where: { id: jobId } });
+  // T0-7: this lookup is how we LEARN the tenant, so it is inherently
+  // cross-tenant and uses the admin client; everything after it is scoped.
+  const job = await prismaAdmin.exportJob.findUnique({ where: { id: jobId } });
   if (!job) return;
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
-  await prisma.exportJob.updateMany({
+  await scoped(job.tenant_id, (tx) => tx.exportJob.updateMany({
     where: { id: jobId, tenant_id: job.tenant_id },
     data: { status: 'RUNNING' },
-  });
+  }));
 
   try {
     const tenantId = job.tenant_id;
@@ -312,7 +323,7 @@ export async function runExport(jobId: string): Promise<void> {
     const sha = hash.digest('hex');
 
     // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
-    await prisma.exportJob.updateMany({
+    await scoped(job.tenant_id, (tx) => tx.exportJob.updateMany({
       where: { id: jobId, tenant_id: job.tenant_id },
       data: {
         status: 'COMPLETED',
@@ -322,16 +333,16 @@ export async function runExport(jobId: string): Promise<void> {
         completed_at: new Date(),
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
-    });
+    }));
   } catch (err) {
     // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
-    await prisma.exportJob.updateMany({
+    await scoped(job.tenant_id, (tx) => tx.exportJob.updateMany({
       where: { id: jobId, tenant_id: job.tenant_id },
       data: {
         status: 'FAILED',
         completed_at: new Date(),
       },
-    });
+    }));
     // Best-effort audit; don't rethrow because there is no caller to handle it.
     await writeAudit({
       tenantId: job.tenant_id,
@@ -348,9 +359,9 @@ export async function runExport(jobId: string): Promise<void> {
 // signedDownload
 // ----------------------------------------------------------------------------
 export async function signedDownload(ctx: ExportCtx, jobId: string) {
-  const job = await prisma.exportJob.findFirst({
+  const job = await scoped(ctx.tenantId, (tx) => tx.exportJob.findFirst({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
   if (!job) throw NotFound('Export job not found');
   if (job.status !== 'COMPLETED') {
     return { url: null, expires_at: null, status: job.status };
@@ -361,9 +372,9 @@ export async function signedDownload(ctx: ExportCtx, jobId: string) {
 }
 
 export async function getJob(ctx: ExportCtx, jobId: string) {
-  const job = await prisma.exportJob.findFirst({
+  const job = await scoped(ctx.tenantId, (tx) => tx.exportJob.findFirst({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
   if (!job) throw NotFound('Export job not found');
   return job;
 }
@@ -377,18 +388,18 @@ export async function cancelJob(ctx: ExportCtx, jobId: string) {
     return job;
   }
   // SVT-RLS-2026-05: ensure tenant_id in where for defence-in-depth.
-  const wr = await prisma.exportJob.updateMany({
+  const wr = await scoped(ctx.tenantId, (tx) => tx.exportJob.updateMany({
     where: { id: jobId, tenant_id: ctx.tenantId },
     data: { status: 'FAILED', completed_at: new Date() },
-  });
+  }));
   if (wr.count !== 1) throw NotFound('Export job not found');
-  return prisma.exportJob.findFirstOrThrow({
+  return scoped(ctx.tenantId, (tx) => tx.exportJob.findFirstOrThrow({
     where: { id: jobId, tenant_id: ctx.tenantId },
-  });
+  }));
 }
 
 export async function streamFor(tenantId: string, jobId: string) {
-  const job = await prisma.exportJob.findFirst({ where: { id: jobId, tenant_id: tenantId } });
+  const job = await scoped(tenantId, (tx) => tx.exportJob.findFirst({ where: { id: jobId, tenant_id: tenantId } }));
   if (!job) throw NotFound('Export job not found');
   if (job.status !== 'COMPLETED' || !job.storage_key) throw NotFound('Export not ready');
   const buf = await getStorage().get(job.storage_key);
@@ -478,7 +489,7 @@ async function* streamRows(
         ? (filter['ids'] as unknown[]).filter((v): v is string => typeof v === 'string')
         : undefined;
       const slaBreached = filter['sla_breached'] === true || filter['sla_breached'] === 'true';
-      const studentWhere = await buildStudentListWhere(prisma as never, tenantId, {
+      const studentWhere = await scoped(tenantId, (tx) => buildStudentListWhere(tx as never, tenantId, {
         stage_id: typeof filter['stage_id'] === 'string' ? filter['stage_id'] : undefined,
         status: typeof filter['status'] === 'string' ? (filter['status'] as never) : undefined,
         assigned_to_id:
@@ -486,7 +497,7 @@ async function* streamRows(
         ...(slaBreached ? { sla_breached: true as const } : {}),
         search: typeof filter['search'] === 'string' ? filter['search'] : undefined,
         ...(ids && ids.length > 0 ? { ids } : {}),
-      });
+      }));
       where = studentWhere as Record<string, unknown>;
     } else if (typeof filter['status'] === 'string') {
       // Other resources still honour only `status`; their list screens do not
@@ -507,17 +518,20 @@ async function* streamRows(
 
     let rows: unknown[] = [];
     if (resource === 'students') {
-      rows = await prisma.student.findMany({
+      // T0-7: one scoped transaction per page. The generator yields between
+      // pages, so a single long-lived transaction spanning the whole stream
+      // would hold a connection for the entire export.
+      rows = await scoped(tenantId, (tx) => tx.student.findMany({
         where: where as Prisma.StudentWhereInput,
         orderBy: { id: 'asc' },
         take: PAGE,
-      });
+      }));
     } else if (resource === 'institutions') {
-      rows = await prisma.institution.findMany({ where: where as Prisma.InstitutionWhereInput, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await scoped(tenantId, (tx) => tx.institution.findMany({ where: where as Prisma.InstitutionWhereInput, orderBy: { id: 'asc' }, take: PAGE }));
     } else if (resource === 'programs') {
-      rows = await prisma.program.findMany({ where: where as Prisma.ProgramWhereInput, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await scoped(tenantId, (tx) => tx.program.findMany({ where: where as Prisma.ProgramWhereInput, orderBy: { id: 'asc' }, take: PAGE }));
     } else if (resource === 'enrollments') {
-      rows = await prisma.enrollment.findMany({ where: where as Prisma.EnrollmentWhereInput, orderBy: { id: 'asc' }, take: PAGE });
+      rows = await scoped(tenantId, (tx) => tx.enrollment.findMany({ where: where as Prisma.EnrollmentWhereInput, orderBy: { id: 'asc' }, take: PAGE }));
     } else if (resource === 'program_fees') {
       // REGRESSION GUARD: ProgramFee has no direct tenant_id column; tenancy is
       // reachable only via program_intake.program.tenant_id. The previous
@@ -529,11 +543,11 @@ async function* streamRows(
         program_intake: { program: { tenant_id: tenantId, deleted_at: null } },
       };
       if (cursorId) feeWhere['id'] = { gt: cursorId };
-      rows = await prisma.programFee.findMany({
+      rows = await scoped(tenantId, (tx) => tx.programFee.findMany({
         where: feeWhere as Prisma.ProgramFeeWhereInput,
         orderBy: { id: 'asc' },
         take: PAGE,
-      });
+      }));
     }
     if (rows.length === 0) break;
 

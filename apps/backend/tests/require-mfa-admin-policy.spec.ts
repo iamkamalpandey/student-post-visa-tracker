@@ -45,8 +45,12 @@ const store = {
   tenant: null as TenantRow | null,
 };
 
+// SVT-SEC-2026-08 (T0-7) — requireMfa now reads `users` and `tenants`
+// through prismaAdmin: both are RLS-scoped and the gate runs before
+// tenantContext sets the GUC, so on the singleton it answered
+// "Invalid session" for everyone.
 vi.mock('../src/config/db.js', () => ({
-  prisma: {
+  prismaAdmin: {
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         store.user && store.user.id === where.id ? store.user : null),

@@ -10,7 +10,7 @@
 // invalidation already wires /tenants/me; the BE cache TTL is 60s).
 
 import type { NextFunction, Request, Response } from 'express';
-import { prisma } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { NotFound, Unauthorized } from '../../shared/errors.js';
 import { logger } from '../../config/logger.js';
 
@@ -25,10 +25,14 @@ async function isBillingEnabled(tenantId: string): Promise<boolean> {
   const hit = cache.get(tenantId);
   if (hit && Date.now() - hit.cachedAt < CACHE_TTL_MS) return hit.enabled;
   try {
-    const row = await prisma.tenant.findFirst({
+    // SVT-SEC-2026-08 (T0-7) — `tenants` is RLS-scoped (`id = app_current_tenant()`).
+    // On the singleton this returned null under the production role, so
+    // `billing_enabled` read as false and the whole billing surface 403'd — and
+    // the result was then CACHED for the TTL, so it stuck.
+    const row = await withTenantTx(tenantId, (tx) => tx.tenant.findFirst({
       where: { id: tenantId },
       select: { billing_enabled: true },
-    });
+    }));
     const enabled = row?.billing_enabled === true;
     cache.set(tenantId, { enabled, cachedAt: Date.now() });
     return enabled;

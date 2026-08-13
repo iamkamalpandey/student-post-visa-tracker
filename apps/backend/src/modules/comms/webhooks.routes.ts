@@ -31,7 +31,8 @@
 
 import { Router, type Request, type Response, raw as rawBody } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { prisma } from '../../config/db.js';
+import { prismaAdmin } from '../../config/db.js';
+import { withTenantTx } from '../../shared/tenantTx.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../config/logger.js';
 import { writeAudit } from '../../shared/audit.js';
@@ -113,17 +114,24 @@ function verifySignature(req: Request, bodyBuf: Buffer): boolean {
 
 async function suppress(email: string, source: 'bounced' | 'complained'): Promise<void> {
   const norm = email.trim().toLowerCase();
-  const users = await prisma.user.findMany({
+  // SVT-SEC-2026-08 (T0-7) — prismaAdmin. This is an unauthenticated provider
+  // callback: there is no session and no tenant, and the same address can exist
+  // in more than one tenant, so the lookup is inherently cross-tenant. On the
+  // GUC-less singleton it returned an empty list under the production role, so
+  // bounce and spam-complaint suppression silently never happened — the fastest
+  // route to a poor sender reputation, and invisible until deliverability drops.
+  const users = await prismaAdmin.user.findMany({
     where: { email: norm, deleted_at: null },
     select: { id: true, tenant_id: true, notifications_email_enabled: true },
   });
   for (const user of users) {
     if (!user.notifications_email_enabled) continue;
     try {
-      await prisma.user.update({
+      // Scoped to the tenant that owns the row we just found.
+      await withTenantTx(user.tenant_id, (tx) => tx.user.update({
         where: { id: user.id },
         data: { notifications_email_enabled: false },
-      });
+      }));
       await writeAudit({
         action: source === 'bounced' ? 'comms.bounced' : 'comms.spam_complaint',
         entityType: 'user',
